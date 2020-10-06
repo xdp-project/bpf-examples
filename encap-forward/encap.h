@@ -1,0 +1,62 @@
+#define NEXTHDR_IPV6		41
+
+
+static void encap_ipv6(volatile void *data, volatile void *data_end)
+{
+	volatile struct ipv6hdr *ip6h;
+	size_t len;
+
+	struct ipv6hdr encap_hdr = {
+		.version = 6,
+		.nexthdr = NEXTHDR_IPV6,
+		.hop_limit = 16,
+		.saddr = { .s6_addr = { 0xfc, 0x00, 0xde, 0xad, 0xca, 0xfe,
+					0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x02 } },
+		.daddr = { .s6_addr = { 0xfc, 0x00, 0xde, 0xad, 0xca, 0xfe,
+					0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x01 } },
+	};
+
+	ip6h = data + sizeof(struct ethhdr);
+	if (ip6h + 1 > data_end)
+		return;
+
+	*ip6h = encap_hdr;
+
+	len = (data_end - data);
+	ip6h->payload_len = bpf_htons(len - sizeof(struct ethhdr) - sizeof(*ip6h));
+}
+
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
+	__u32 sum;
+	sum = (csum >> 16) + (csum & 0xffff);
+	sum += (sum >> 16);
+	return ~sum;
+}
+
+static void encap_ipv4(volatile void *data, volatile void *data_end)
+{
+	volatile struct iphdr *iph;
+	size_t len;
+
+	struct iphdr encap_hdr = {
+		.version = 4,
+		.ihl = 5,
+		.protocol = NEXTHDR_IPV6,
+		.ttl = 16,
+		.saddr = bpf_htonl(0x0a0b0202),
+		.daddr = bpf_htonl(0x0a0b0201),
+	};
+
+	iph = data + sizeof(struct ethhdr);
+	if (iph + 1 > data_end)
+		return;
+
+	*iph = encap_hdr;
+
+	len = (data_end - data);
+	iph->tot_len = bpf_htons(len - sizeof(struct ethhdr));
+	iph->check = csum_fold_helper(bpf_csum_diff((__be32 *)iph, 0, (__be32 *)iph, sizeof(*iph), 0));
+}

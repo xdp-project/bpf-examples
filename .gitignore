@@ -1,0 +1,5 @@
+config.mk
+.ccls-cache
+compile_commands.json
+*.ll
+*.o
