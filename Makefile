@@ -16,7 +16,7 @@ endif
 SUBDIRS := encap-forward
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
 
-all: $(SUBDIRS)
+all: lib $(SUBDIRS)
 
 lib: config.mk check_submodule
 	@echo; echo $@; $(MAKE) -C $@
