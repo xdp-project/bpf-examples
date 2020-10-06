@@ -20,8 +20,9 @@ SEC("classifier") int tc_encap(struct __sk_buff *skb)
 //	encap_ipv6(ctx);
 	encap_ipv4(data, data_end);
 
-	if (bpf_skb_change_type(skb, PACKET_OTHERHOST))
-		goto out;
+	/* proposed new helper for skipping source validation:
+	bpf_skb_set_source_valid(skb, 1); */
+
 	ret = BPF_OK;
 out:
 	return ret;
