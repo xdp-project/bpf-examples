@@ -1,0 +1,40 @@
+#+OPTIONS: ^:nil
+
+* BPF encapsulation and forward example
+
+This example demonstrates a particular oddness around encapsulation and
+forwarding of packets in BPF:
+
+If a BPF-based ingress filter (TC or XDP) wants to encapsulate and forward a
+packet but reuse the kernel FIB for routing, it'll need to pass the packet up
+the stack to do neighbour discovery if there is no cached neighbour in the
+routing table.
+
+In this case, the kernel will treat IPv4 and IPv6 differently: For IPv6 (as the
+outer encapsulation), things will just work, but for IPv4, the rp_filter and
+accept_local sysctls will affect how the packet is treated. If the encapsulation
+is done in XDP, the packet is likely to be discarded by rp_filter on the ingress
+interface. The BPF ingress filter seems to run after the rp_filter check, but
+here accept_local will discard the packet (assuming the source address of the
+encapsulated packet matches a local address of the host, which is the underlying
+assumption).
+
+** Seeing this in action
+
+The examples in this directory contain XDP and TC BPF implementations of a naive
+encapsulation scheme with hard-coded IP addresses. By default, the example is
+compiled with IPv4 encapsulation, which will cause the encapsulated packets to
+be dropped as described above. Compile with =make IPV6=1= to instead use IPv6
+encapsulation.
+
+Run the =setup-test.sh= script to run a simple test in a network namespace.
+It'll set up two virtual interfaces into the namespace, and install the
+encapsulation program on one of them. Then a ping from the host will be run on
+one of those veth interfaces, and tcpdump will be started on the other; if
+forwarding is successful, the encapsulated ping packets should show up on the
+second interface (which it does with IPv6 encapsulation, or if the accept_local
+sysctl is changed in the setup script). Run =setup-test.sh teardown= to remove
+the test setup again.
+
+Note that the example uses iproute2 to load the BPF programs, which results in
+(harmless) errors due to iproute2 not supporting BTF.
