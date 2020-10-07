@@ -1,6 +1,6 @@
 #define NEXTHDR_IPV6		41
 
-
+#ifdef IPV6
 static void encap_ipv6(volatile void *data, volatile void *data_end)
 {
 	volatile struct ipv6hdr *ip6h;
@@ -27,6 +27,7 @@ static void encap_ipv6(volatile void *data, volatile void *data_end)
 	len = (data_end - data);
 	ip6h->payload_len = bpf_htons(len - sizeof(struct ethhdr) - sizeof(*ip6h));
 }
+#else
 
 static __always_inline __u16 csum_fold_helper(__u32 csum)
 {
@@ -60,3 +61,5 @@ static void encap_ipv4(volatile void *data, volatile void *data_end)
 	iph->tot_len = bpf_htons(len - sizeof(struct ethhdr));
 	iph->check = csum_fold_helper(bpf_csum_diff((__be32 *)iph, 0, (__be32 *)iph, sizeof(*iph), 0));
 }
+
+#endif

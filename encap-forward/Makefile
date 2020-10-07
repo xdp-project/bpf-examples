@@ -3,6 +3,7 @@
 USER_TARGETS :=
 BPF_TARGETS := xdp_encap tc_bpf_encap
 EXTRA_DEPS := encap.h
+EXTRA_CFLAGS := $(if $(IPV6),-DIPV6)
 
 LIB_DIR = ../lib
 
