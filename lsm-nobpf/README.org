@@ -17,4 +17,6 @@ mountpoint (or protecting it in some other way) serves as a way to make this
 permanent. Alternatively, the userspace program can keep running and hold on to
 the link FD to prevent detachment.
 
-To use, just compile and run =./lsm-nobpf= as root.
+To use, just compile and run =./lsm-nobpf= as root. Note that you need to build
+the BPF LSM (CONFIG_BPF_LSM=y) *and* enable it in the running kernel (include
+'bpf' in =CONFIG_LSM= at compile time, or by the =lsm= kernel parameter at boot).
