@@ -13,7 +13,7 @@ ifeq ($(VERBOSE),0)
 MAKEFLAGS += --no-print-directory
 endif
 
-SUBDIRS := encap-forward
+SUBDIRS := encap-forward lsm-nobpf
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
 
 all: lib $(SUBDIRS)

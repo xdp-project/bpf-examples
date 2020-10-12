@@ -1,0 +1,20 @@
+#+OPTIONS: ^:nil
+
+* BPF security module to disable BPF
+
+This module demonstrates how to write a BPF security module that will attach to
+the bpf LSM hook and disable any further use of the bpf() syscall.
+
+This works by just attaching to the 'bpf' LSM hook, which will be called on
+every bpf() syscall, and returning -EACCES. To have the attachment stick
+around, we need to pin the bpf_link of the attachment of the BPF program itself,
+so we use a global variable to allow a single BPF_OBJ_PIN operation after the
+program is attached.
+
+The example userspace program pins the attachment at =/sys/fs/bpf/lsm-nobpf=, so
+removing this file serves as a way to re-enable the syscall. Hiding this
+mountpoint (or protecting it in some other way) serves as a way to make this
+permanent. Alternatively, the userspace program can keep running and hold on to
+the link FD to prevent detachment.
+
+To use, just compile and run =./lsm-nobpf= as root.
