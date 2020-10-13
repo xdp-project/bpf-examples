@@ -17,6 +17,9 @@
 #define OFFSET sizeof(struct iphdr)
 #define ENCAP_TYPE BPF_F_ADJ_ROOM_ENCAP_L3_IPV4
 
+static unsigned int global_cnt = 0;
+static int global_cnt = 0xFF;
+
 SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 {
 	volatile void *data, *data_end;
@@ -44,6 +47,7 @@ SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 
 	len = (data_end - data);
 	extra_len = pkt_size_l2 - len;
+	// extra_len= sizeof(*iph); /* Adj that does correct IPIP encap */
 
 	if (bpf_skb_adjust_room(skb, extra_len, BPF_ADJ_ROOM_MAC, ENCAP_TYPE))
 		goto out;
@@ -64,6 +68,7 @@ SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 		goto out;
 
 	eth->h_proto = bpf_htons(ETH_P_IP);
+	iph->ttl = global_cnt;
 
 	ret = BPF_OK;
 out:
