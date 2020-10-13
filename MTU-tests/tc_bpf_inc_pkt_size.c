@@ -17,30 +17,28 @@
 #define OFFSET sizeof(struct iphdr)
 #define ENCAP_TYPE BPF_F_ADJ_ROOM_ENCAP_L3_IPV4
 
-//static unsigned int global_cnt = 0;
-//static int global_cnt = 0xFF;
+/* The tc tool (iproute2) use another ELF map layout than libbpf, see
+ * struct bpf_elf_map from iproute2, but bpf_map_def from libbpf have
+ * same binary layout until "flags" so use that.
 
-/* iproute2 use another ELF map layout than libbpf.  The PIN_GLOBAL_NS
- * will cause map to be exported to /sys/fs/bpf/tc/globals/
- */
-#define PIN_GLOBAL_NS   2
-struct tc_bpf_elf_map {
-        __u32 type;
-        __u32 size_key;
-        __u32 size_value;
-        __u32 max_elem;
-        __u32 flags;
-        __u32 id;
-        __u32 pinning;
-        __u32 inner_id;
-        __u32 inner_idx;
+struct bpf_elf_map {
+	__u32 type;
+	__u32 size_key;
+	__u32 size_value;
+	__u32 max_elem;
+	__u32 flags;
+	__u32 id;
+	__u32 pinning;
+	__u32 inner_id;
+	__u32 inner_idx;
 };
-
-struct tc_bpf_elf_map SEC("maps") cnt_map = {
+*/
+struct bpf_map_def  SEC("maps") cnt_map = {
 	.type = BPF_MAP_TYPE_ARRAY,
-	.size_key = sizeof(__u32),
-	.size_value = sizeof(__u64),
-	.max_elem = 1,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u64),
+	.max_entries = 1,
+	.map_flags = 0,
 };
 
 /* LLVM maps __sync_fetch_and_add() as a built-in function to the BPF atomic add
@@ -64,8 +62,7 @@ SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 
 	cnt = bpf_map_lookup_elem(&cnt_map, &key);
 	if (!cnt)
-		return BPF_DROP;
-//		goto out;
+		goto out;
 
 	/* Desired packet size at L2 */
 	int pkt_size_l2 = PKT_SIZE_L3 + sizeof(*eth) ;
@@ -94,8 +91,8 @@ SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 	// as it's only my patched kernel that drop the MTU check
 
 	/* Multiple CPUs can access cnt_map, use an atomic operation */
-//        lock_xadd(cnt, 1);
-	*cnt = 42;
+        lock_xadd(cnt, 1);
+//	*cnt = 42;
 
 	/* Most re-load after bpf_skb_adjust_room() */
 	data     = (void *)(long)skb->data;
@@ -110,7 +107,7 @@ SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 		goto out;
 
 	eth->h_proto = bpf_htons(ETH_P_IP);
-//	iph->ttl = global_cnt;
+	iph->ttl = (*cnt & 0xFF);
 
 	ret = BPF_OK;
 out:
