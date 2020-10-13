@@ -2,6 +2,7 @@
 #include <linux/in6.h>
 #include <bpf/bpf_helpers.h>
 #include <xdp/parsing_helpers.h>
+#include "encap.h"
 
 /* MTU is defined as L3 size (usually 1500 for Ethernet),
  * but remember TC (and XDP) operate at L2.
@@ -53,6 +54,9 @@ SEC("classifier") int tc_inc_pkt_sz(struct __sk_buff *skb)
 	/* Most re-load after bpf_skb_adjust_room() */
 	data     = (void *)(long)skb->data;
 	data_end = (void *)(long)skb->data_end;
+
+	/* Add IP-header with IPIP */
+	encap_ipv4_ipip(data, data_end);
 
 	eth = (void *)data;
 	iph = (void *)(eth +1);
