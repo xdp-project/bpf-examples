@@ -1,0 +1,25 @@
+#+OPTIONS: ^:nil
+
+* BPF testing packet size changes
+
+Playing with increasing packet size with TC-BPF. Testing what happens when
+sending packets larger that MTU out an interface.
+
+* Notes loading BPF object
+
+How to manually load TC program:
+
+#+begin_src sh
+export DEV=mlx5p1
+tc qdisc del dev "$DEV" clsact # Also deletes all filters
+tc qdisc add dev "$DEV" clsact
+tc filter add dev "$DEV" pref 1 handle 1 egress bpf da obj tc_bpf_inc_pkt_size.o
+tc filter show dev "$DEV" egress
+#+end_src
+
+Be *VERY* careful with =replace= command, it MUST have same =pref= +=handle=:
+
+#+begin_src sh
+tc filter replace dev "$DEV" pref 1 handle 1 egress bpf da obj tc_bpf_inc_pkt_size.o
+#+end_src
+
