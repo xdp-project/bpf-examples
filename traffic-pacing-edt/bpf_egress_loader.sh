@@ -1,18 +1,17 @@
 #!/bin/bash
 #
+# Author: Jesper Dangaaard Brouer <netoptimizer@brouer.com>
+# License: GPLv2
 #
 basedir=`dirname $0`
 source ${basedir}/functions.sh
 
 root_check_run_with_sudo "$@"
 
-export TC=/sbin/tc
-VERBOSE=1
+# Use common parameters
+source ${basedir}/parameters.sh
 
-DEV=$1
-if [[ -z "$DEV" ]]; then
-    err 1 "Must specify DEV as argument"
-fi
+export TC=/sbin/tc
 
 # TODO: take this as input
 BPF_OBJ=edt_pacer01.o
