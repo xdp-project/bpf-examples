@@ -18,6 +18,15 @@ BPF_OBJ=edt_pacer01.o
 
 info "Applying TC-BPF egress setup on device: $DEV with object file: $BPF_OBJ"
 
+function tc_remove_clsact()
+{
+    local device=${1:-$DEV}
+    shift
+
+    # Removing qdisc clsact, also deletes all filters
+    call_tc_allow_fail qdisc del dev "$device" clsact 2> /dev/null
+}
+
 function tc_init_clsact()
 {
     local device=${1:-$DEV}
@@ -49,6 +58,11 @@ function tc_egress_list()
 
     call_tc filter show dev "$device" egress
 }
+
+if [[ -n $REMOVE ]]; then
+    tc_remove_clsact $DEV
+    exit 0
+fi
 
 tc_init_clsact $DEV
 tc_egress_bpf_attach $DEV $BPF_OBJ

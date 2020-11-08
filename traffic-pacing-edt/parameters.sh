@@ -7,10 +7,10 @@
 
 function usage() {
     echo ""
-    echo "Usage: $0 [-vfh] --dev ethX"
+    echo "Usage: $0 [-vh] --dev ethX"
     echo "  -d | --dev     : (\$DEV)        Ingress interface/device (required)"
     echo "  -v | --verbose : (\$VERBOSE)    verbose"
-    echo "  --flush        : (\$FLUSH)      Only flush (remove TC drop rules)"
+    echo "  --remove       : (\$REMOVE)     Remove the TC rules"
     echo "  --dry-run      : (\$DRYRUN)     Dry-run only (echo tc commands)"
     echo "  -s | --stats   : (\$STATS_ONLY) Call TC statistics command"
     echo "  -l | --list    : (\$LIST)       List TC filter setup after setup"
@@ -18,8 +18,8 @@ function usage() {
 }
 
 # Using external program "getopt" to get --long-options
-OPTIONS=$(getopt -o vfshd:l \
-    --long verbose,dry-run,flush,stats,list,help,dev: -- "$@")
+OPTIONS=$(getopt -o vshd:l \
+    --long verbose,dry-run,remove,stats,list,help,dev: -- "$@")
 if (( $? != 0 )); then
     usage
     err 2 "Error calling getopt"
@@ -45,8 +45,8 @@ while true; do
           info "Dry-run mode: enable VERBOSE and don't call TC" >&2
 	  shift
           ;;
-        -f | --flush )
-          export FLUSH=yes
+        --remove )
+          export REMOVE=yes
 	  shift
           ;;
         -s | --stats )
