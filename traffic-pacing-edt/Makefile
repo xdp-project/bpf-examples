@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 
 USER_TARGETS :=
-BPF_TARGETS := pacer01
+BPF_TARGETS := edt_pacer01
 
 LIB_DIR = ../lib
 
@@ -14,7 +14,7 @@ include $(LIB_DIR)/common.mk
 #  creating maps
 #
 .PHONY: strip_tc_obj
-strip_tc_obj: ${BPF_TARGETS :=.o}
+strip_tc_obj: ${BPF_TARGETS:=.o}
 	$(Q) llvm-strip --no-strip-all --remove-section .BTF $?
 
 all: strip_tc_obj
