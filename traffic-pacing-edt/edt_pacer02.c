@@ -37,6 +37,8 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	if (!edt)
 		return BPF_DROP;
 
+	// FIXME: Warning NON-functional state
+
 	t_xmit_ns = ((__u64)skb->len) * NS_PER_SEC / edt->rate;
 
 	now = bpf_ktime_get_ns();
