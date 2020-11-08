@@ -8,17 +8,18 @@
 function usage() {
     echo ""
     echo "Usage: $0 [-vfh] --dev ethX"
-    echo "  -d | --dev     : (\$DEV)       Ingress interface/device (required)"
-    echo "  -v | --verbose : (\$VERBOSE)   verbose"
-    echo "  --flush        : (\$FLUSH)     Only flush (remove TC drop rules)"
-    echo "  --dry-run      : (\$DRYRUN)    Dry-run only (echo tc commands)"
-    echo "  -s | --stats   : (\$STATS)     Call TC statistics command"
+    echo "  -d | --dev     : (\$DEV)        Ingress interface/device (required)"
+    echo "  -v | --verbose : (\$VERBOSE)    verbose"
+    echo "  --flush        : (\$FLUSH)      Only flush (remove TC drop rules)"
+    echo "  --dry-run      : (\$DRYRUN)     Dry-run only (echo tc commands)"
+    echo "  -s | --stats   : (\$STATS_ONLY) Call TC statistics command"
+    echo "  -l | --list    : (\$LIST)       List TC filter setup after setup"
     echo ""
 }
 
 # Using external program "getopt" to get --long-options
-OPTIONS=$(getopt -o vfshd: \
-    --long verbose,dry-run,flush,stats,help,dev: -- "$@")
+OPTIONS=$(getopt -o vfshd:l \
+    --long verbose,dry-run,flush,stats,list,help,dev: -- "$@")
 if (( $? != 0 )); then
     usage
     err 2 "Error calling getopt"
@@ -50,6 +51,10 @@ while true; do
           ;;
         -s | --stats )
           export STATS_ONLY=yes
+	  shift
+          ;;
+        -l | --list )
+          export LIST=yes
 	  shift
           ;;
 	-- )

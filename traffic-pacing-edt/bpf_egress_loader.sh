@@ -53,5 +53,9 @@ function tc_egress_list()
 tc_init_clsact $DEV
 tc_egress_bpf_attach $DEV $BPF_OBJ
 
-info "Listing egress filter on device"
-tc_egress_list $DEV
+# Practical to list egress filters after setup.
+# (It's a common mistake to have several progs loaded)
+if [[ -n $LIST ]]; then
+    info "Listing egress filter on device"
+    tc_egress_list $DEV
+fi
