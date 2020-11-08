@@ -8,7 +8,7 @@
 function usage() {
     echo ""
     echo "Usage: $0 [-vh] --dev ethX"
-    echo "  -d | --dev     : (\$DEV)        Ingress interface/device (required)"
+    echo "  -d | --dev     : (\$DEV)        Interface/device (required)"
     echo "  -v | --verbose : (\$VERBOSE)    verbose"
     echo "  --remove       : (\$REMOVE)     Remove the TC rules"
     echo "  --dry-run      : (\$DRYRUN)     Dry-run only (echo tc commands)"
@@ -31,7 +31,7 @@ while true; do
     case "$1" in
         -d | --dev ) # device
           export DEV=$2
-	  info "Ingress device set to: DEV=$DEV" >&2
+	  info "Device set to: DEV=$DEV" >&2
 	  shift 2
           ;;
         -v | --verbose)
