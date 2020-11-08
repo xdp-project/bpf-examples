@@ -13,8 +13,11 @@ source ${basedir}/parameters.sh
 
 export TC=/sbin/tc
 
-# TODO: take this as input
-BPF_OBJ=edt_pacer01.o
+# This can be changed via --file or --obj
+if [[ -z ${BPF_OBJ} ]]; then
+    # Fallback default
+    BPF_OBJ=edt_pacer02.o
+fi
 
 info "Applying TC-BPF egress setup on device: $DEV with object file: $BPF_OBJ"
 

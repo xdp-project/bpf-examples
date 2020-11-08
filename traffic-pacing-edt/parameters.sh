@@ -14,12 +14,13 @@ function usage() {
     echo "  --dry-run      : (\$DRYRUN)     Dry-run only (echo tc commands)"
     echo "  -s | --stats   : (\$STATS_ONLY) Call TC statistics command"
     echo "  -l | --list    : (\$LIST)       List TC filter setup after setup"
+    echo "  --file | --obj : (\$BPF_OBJ)    BPF-object file to load"
     echo ""
 }
 
 # Using external program "getopt" to get --long-options
 OPTIONS=$(getopt -o vshd:l \
-    --long verbose,dry-run,remove,stats,list,help,dev: -- "$@")
+    --long verbose,dry-run,remove,stats,list,help,dev:,file:,obj: -- "$@")
 if (( $? != 0 )); then
     usage
     err 2 "Error calling getopt"
@@ -32,6 +33,11 @@ while true; do
         -d | --dev ) # device
           export DEV=$2
 	  info "Device set to: DEV=$DEV" >&2
+	  shift 2
+          ;;
+        --file | --obj )
+          export BPF_OBJ=$2
+	  info "BPF-object file: $BPF_OBJ" >&2
 	  shift 2
           ;;
         -v | --verbose)
