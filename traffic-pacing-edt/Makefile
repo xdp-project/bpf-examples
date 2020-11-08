@@ -2,6 +2,7 @@
 
 USER_TARGETS :=
 BPF_TARGETS := edt_pacer01
+BPF_TARGETS += edt_pacer02
 
 LIB_DIR = ../lib
 
