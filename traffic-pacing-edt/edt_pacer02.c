@@ -53,9 +53,15 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	if (!edt)
 		return BPF_DROP;
 
-	/* Calc transmission time it takes to send packet 'bytes' */
-	t_xmit_ns = ((__u64)skb->len) * NS_PER_SEC / RATE_IN_BYTES;
-	// t_xmit_ns = ((__u64)skb->len) * NS_PER_SEC / edt->rate;
+	/* Calc transmission time it takes to send packet 'bytes'.
+	 *
+	 * Details on getting precise bytes on wire.  The skb->len does include
+	 * length of GRO/GSO segments, but not the segment headers that gets
+	 * added on transmit.  Fortunately skb->wire_len at TC-egress hook (not
+	 * ingress) include these headers. (See: qdisc_pkt_len_init())
+	 */
+	t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / RATE_IN_BYTES;
+	// t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / edt->rate;
 
 	now = bpf_ktime_get_ns();
 

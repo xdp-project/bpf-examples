@@ -37,4 +37,5 @@ for dir in /sys/class/net/$DEV/queues/tx-*; do
     # Details: cause-off-by-one, as tx-0 becomes handle 1:
     ((i++)) || true
     tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq
+    # tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq maxrate 930mbit
 done
