@@ -43,8 +43,14 @@ function tc() {
     _call_tc "" "$@"
 }
 
-# HTB shaper
+# Delete existing root qdisc
 call_tc_allow_fail qdisc del dev "$DEV" root
+
+if [[ -n $REMOVE ]]; then
+    exit 0
+fi
+
+# HTB shaper
 #tc qdisc add dev "$DEV" root handle 1: htb default 2
 tc qdisc add dev "$DEV" root handle 1: htb default 16
 
