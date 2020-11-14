@@ -28,6 +28,10 @@ VERBOSE=1
 # Delete existing root qdisc
 call_tc_allow_fail qdisc del dev "$DEV" root
 
+if [[ -n $REMOVE ]]; then
+    exit 0
+fi
+
 # MQ (Multi-Queue) as root qdisc
 tc qdisc replace dev $DEV root handle 7FFF: mq
 
