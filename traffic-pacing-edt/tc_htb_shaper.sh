@@ -20,11 +20,16 @@ export TC=/sbin/tc
 # Measurements show around 930Mbit best-case.  Q-in-Q result in MTU
 # 1522 bytes.  TCP goodput segments are 1448 bytes.
 #
-RATE=$((930*1522/1448))Mbit
+#RATE=$((930*1522/1448))Mbit
 ##RATE=$((933*1522/1448))Mbit
 ##CEIL=$((999*1522/1448))
 #CEIL=1Gbit
-CEIL=980mbit
+#CEIL=980mbit
+
+# EDT shaper show TCP goodput of 956 Mbit/s.
+#  echo $((956*1514/1448)) = 999
+RATE=999Mbit
+CEIL=1000Mbit
 
 #RATE=500mbit
 #CEIL=577mbit
