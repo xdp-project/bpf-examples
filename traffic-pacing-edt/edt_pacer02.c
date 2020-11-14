@@ -10,6 +10,7 @@ char _license[] SEC("license") = "GPL";
 
 /* skb->len in bytes, thus easier to keep rate in bytes */
 #define RATE_IN_BITS	(1000 * 1000 * 1000ULL)
+//#define RATE_IN_BITS	(200 * 1000 * 1000ULL)
 //#define RATE_IN_BITS	(500 * 1000 * 1000ULL)
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
