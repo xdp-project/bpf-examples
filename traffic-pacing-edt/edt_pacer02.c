@@ -9,10 +9,12 @@ char _license[] SEC("license") = "GPL";
 #define NS_PER_SEC 1000000000
 
 /* skb->len in bytes, thus easier to keep rate in bytes */
-#define RATE_IN_BITS	(1000 * 1000 * 1000)
+#define RATE_IN_BITS	(1000 * 1000 * 1000ULL)
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
-#define T_HORIZON_DROP	(2000 * 1000 * 1000)
+#define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
+//#define T_HORIZON_DROP	(200000 * 1000 * 1000ULL)
+//#define T_HORIZON_DROP	(20 * 1000 * 1000ULL)
 
 /* FIXME add proper READ_ONCE / WRITE_ONCE macros, for now use for annotation */
 #define READ_ONCE(V)		(V)
