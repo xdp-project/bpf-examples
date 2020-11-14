@@ -58,7 +58,13 @@ SEC("classifier") int tc_encap(struct __sk_buff *skb)
 
 		return bpf_redirect(fib_params.ifindex, 0);
 	} else if (ret == BPF_FIB_LKUP_RET_NO_NEIGH) {
-		return bpf_redirect_neigh(fib_params.ifindex, 0);
+		struct bpf_redir_neigh nh_params = {};
+
+		nh_params.nh_family = fib_params.family;
+		__builtin_memcpy(&nh_params.ipv6_nh, &fib_params.ipv6_dst,
+				 sizeof(nh_params.ipv6_nh));
+		return bpf_redirect_neigh(fib_params.ifindex, &nh_params,
+					  sizeof(nh_params), 0);
 	}
 
 #endif
