@@ -12,6 +12,8 @@ char _license[] SEC("license") = "GPL";
 #define RATE_IN_BITS	(1000 * 1000 * 1000)
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
+#define T_HORIZON_DROP	(2000 * 1000 * 1000)
+
 /* FIXME add proper READ_ONCE / WRITE_ONCE macros, for now use for annotation */
 #define READ_ONCE(V)		(V)
 #define WRITE_ONCE(X,V)	(X) = (V)
@@ -40,6 +42,7 @@ struct bpf_elf_map SEC("maps") time_delay_map = {
 static __always_inline int sched_departure(struct __sk_buff *skb)
 {
 	struct edt_val *edt;
+	__u64 t_queue_sz;
 	__u64 t_xmit_ns;
 	__u64 t_next;
 	__u64 t_curr;
@@ -76,7 +79,16 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 		return BPF_OK;
 	}
 
-	// TODO Add horizon
+	/* Calc queue size measured in time */
+	t_queue_sz = t_next - now;
+
+	/* FQ-pacing qdisc also have horizon, but cannot use that, because this
+	 * BPF-prog will have updated map (t_last) on packet and assumes it got
+	 * its part of bandwidth.
+	 */
+	if (t_queue_sz >= T_HORIZON_DROP /* edt->t_horizon_drop */)
+		return BPF_DROP;
+
 	// TODO Add ECN marking horizon
 
 	/* Advance "time queue" */
