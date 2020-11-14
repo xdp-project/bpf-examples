@@ -14,9 +14,9 @@ char _license[] SEC("license") = "GPL";
 //#define RATE_IN_BITS	(500 * 1000 * 1000ULL)
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
-#define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
+//#define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
 //#define T_HORIZON_DROP	(200000 * 1000 * 1000ULL)
-//#define T_HORIZON_DROP	(20 * 1000 * 1000ULL)
+#define T_HORIZON_DROP	(15 * 1000 * 1000ULL)
 
 #define T_HORIZON_ECN	(5 * 1000 * 1000ULL)
 
