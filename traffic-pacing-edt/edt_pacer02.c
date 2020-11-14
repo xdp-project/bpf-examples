@@ -8,6 +8,14 @@ char _license[] SEC("license") = "GPL";
 
 #define NS_PER_SEC 1000000000
 
+/* skb->len in bytes, thus easier to keep rate in bytes */
+#define RATE_IN_BITS	(1000 * 1000 * 1000)
+#define RATE_IN_BYTES	(RATE_IN_BITS / 8)
+
+/* FIXME add proper READ_ONCE / WRITE_ONCE macros, for now use for annotation */
+#define READ_ONCE(V)		(V)
+#define WRITE_ONCE(X,V)	(X) = (V)
+
 struct edt_val {
 	__u64	rate;
 	__u64	t_last;
@@ -26,10 +34,15 @@ struct bpf_elf_map SEC("maps") time_delay_map = {
 	//.pinning	= PIN_GLOBAL_NS,
 };
 
+/* Role of EDT (Earliest Departure Time) is to schedule departure of packets to
+ * be send in the future.
+ */
 static __always_inline int sched_departure(struct __sk_buff *skb)
 {
 	struct edt_val *edt;
 	__u64 t_xmit_ns;
+	__u64 t_next;
+	__u64 t_curr;
 	int key = 0;
 	__u64 now;
 
@@ -37,13 +50,40 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	if (!edt)
 		return BPF_DROP;
 
-	// FIXME: Warning NON-functional state
-
-	t_xmit_ns = ((__u64)skb->len) * NS_PER_SEC / edt->rate;
+	/* Calc transmission time it takes to send packet 'bytes' */
+	t_xmit_ns = ((__u64)skb->len) * NS_PER_SEC / RATE_IN_BYTES;
+	// t_xmit_ns = ((__u64)skb->len) * NS_PER_SEC / edt->rate;
 
 	now = bpf_ktime_get_ns();
-	// XXX: Test helpers and write access to SKB is avail
-	skb->tstamp = now;
+
+	/* Allow others to set skb tstamp prior to us */
+	t_curr  = skb->tstamp;
+	if (t_curr < now)
+		t_curr = now;
+
+	/* The 't_last' timestamp can be in the future. Packets scheduled a head
+	 * of his packet can be seen as the queue size measured in time, via
+	 * correlating this to 'now' timestamp.
+	 */
+	t_next = READ_ONCE(edt->t_last) + t_xmit_ns;
+
+	/* If packet doesn't get scheduled into the future, then there is
+	 * no-queue and we are not above rate limit. Send packet immediately and
+	 * move forward t_last timestamp to now.
+	 */
+	if (t_next <= t_curr) {
+		WRITE_ONCE(edt->t_last, t_curr);
+		return BPF_OK;
+	}
+
+	// TODO Add horizon
+	// TODO Add ECN marking horizon
+
+	/* Advance "time queue" */
+	WRITE_ONCE(edt->t_last, t_next);
+
+	/* Schedule packet to be send at future timestamp */
+	skb->tstamp = t_next;
 	return BPF_OK;
 }
 
