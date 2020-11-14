@@ -10,11 +10,14 @@ char _license[] SEC("license") = "GPL";
 
 /* skb->len in bytes, thus easier to keep rate in bytes */
 #define RATE_IN_BITS	(1000 * 1000 * 1000ULL)
+//#define RATE_IN_BITS	(500 * 1000 * 1000ULL)
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
 #define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
 //#define T_HORIZON_DROP	(200000 * 1000 * 1000ULL)
 //#define T_HORIZON_DROP	(20 * 1000 * 1000ULL)
+
+#define T_HORIZON_ECN	(5 * 1000 * 1000ULL)
 
 /* FIXME add proper READ_ONCE / WRITE_ONCE macros, for now use for annotation */
 #define READ_ONCE(V)		(V)
@@ -97,7 +100,9 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	if (t_queue_sz >= T_HORIZON_DROP /* edt->t_horizon_drop */)
 		return BPF_DROP;
 
-	// TODO Add ECN marking horizon
+	/* ECN marking horizon */
+	if (t_queue_sz >= T_HORIZON_ECN)
+		bpf_skb_ecn_set_ce(skb);
 
 	/* Advance "time queue" */
 	WRITE_ONCE(edt->t_last, t_next);
