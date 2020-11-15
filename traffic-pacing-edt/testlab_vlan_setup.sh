@@ -31,6 +31,21 @@ function create_vlan_device() {
     ip link set ${device}.${vlan} up
 }
 
+function create_vlan_device_802_1ad() {
+    local vlan=${1}
+    local device=${2:-$DEV}
+    shift 2
+
+    if [[ -z "$vlan" ]]; then
+	err 2 "Missing VLAN is as input"
+    fi
+
+    ip link add link "$device" name ${device}.${vlan} type vlan id ${vlan} \
+       protocol 802.1ad
+    ip link set ${device}.${vlan} up
+}
+
+
 function delete_vlan_device() {
     local vlan=${1}
     local device=${2:-$DEV}
@@ -62,3 +77,8 @@ fi
 
 create_vlan_device $OUTER $DEV
 create_vlan_device $INNER ${DEV}.${OUTER}
+
+# Set MTU to handle extra VLAN headers, NICs usually allow one VLAN
+# header even though they have configured MTU 1500.
+ip link set $DEV mtu 1508
+ip link set ${DEV}.${OUTER} mtu 1504
