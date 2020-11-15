@@ -2,8 +2,10 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/compiler.h>
-#include <xdp/parsing_helpers.h>
 #include "iproute2_compat.h"
+
+#define VLAN_MAX_DEPTH 2
+#include <xdp/parsing_helpers.h>
 
 char _license[] SEC("license") = "GPL";
 
@@ -112,25 +114,36 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 
 SEC("classifier") int tc_edt_simple(struct __sk_buff *skb)
 {
-	volatile void *data, *data_end;
-	int ret = BPF_OK;
+	void *data     = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
+	struct collect_vlans vlans = { 0 };
 	struct ethhdr *eth;
+	int ret = BPF_OK;
 
-	data     = (void *)(long)skb->data;
-	data_end = (void *)(long)skb->data_end;
-	eth = (struct ethhdr *)data;
+	/* These keep track of the next header type and iterator pointer */
+	struct hdr_cursor nh;
+	int eth_type;
+	nh.pos = data;
 
-	if (data + sizeof(*eth) > data_end)
-		return BPF_DROP;
+	eth_type = parse_ethhdr_vlan(&nh, data_end, &eth, &vlans);
+	if (eth_type < 0)
+		return XDP_ABORTED;
 
 	/* Keep ARP resolution working */
-	if (eth->h_proto == bpf_htons(ETH_P_ARP)) {
+	if (eth_type == bpf_htons(ETH_P_ARP)) {
 		ret = BPF_OK;
 		goto out;
 	}
 
-	// TODO: match on vlan16 and only apply EDT on that
-	return sched_departure(skb);
+	if (!proto_is_vlan(eth->h_proto)) {
+		/* Skip non-VLAN frames */
+		return BPF_OK;
+	}
+
+	/* Match on vlan16 and only apply EDT on that */
+	// FIXME: handle if VLAN is not inlined in packet
+	if (vlans.id[0] == 16)
+		return sched_departure(skb);
 
  out:
 	return ret;
