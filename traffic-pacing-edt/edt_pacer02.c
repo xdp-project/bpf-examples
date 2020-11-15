@@ -112,7 +112,59 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	return BPF_OK;
 }
 
-SEC("classifier") int tc_edt_simple(struct __sk_buff *skb)
+static __always_inline
+__u16 get_inner_qinq_vlan(struct __sk_buff *skb, struct collect_vlans *vlans)
+{
+	__u16 vlan_key;
+
+	/* NIC can HW "offload" the outer VLAN, moving it to skb context */
+	if (skb->vlan_present)
+		vlan_key = vlans->id[0]; /* Inner vlan placed as first inline */
+	else
+		vlan_key = vlans->id[1]; /* All VLAN headers inline */
+
+	return vlan_key;
+}
+
+static __always_inline
+__u16 get_vlan(struct __sk_buff *skb, struct collect_vlans *vlans)
+{
+	__u16 vlan_key;
+
+	/* Handle extracting VLAN if skb context have VLAN offloaded */
+	if (skb->vlan_present)
+		vlan_key = skb->vlan_tci & VLAN_VID_MASK;
+	else
+		vlan_key = vlans->id[0];
+
+	return vlan_key;
+}
+
+static __always_inline
+__u16 extract_vlan_key(struct __sk_buff *skb, struct collect_vlans *vlans)
+{
+	int QinQ = 0;
+
+	/* The inner VLAN is the key to extract. But it is complicated
+	 * due to NIC "offloaded" VLAN (skb->vlan_present).  In case
+	 * BPF-prog is loaded on outer VLAN net_device, the BPF-prog
+	 * sees the inner-VLAN at the first and only VLAN.
+	 */
+	if (skb->vlan_present) {
+		if (vlans->id[0])
+			QinQ = 1;
+	} else {
+		if (vlans->id[1])
+			QinQ = 1;
+	}
+
+	if (QinQ)
+		return get_inner_qinq_vlan(skb, vlans);
+	else
+		return get_vlan(skb, vlans);
+}
+
+SEC("classifier") int tc_edt_vlan(struct __sk_buff *skb)
 {
 	void *data     = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
@@ -128,7 +180,7 @@ SEC("classifier") int tc_edt_simple(struct __sk_buff *skb)
 
 	eth_type = parse_ethhdr_vlan(&nh, data_end, &eth, &vlans);
 	if (eth_type < 0)
-		return XDP_ABORTED;
+		return BPF_DROP;
 
 	/* Keep ARP resolution working */
 	if (eth_type == bpf_htons(ETH_P_ARP)) {
@@ -141,11 +193,7 @@ SEC("classifier") int tc_edt_simple(struct __sk_buff *skb)
 		return BPF_OK;
 	}
 
-	/* NIC can HW "offload" the outer VLAN, moving it to skb context */
-	if (skb->vlan_present)
-		vlan_key = vlans.id[0]; /* Inner vlan placed as first inline */
-	else
-		vlan_key = vlans.id[1]; /* All VLAN headers inline */
+	vlan_key = extract_vlan_key(skb, &vlans);
 
 	/* For-now: Match on vlan16 and only apply EDT on that */
 	if (vlan_key == 16)
