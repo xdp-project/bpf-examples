@@ -119,6 +119,7 @@ SEC("classifier") int tc_edt_simple(struct __sk_buff *skb)
 	struct collect_vlans vlans = { 0 };
 	struct ethhdr *eth;
 	int ret = BPF_OK;
+	__u16 vlan_key;
 
 	/* These keep track of the next header type and iterator pointer */
 	struct hdr_cursor nh;
@@ -135,14 +136,19 @@ SEC("classifier") int tc_edt_simple(struct __sk_buff *skb)
 		goto out;
 	}
 
-	if (!proto_is_vlan(eth->h_proto)) {
+	if (!proto_is_vlan(eth->h_proto) && !skb->vlan_present) {
 		/* Skip non-VLAN frames */
 		return BPF_OK;
 	}
 
-	/* Match on vlan16 and only apply EDT on that */
-	// FIXME: handle if VLAN is not inlined in packet
-	if (vlans.id[0] == 16)
+	/* NIC can HW "offload" the outer VLAN, moving it to skb context */
+	if (skb->vlan_present)
+		vlan_key = vlans.id[0]; /* Inner vlan placed as first inline */
+	else
+		vlan_key = vlans.id[1]; /* All VLAN headers inline */
+
+	/* For-now: Match on vlan16 and only apply EDT on that */
+	if (vlan_key == 16)
 		return sched_departure(skb);
 
  out:
