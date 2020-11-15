@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/compiler.h>
 #include <xdp/parsing_helpers.h>
 #include "iproute2_compat.h"
 
@@ -19,10 +20,6 @@ char _license[] SEC("license") = "GPL";
 #define T_HORIZON_DROP	(15 * 1000 * 1000ULL)
 
 #define T_HORIZON_ECN	(5 * 1000 * 1000ULL)
-
-/* FIXME add proper READ_ONCE / WRITE_ONCE macros, for now use for annotation */
-#define READ_ONCE(V)		(V)
-#define WRITE_ONCE(X,V)	(X) = (V)
 
 struct edt_val {
 	__u64	rate;
