@@ -26,7 +26,7 @@ struct edt_val {
 	__u64	t_last;
 	__u64	t_horizon_drop;
 	__u64	t_horizon_ecn;
-};
+} __aligned(64); /* Align struct to cache-size to avoid false-sharing */
 
 /* The tc tool (iproute2) use another ELF map layout than libbpf (struct
  * bpf_map_def), see struct bpf_elf_map from iproute2.
