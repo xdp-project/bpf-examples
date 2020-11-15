@@ -15,8 +15,7 @@ source ${basedir}/parameters.sh
 
 export IP=/sbin/ip
 function ip() {
-    echo $IP "$@"
-    $IP "$@"
+    call_ip "$@"
 }
 
 function create_vlan_device() {

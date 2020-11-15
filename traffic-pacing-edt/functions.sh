@@ -62,3 +62,28 @@ function call_tc() {
 function call_tc_allow_fail() {
     _call_tc "allow_fail" "$@"
 }
+
+## -- Wrapper calls for IP --
+function _call_ip() {
+    local allow_fail="$1"
+    shift
+    if [[ -n "$VERBOSE" ]]; then
+	echo "ip $@"
+    fi
+    if [[ -n "$DRYRUN" ]]; then
+	return
+    fi
+    $IP "$@"
+    local status=$?
+    if (( $status != 0 )); then
+	if [[ "$allow_fail" == "" ]]; then
+	    err 3 "Exec error($status) occurred cmd: \"$IP $@\""
+	fi
+    fi
+}
+function call_ip() {
+    _call_ip "" "$@"
+}
+function call_ip_allow_fail() {
+    _call_ip "allow_fail" "$@"
+}
