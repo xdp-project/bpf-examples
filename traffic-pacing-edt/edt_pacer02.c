@@ -137,8 +137,9 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	 * Thus, schedule SKB transmissing as new + t_xmit_ns.
 	 */
 	if (t_next <= t_curr) {
+#if 1
 		__u64 t_curr_next;
-		__u32 min_len = 1538 * 2;
+		__u32 min_len = 1538;
 
 		/* Minimum delay for all packet if no time-queue */
 		wire_len = (wire_len > min_len) ?  wire_len : min_len;
@@ -147,7 +148,11 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 
 		WRITE_ONCE(edt->t_last, t_curr_next);
 		skb->tstamp = t_curr_next;
+#else
+		WRITE_ONCE(edt->t_last, t_curr);
+#endif
 		return BPF_OK;
+
 	}
 
 	/* Calc queue size measured in time */
