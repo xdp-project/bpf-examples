@@ -11,7 +11,7 @@ root_check_run_with_sudo "$@"
 # Use common parameters
 source ${basedir}/parameters.sh
 
-export TC=/sbin/tc
+export TC=tc
 
 # This can be changed via --file or --obj
 if [[ -z ${BPF_OBJ} ]]; then

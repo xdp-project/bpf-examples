@@ -17,10 +17,7 @@ root_check_run_with_sudo "$@"
 # Use common parameters
 source ${basedir}/parameters.sh
 
-export TC=/sbin/tc
-function tc() {
-    _call_tc "" "$@"
-}
+export TC=tc
 
 # Default verbose
 VERBOSE=1
@@ -33,19 +30,19 @@ if [[ -n $REMOVE ]]; then
 fi
 
 # MQ (Multi-Queue) as root qdisc
-tc qdisc replace dev $DEV root handle 7FFF: mq
+call_tc qdisc replace dev $DEV root handle 7FFF: mq
 
 # Add FQ-pacer qdisc on each NIC avail TX-queue
 i=0
 for dir in /sys/class/net/$DEV/queues/tx-*; do
     # Details: cause-off-by-one, as tx-0 becomes handle 1:
     ((i++)) || true
-    #tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq
+    #call_tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq
     #
     # The higher 'flow_limit' is needed for high-BW pacing
-    tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq \
+    call_tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq \
        flow_limit 1000
     #
     #   quantum $((1514*4)) initial_quantum $((1514*20))
-    # tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq maxrate 930mbit
+    # call_tc qdisc add dev $DEV parent 7FFF:$i handle $i: fq maxrate 930mbit
 done
