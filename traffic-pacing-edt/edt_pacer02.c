@@ -11,18 +11,49 @@ char _license[] SEC("license") = "GPL";
 
 #define NS_PER_SEC 1000000000
 
-//#define RATE_IN_BITS	(1000 * 1000 * 1000ULL)
 //#define RATE_IN_BITS	(998 * 1000 * 1000ULL)
 
 /* Test different rates in production machine, and measure iperf3 TCP-goodput */
 //#define RATE_IN_BITS	(800 * 1000 * 1000ULL)// prod: 765 Mbits/sec (stable) 
 //#define RATE_IN_BITS	(900 * 1000 * 1000ULL)// prod: 861 Mbits/sec (stable)
-//#define RATE_IN_BITS	(950 * 1000 * 1000ULL)// prod: 908 Mbits/sec (stable)
+///#define RATE_IN_BITS	(950 * 1000 * 1000ULL)// prod: 908 Mbits/sec (stable)
 //#define RATE_IN_BITS	(960 * 1000 * 1000ULL)// prod: 918 Mbits/sec
-#define RATE_IN_BITS	(970 * 1000 * 1000ULL)// prod: 928 Mbits/sec
+//#define RATE_IN_BITS	(970 * 1000 * 1000ULL)// prod: 928 Mbits/sec
 //#define RATE_IN_BITS	(980 * 1000 * 1000ULL)// prod: 920 Mbits/sec (unstable)
 //#define RATE_IN_BITS	(990 * 1000 * 1000ULL)// prod: 920 Mbits/sec (unstable)
 //#define RATE_IN_BITS	(999 * 1000 * 1000ULL)// prod: (unstable)
+
+/* Per packet overhead: two VLAN headers == 8 bytes
+ *
+ * skb->wire_len doesn't seem to take the two VLAN headers into
+ * account.  Loading BPF-prog on VLAN net_device is can only see 1
+ * VLAN, and this is likely HW offloaded into skb->vlan.
+ */
+//#define OVERHEAD	(8)
+
+
+/* New strategy: Shape at MAC (Medium Access Control) layer with Ethernet
+ *
+ * Production use-case is pacing traffic at 1Gbit/s wirespeed, using a
+ * 10Gbit/s NIC, because 1G end-user switch cannot handle bursts.
+ * 
+ *            (https://en.wikipedia.org/wiki/Interpacket_gap
+ * 12 bytes = interframe gap (IFG) 96 bit
+
+ *            (https://en.wikipedia.org/wiki/Ethernet_frame)
+ *  8 bytes = MAC preamble
+ *  4 bytes = Ethernet Frame Check Sequence (FCS) CRC
+ * 46 bytes = Minimum Payload size
+ *
+ * 14 bytes = Ethernet header
+ *  8 bytes = 2x VLAN headers
+ */
+//#define RATE_IN_BITS	(1000 * 1000 * 1000ULL) /* Full 1Gbit/s */
+//#define RATE_IN_BITS	(990 * 1000 * 1000ULL)
+#define RATE_IN_BITS	(950 * 1000 * 1000ULL)
+#define OVERHEAD	(12 + 8 + 4 + 8)  /* 14 already in wire_len */
+//#define OVERHEAD	(12 + 8 + 4)      /* 14 already in wire_len */
+#define ETH_MIN		(84)
 
 /* skb->len in bytes, thus easier to keep rate in bytes */
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
@@ -59,6 +90,7 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	struct edt_val *edt;
 	__u64 t_queue_sz;
 	__u64 t_xmit_ns;
+	__u64 wire_len;
 	__u64 t_next;
 	__u64 t_curr;
 	int key = 0;
@@ -75,7 +107,12 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	 * added on transmit.  Fortunately skb->wire_len at TC-egress hook (not
 	 * ingress) include these headers. (See: qdisc_pkt_len_init())
 	 */
-	t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / RATE_IN_BYTES;
+	wire_len = skb->wire_len + OVERHEAD;
+	wire_len = wire_len > ETH_MIN ? wire_len : ETH_MIN;
+	
+	t_xmit_ns = (wire_len) * NS_PER_SEC / RATE_IN_BYTES;
+
+//	t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / RATE_IN_BYTES;
 	// t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / edt->rate;
 
 	now = bpf_ktime_get_ns();
