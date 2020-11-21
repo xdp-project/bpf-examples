@@ -11,10 +11,20 @@ char _license[] SEC("license") = "GPL";
 
 #define NS_PER_SEC 1000000000
 
+//#define RATE_IN_BITS	(1000 * 1000 * 1000ULL)
+//#define RATE_IN_BITS	(998 * 1000 * 1000ULL)
+
+/* Test different rates in production machine, and measure iperf3 TCP-goodput */
+//#define RATE_IN_BITS	(800 * 1000 * 1000ULL)// prod: 765 Mbits/sec (stable) 
+//#define RATE_IN_BITS	(900 * 1000 * 1000ULL)// prod: 861 Mbits/sec (stable)
+//#define RATE_IN_BITS	(950 * 1000 * 1000ULL)// prod: 908 Mbits/sec (stable)
+//#define RATE_IN_BITS	(960 * 1000 * 1000ULL)// prod: 918 Mbits/sec
+#define RATE_IN_BITS	(970 * 1000 * 1000ULL)// prod: 928 Mbits/sec
+//#define RATE_IN_BITS	(980 * 1000 * 1000ULL)// prod: 920 Mbits/sec (unstable)
+//#define RATE_IN_BITS	(990 * 1000 * 1000ULL)// prod: 920 Mbits/sec (unstable)
+//#define RATE_IN_BITS	(999 * 1000 * 1000ULL)// prod: (unstable)
+
 /* skb->len in bytes, thus easier to keep rate in bytes */
-#define RATE_IN_BITS	(1000 * 1000 * 1000ULL)
-//#define RATE_IN_BITS	(200 * 1000 * 1000ULL)
-//#define RATE_IN_BITS	(500 * 1000 * 1000ULL)
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
 //#define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
