@@ -49,8 +49,8 @@ char _license[] SEC("license") = "GPL";
  *  8 bytes = 2x VLAN headers
  */
 //#define RATE_IN_BITS	(1000 * 1000 * 1000ULL) /* Full 1Gbit/s */
-//#define RATE_IN_BITS	(990 * 1000 * 1000ULL)
-#define RATE_IN_BITS	(950 * 1000 * 1000ULL)
+#define RATE_IN_BITS	(990 * 1000 * 1000ULL)
+//#define RATE_IN_BITS	(950 * 1000 * 1000ULL)
 #define OVERHEAD	(12 + 8 + 4 + 8)  /* 14 already in wire_len */
 //#define OVERHEAD	(12 + 8 + 4)      /* 14 already in wire_len */
 #define ETH_MIN		(84)
@@ -129,11 +129,18 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	t_next = READ_ONCE(edt->t_last) + t_xmit_ns;
 
 	/* If packet doesn't get scheduled into the future, then there is
-	 * no-queue and we are not above rate limit. Send packet immediately and
-	 * move forward t_last timestamp to now.
+	 * no-queue and we are not above rate limit. Normally send packet
+	 * immediately and move forward t_last timestamp to now.
+	 *
+	 * But in our use-case the traffic need smoothing at a earlier
+	 * stage, as bursts at lower rates can hurt the crapy switch.
+	 * Thus, schedule SKB transmissing as new + t_xmit_ns.
 	 */
 	if (t_next <= t_curr) {
-		WRITE_ONCE(edt->t_last, t_curr);
+		__u64 t_curr_next = t_curr + t_xmit_ns;
+
+		WRITE_ONCE(edt->t_last, t_curr_next);
+		skb->tstamp = t_curr_next;
 		return BPF_OK;
 	}
 
