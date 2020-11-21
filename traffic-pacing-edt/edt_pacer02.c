@@ -137,7 +137,13 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	 * Thus, schedule SKB transmissing as new + t_xmit_ns.
 	 */
 	if (t_next <= t_curr) {
-		__u64 t_curr_next = t_curr + t_xmit_ns;
+		__u64 t_curr_next;
+		__u32 min_len = 1538 * 2;
+
+		/* Minimum delay for all packet if no time-queue */
+		wire_len = (wire_len > min_len) ?  wire_len : min_len;
+		t_xmit_ns = (wire_len) * NS_PER_SEC / RATE_IN_BYTES;
+		t_curr_next = t_curr + t_xmit_ns;
 
 		WRITE_ONCE(edt->t_last, t_curr_next);
 		skb->tstamp = t_curr_next;
