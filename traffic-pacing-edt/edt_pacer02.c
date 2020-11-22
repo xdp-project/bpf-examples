@@ -4,6 +4,8 @@
 #include <bpf/compiler.h>
 #include "iproute2_compat.h"
 
+#include <stdbool.h>
+
 #define VLAN_MAX_DEPTH 2
 #include <xdp/parsing_helpers.h>
 
@@ -70,6 +72,7 @@ char _license[] SEC("license") = "GPL";
 /* Codel like dropping scheme, inspired by:
  * - RFC:  https://queue.acm.org/detail.cfm?id=2209336
  * - Code: https://queue.acm.org/appendices/codel.html
+ * - Kernel: include/net/codel_impl.h
  */
 
 struct edt_val {
@@ -80,9 +83,9 @@ struct edt_val {
 
 	/* codel like dropping scheme */
 	__u64	first_above_time; /* Time when above target (0 if below)*/
-	//__u64	drop_next;	  /* Time to drop next packet */
-	uint32_t count;	/* Packets dropped since going into drop state */
-	uint32_t dropping; /*/ Equal to 1 if in drop state */
+	__u64	drop_next;	  /* Time to drop next packet */
+	__u32	count;	/* Packets dropped since going into drop state */
+	__u32	dropping; /* Equal to 1 if in drop state */
 
 } __aligned(64); /* Align struct to cache-size to avoid false-sharing */
 
@@ -125,13 +128,88 @@ static __always_inline __u32 get_sqrt_sh16(__u64 cnt)
 	}
 }
 
-static __always_inline __u64 get_next_interval(__u64 cnt)
+static __always_inline __u64 get_next_interval_sqrt(__u64 cnt)
 {
 	__u64 val = (__u64)T_EXCEED_INTERVAL << 16 / get_sqrt_sh16(cnt);
 	return val;
 }
 
+static __always_inline __u64
+codel_control_law(__u64 t, __u64 cnt)
+{
+	return t + get_next_interval_sqrt(cnt);
+}
 
+static __always_inline
+bool codel_should_drop(struct edt_val *edt, __u64 t_queue_sz, __u64 now)
+{
+	__u64 interval = T_EXCEED_INTERVAL;
+
+	if (t_queue_sz < T_HORIZON_TARGET) {
+		/* went below so we'll stay below for at least interval */
+		edt->first_above_time = 0;
+		return false;
+	}
+
+	if (edt->first_above_time == 0) {
+		/* just went above from below. If we stay above
+		 * for at least interval we'll say it's ok to drop
+		 */
+		edt->first_above_time = now + interval;
+		return false;
+	} else if (now >= edt->first_above_time) {
+		return true;
+	}
+	return false;
+}
+
+static __always_inline
+bool codel_drop(struct edt_val *edt, __u64 t_queue_sz, __u64 now)
+{
+	__u64 interval = T_EXCEED_INTERVAL;
+
+	/* If horizon have been exceed for a while, inc drop intensity*/
+	bool drop = codel_should_drop(edt, t_queue_sz, now);
+
+	if (edt->dropping) { /* In dropping state */
+		if (!drop) {
+			/* time below target - leave dropping state */
+			edt->dropping = false;
+			return false;
+		} else if (now >= edt->drop_next) {
+			/* It's time for the next drop. Drop the current
+			 * packet. Schedule the next drop
+			 */
+			edt->count += 1;
+			// schedule the next drop.
+                        edt->drop_next =
+				codel_control_law(edt->drop_next, edt->count);
+			return true;
+		}
+	} else if (drop &&
+		   ((now - edt->drop_next < interval) ||
+		    (now - edt->first_above_time >= interval))) {
+		/* If we get here, then we're not in dropping state.
+		 * Decide  whether it's time to enter dropping state.
+		 */
+		__u32 count = edt->count;
+
+		edt->dropping = true;
+
+		/* If we're in a drop cycle, drop rate that controlled queue
+                 * on the last cycle is a good starting point to control it now.
+		 */
+		if (now - edt->drop_next < interval)
+			count = count > 2 ? (count - 2) : 1;
+		else
+			count = 1;
+
+		edt->count = count;
+		edt->drop_next = codel_control_law(now, count);
+		return true;
+	}
+	return false;
+}
 
 /* Role of EDT (Earliest Departure Time) is to schedule departure of packets to
  * be send in the future.
@@ -217,20 +295,9 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 		return BPF_DROP;
 
 	/* If TCP didn't react to ECN marking, then start dropping some */
-	if (t_queue_sz >= T_HORIZON_TARGET) {
-		__u32 random = (bpf_get_prandom_u32() >> 4) & 0x0f;
-
-		if (random >= 8)
-			return BPF_DROP;
-
-		// TODO If horizon have been exceed for a while, then
-		
-
-		// "next drop time"
-	} else {
-		/* TODO: Queue delay drops below reset */
-	}
-
+	// if (codel_drop(edt, t_queue_sz, now))
+	if (codel_drop(edt, t_queue_sz, t_next))
+		return BPF_DROP;
 	
 	/* ECN marking horizon */
 	if (t_queue_sz >= T_HORIZON_ECN)
