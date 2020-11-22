@@ -60,9 +60,12 @@ char _license[] SEC("license") = "GPL";
 
 //#define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
 //#define T_HORIZON_DROP	(200000 * 1000 * 1000ULL)
-#define T_HORIZON_DROP	(15 * 1000 * 1000ULL)
 
-#define T_HORIZON_ECN	(5 * 1000 * 1000ULL)
+#define T_HORIZON_DROP		(15 * 1000 * 1000ULL)
+
+#define T_HORIZON_DROP_SOME	(10 * 1000 * 1000ULL)
+
+#define T_HORIZON_ECN		(5 * 1000 * 1000ULL)
 
 struct edt_val {
 	__u64	rate;
@@ -165,6 +168,22 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	if (t_queue_sz >= T_HORIZON_DROP /* edt->t_horizon_drop */)
 		return BPF_DROP;
 
+	/* If TCP didn't react to ECN marking, then start dropping some */
+	if (t_queue_sz >= T_HORIZON_DROP_SOME) {
+		__u32 random = (bpf_get_prandom_u32() >> 4) & 0x0f;
+
+		if (random >= 8)
+			return BPF_DROP;
+
+		// TODO If horizon have been exceed for a while, then
+		
+
+		// "next drop time"
+	} else {
+		/* TODO: Queue delay drops below reset */
+	}
+
+	
 	/* ECN marking horizon */
 	if (t_queue_sz >= T_HORIZON_ECN)
 		bpf_skb_ecn_set_ce(skb);
