@@ -63,15 +63,27 @@ char _license[] SEC("license") = "GPL";
 
 #define T_HORIZON_DROP		(15 * 1000 * 1000ULL)
 
-#define T_HORIZON_DROP_SOME	(10 * 1000 * 1000ULL)
+#define T_HORIZON_TARGET	(10 * 1000 * 1000ULL)
 
 #define T_HORIZON_ECN		(5 * 1000 * 1000ULL)
+
+/* Codel like dropping scheme, inspired by:
+ * - RFC:  https://queue.acm.org/detail.cfm?id=2209336
+ * - Code: https://queue.acm.org/appendices/codel.html
+ */
 
 struct edt_val {
 	__u64	rate;
 	__u64	t_last;
 	__u64	t_horizon_drop;
 	__u64	t_horizon_ecn;
+
+	/* codel like dropping scheme */
+	__u64	first_above_time; /* Time when above target (0 if below)*/
+	//__u64	drop_next;	  /* Time to drop next packet */
+	uint32_t count;	/* Packets dropped since going into drop state */
+	uint32_t dropping; /*/ Equal to 1 if in drop state */
+
 } __aligned(64); /* Align struct to cache-size to avoid false-sharing */
 
 /* The tc tool (iproute2) use another ELF map layout than libbpf (struct
@@ -84,6 +96,42 @@ struct bpf_elf_map SEC("maps") time_delay_map = {
 	.max_elem	= 1,
 	//.pinning	= PIN_GLOBAL_NS,
 };
+
+/* */
+#define T_EXCEED_INTERVAL	(100 * 1000 * 1000ULL) /* 100 ms in ns*/
+
+/* Table lookup for square-root shifted 16 bit */
+static __always_inline __u32 get_sqrt_sh16(__u64 cnt)
+{
+	switch (cnt) {
+	case 1:	return 65536; /* 65536 * sqrt(1) */
+	case 2:	return 92682; /* 65536 * sqrt(2) */
+	case 3:	return 113512; /* 65536 * sqrt(3) */
+	case 4:	return 131072; /* 65536 * sqrt(4) */
+	case 5:	return 146543; /* 65536 * sqrt(5) */
+	case 6:	return 160530; /* 65536 * sqrt(6) */
+	case 7:	return 173392;
+	case 8:	return 185364;
+	case 9:	return 196608;
+	case 10: return 207243;
+	case 11: return 217358;
+	case 12: return 227023;
+	case 13: return 236293;
+	case 14: return 245213;
+	case 15: return 253820;
+	case 16: return 262144; /* 100 ms / sqrt(16) = 25 ms */    	
+	default:
+		return 370728; /* 65536*sqrt(32) => 100/sqrt(32) = 17.68 ms */
+	}
+}
+
+static __always_inline __u64 get_next_interval(__u64 cnt)
+{
+	__u64 val = (__u64)T_EXCEED_INTERVAL << 16 / get_sqrt_sh16(cnt);
+	return val;
+}
+
+
 
 /* Role of EDT (Earliest Departure Time) is to schedule departure of packets to
  * be send in the future.
@@ -169,7 +217,7 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 		return BPF_DROP;
 
 	/* If TCP didn't react to ECN marking, then start dropping some */
-	if (t_queue_sz >= T_HORIZON_DROP_SOME) {
+	if (t_queue_sz >= T_HORIZON_TARGET) {
 		__u32 random = (bpf_get_prandom_u32() >> 4) & 0x0f;
 
 		if (random >= 8)
