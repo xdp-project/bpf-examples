@@ -36,7 +36,6 @@ SEC("prog") int xdp_encap(struct xdp_md *ctx)
 	if (ehdr + 1 > data_end)
 		goto out;
 	*ehdr = old_ehdr;
-	ehdr->h_proto = bpf_htons(ETH_P_IP);
 
 #ifdef IPV6
 	encap_ipv6(data, data_end);

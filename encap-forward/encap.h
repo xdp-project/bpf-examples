@@ -4,6 +4,7 @@
 static void encap_ipv6(volatile void *data, volatile void *data_end)
 {
 	volatile struct ipv6hdr *ip6h;
+	volatile struct ethhdr *eth;
 	size_t len;
 
 	struct ipv6hdr encap_hdr = {
@@ -18,10 +19,12 @@ static void encap_ipv6(volatile void *data, volatile void *data_end)
 					0x00, 0x00, 0x00, 0x01 } },
 	};
 
-	ip6h = data + sizeof(struct ethhdr);
+	eth = data;
+	ip6h = (void *)(eth +1);
 	if (ip6h + 1 > data_end)
 		return;
 
+	eth->h_proto = bpf_htons(ETH_P_IPV6);
 	*ip6h = encap_hdr;
 
 	len = (data_end - data);
@@ -39,6 +42,7 @@ static __always_inline __u16 csum_fold_helper(__u32 csum)
 
 static void encap_ipv4(volatile void *data, volatile void *data_end)
 {
+	volatile struct ethhdr *eth;
 	volatile struct iphdr *iph;
 	size_t len;
 
@@ -51,10 +55,12 @@ static void encap_ipv4(volatile void *data, volatile void *data_end)
 		.daddr = bpf_htonl(0x0a0b0201),
 	};
 
-	iph = data + sizeof(struct ethhdr);
+	eth = data;
+	iph = (void *)(eth +1);
 	if (iph + 1 > data_end)
 		return;
 
+	eth->h_proto = bpf_htons(ETH_P_IP);
 	*iph = encap_hdr;
 
 	len = (data_end - data);

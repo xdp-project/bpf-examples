@@ -28,18 +28,16 @@ SEC("classifier") int tc_encap(struct __sk_buff *skb)
 
 	data = (void *)(long)skb->data;
 	data_end = (void *)(long)skb->data_end;
+	eth = (void *)data;
 
 #ifdef IPV6
 	encap_ipv6(data, data_end);
 #else
 	encap_ipv4(data, data_end);
 
-	eth = (void *)data;
 	iph = (void *)(eth +1);
 	if (iph +1 > data_end)
 		goto out;
-
-	eth->h_proto = bpf_htons(ETH_P_IP);
 
 	fib_params.family = AF_INET;
 	fib_params.tos = iph->tos;
