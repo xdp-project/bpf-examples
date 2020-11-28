@@ -13,28 +13,7 @@ char _license[] SEC("license") = "GPL";
 
 #define NS_PER_SEC 1000000000
 
-//#define RATE_IN_BITS	(998 * 1000 * 1000ULL)
-
-/* Test different rates in production machine, and measure iperf3 TCP-goodput */
-//#define RATE_IN_BITS	(800 * 1000 * 1000ULL)// prod: 765 Mbits/sec (stable) 
-//#define RATE_IN_BITS	(900 * 1000 * 1000ULL)// prod: 861 Mbits/sec (stable)
-///#define RATE_IN_BITS	(950 * 1000 * 1000ULL)// prod: 908 Mbits/sec (stable)
-//#define RATE_IN_BITS	(960 * 1000 * 1000ULL)// prod: 918 Mbits/sec
-//#define RATE_IN_BITS	(970 * 1000 * 1000ULL)// prod: 928 Mbits/sec
-//#define RATE_IN_BITS	(980 * 1000 * 1000ULL)// prod: 920 Mbits/sec (unstable)
-//#define RATE_IN_BITS	(990 * 1000 * 1000ULL)// prod: 920 Mbits/sec (unstable)
-//#define RATE_IN_BITS	(999 * 1000 * 1000ULL)// prod: (unstable)
-
-/* Per packet overhead: two VLAN headers == 8 bytes
- *
- * skb->wire_len doesn't seem to take the two VLAN headers into
- * account.  Loading BPF-prog on VLAN net_device is can only see 1
- * VLAN, and this is likely HW offloaded into skb->vlan.
- */
-//#define OVERHEAD	(8)
-
-
-/* New strategy: Shape at MAC (Medium Access Control) layer with Ethernet
+/* Strategy: Shape at MAC (Medium Access Control) layer with Ethernet
  *
  * Production use-case is pacing traffic at 1Gbit/s wirespeed, using a
  * 10Gbit/s NIC, because 1G end-user switch cannot handle bursts.
@@ -57,18 +36,15 @@ char _license[] SEC("license") = "GPL";
 //#define OVERHEAD	(12 + 8 + 4)      /* 14 already in wire_len */
 #define ETH_MIN		(84)
 
-/* skb->len in bytes, thus easier to keep rate in bytes */
+/* skb->len in bytes, thus convert rate to bytes */
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
-//#define T_HORIZON_DROP	(2000 * 1000 * 1000ULL)
-//#define T_HORIZON_DROP	(200000 * 1000 * 1000ULL)
-
+/* Controlling how large queue (in time) is allow to grow */
 #define T_HORIZON_DROP		(15 * 1000 * 1000ULL)
-
 #define T_HORIZON_TARGET	(10 * 1000 * 1000ULL)
-
 #define T_HORIZON_ECN		(5 * 1000 * 1000ULL)
 
+/* Codel: If queue exceed target for more than one interval, start dropping */
 #define T_EXCEED_INTERVAL	(100 * 1000 * 1000ULL) /* 100 ms in ns*/
 
 #define CODEL_TARGET		T_HORIZON_TARGET
