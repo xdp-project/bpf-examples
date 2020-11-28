@@ -40,9 +40,9 @@ char _license[] SEC("license") = "GPL";
 #define RATE_IN_BYTES	(RATE_IN_BITS / 8)
 
 /* Controlling how large queue (in time) is allow to grow */
-#define T_HORIZON_DROP		(15 * 1000 * 1000ULL)
-#define T_HORIZON_TARGET	(10 * 1000 * 1000ULL)
-#define T_HORIZON_ECN		(5 * 1000 * 1000ULL)
+#define T_HORIZON_DROP		(40 * 1000 * 1000ULL)
+#define T_HORIZON_TARGET	(5 * 1000 * 1000ULL)
+#define T_HORIZON_ECN		(1 * 1000 * 1000ULL)
 
 /* Codel: If queue exceed target for more than one interval, start dropping */
 #define T_EXCEED_INTERVAL	(100 * 1000 * 1000ULL) /* 100 ms in ns*/
