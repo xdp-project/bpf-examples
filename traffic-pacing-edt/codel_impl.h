@@ -42,8 +42,28 @@ static __always_inline __u32 get_sqrt_sh16(__u64 cnt)
 	case 14: return 245213;
 	case 15: return 253820;
 	case 16: return 262144; /* 100 ms / sqrt(16) = 25 ms */
+	case 17: return 270212;
+	case 18: return 278046;
+	case 19: return 285664;
+	case 20: return 293086;
+	case 21: return 300324;
+	case 22: return 307391;
+	case 23: return 314300;
+	case 24: return 321060;
+	case 25: return 327680; /* 100 ms / sqrt(25) = 20 ms */
+	case 26: return 334169;
+	case 27: return 340535;
+	case 28: return 346784;
+	case 29: return 352922;
+	case 30: return 358955;
+	case 31: return 364889;
+	case 32: return 370728;
+	case 33: return 376476;
+	case 34: return 382137;
+	case 35: return 387716;
+	case 36: return 393216; /* 100 / sqrt(36) = 16.66 ms */
 	default:
-		return 370728; /* 65536*sqrt(32) => 100/sqrt(32) = 17.68 ms */
+		return 463410; /* 65536*sqrt(50) => 100/sqrt(50) = 14.14 ms */
 	}
 }
 
