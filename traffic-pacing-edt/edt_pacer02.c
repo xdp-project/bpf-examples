@@ -66,14 +66,14 @@ struct bpf_elf_map SEC("maps") time_delay_map = {
 	.type		= BPF_MAP_TYPE_ARRAY,
 	.size_key	= sizeof(__u32),
 	.size_value	= sizeof(struct edt_val),
-	.max_elem	= 1,
+	.max_elem	= 4096, /* Max possible VLANs */
 	//.pinning	= PIN_GLOBAL_NS,
 };
 
 /* Role of EDT (Earliest Departure Time) is to schedule departure of packets to
  * be send in the future.
  */
-static __always_inline int sched_departure(struct __sk_buff *skb)
+static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 {
 	struct edt_val *edt;
 	__u64 t_queue_sz;
@@ -81,7 +81,6 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 	__u64 wire_len;
 	__u64 t_next;
 	__u64 t_curr;
-	int key = 0;
 	__u64 now;
 
 	edt = bpf_map_lookup_elem(&time_delay_map, &key);
@@ -253,9 +252,8 @@ SEC("classifier") int tc_edt_vlan(struct __sk_buff *skb)
 
 	vlan_key = extract_vlan_key(skb, &vlans);
 
-	/* For-now: Match on vlan16 and only apply EDT on that */
-	if (vlan_key == 16)
-		return sched_departure(skb);
+	/* Each (inner)  VLAN id gets it own EDT pacing */
+	return sched_departure(skb, vlan_key);
 
  out:
 	return ret;
