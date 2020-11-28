@@ -74,19 +74,20 @@ char _license[] SEC("license") = "GPL";
  * - Code: https://queue.acm.org/appendices/codel.html
  * - Kernel: include/net/codel_impl.h
  */
+struct codel_state {
+	/* codel like dropping scheme */
+	__u64	first_above_time; /* Time when above target (0 if below)*/
+	__u64	drop_next;	  /* Time to drop next packet */
+	__u32	count;	/* Packets dropped since going into drop state */
+	__u32	dropping; /* Equal to 1 if in drop state */	
+};
 
 struct edt_val {
 	__u64	rate;
 	__u64	t_last;
 	__u64	t_horizon_drop;
 	__u64	t_horizon_ecn;
-
-	/* codel like dropping scheme */
-	__u64	first_above_time; /* Time when above target (0 if below)*/
-	__u64	drop_next;	  /* Time to drop next packet */
-	__u32	count;	/* Packets dropped since going into drop state */
-	__u32	dropping; /* Equal to 1 if in drop state */
-
+	struct codel_state codel;
 } __aligned(64); /* Align struct to cache-size to avoid false-sharing */
 
 /* The tc tool (iproute2) use another ELF map layout than libbpf (struct
@@ -141,71 +142,71 @@ codel_control_law(__u64 t, __u64 cnt)
 }
 
 static __always_inline
-bool codel_should_drop(struct edt_val *edt, __u64 t_queue_sz, __u64 now)
+bool codel_should_drop(struct codel_state *codel, __u64 t_queue_sz, __u64 now)
 {
 	__u64 interval = T_EXCEED_INTERVAL;
 
 	if (t_queue_sz < T_HORIZON_TARGET) {
 		/* went below so we'll stay below for at least interval */
-		edt->first_above_time = 0;
+		codel->first_above_time = 0;
 		return false;
 	}
 
-	if (edt->first_above_time == 0) {
+	if (codel->first_above_time == 0) {
 		/* just went above from below. If we stay above
 		 * for at least interval we'll say it's ok to drop
 		 */
-		edt->first_above_time = now + interval;
+		codel->first_above_time = now + interval;
 		return false;
-	} else if (now >= edt->first_above_time) {
+	} else if (now >= codel->first_above_time) {
 		return true;
 	}
 	return false;
 }
 
 static __always_inline
-bool codel_drop(struct edt_val *edt, __u64 t_queue_sz, __u64 now)
+bool codel_drop(struct codel_state *codel, __u64 t_queue_sz, __u64 now)
 {
 	__u64 interval = T_EXCEED_INTERVAL;
 
 	/* If horizon have been exceed for a while, inc drop intensity*/
-	bool drop = codel_should_drop(edt, t_queue_sz, now);
+	bool drop = codel_should_drop(codel, t_queue_sz, now);
 
-	if (edt->dropping) { /* In dropping state */
+	if (codel->dropping) { /* In dropping state */
 		if (!drop) {
 			/* time below target - leave dropping state */
-			edt->dropping = false;
+			codel->dropping = false;
 			return false;
-		} else if (now >= edt->drop_next) {
+		} else if (now >= codel->drop_next) {
 			/* It's time for the next drop. Drop the current
 			 * packet. Schedule the next drop
 			 */
-			edt->count += 1;
+			codel->count += 1;
 			// schedule the next drop.
-                        edt->drop_next =
-				codel_control_law(edt->drop_next, edt->count);
+                        codel->drop_next =
+				codel_control_law(codel->drop_next, codel->count);
 			return true;
 		}
 	} else if (drop &&
-		   ((now - edt->drop_next < interval) ||
-		    (now - edt->first_above_time >= interval))) {
+		   ((now - codel->drop_next < interval) ||
+		    (now - codel->first_above_time >= interval))) {
 		/* If we get here, then we're not in dropping state.
 		 * Decide  whether it's time to enter dropping state.
 		 */
-		__u32 count = edt->count;
+		__u32 count = codel->count;
 
-		edt->dropping = true;
+		codel->dropping = true;
 
 		/* If we're in a drop cycle, drop rate that controlled queue
                  * on the last cycle is a good starting point to control it now.
 		 */
-		if (now - edt->drop_next < interval)
+		if (now - codel->drop_next < interval)
 			count = count > 2 ? (count - 2) : 1;
 		else
 			count = 1;
 
-		edt->count = count;
-		edt->drop_next = codel_control_law(now, count);
+		codel->count = count;
+		codel->drop_next = codel_control_law(now, count);
 		return true;
 	}
 	return false;
@@ -296,7 +297,7 @@ static __always_inline int sched_departure(struct __sk_buff *skb)
 
 	/* If TCP didn't react to ECN marking, then start dropping some */
 	// if (codel_drop(edt, t_queue_sz, now))
-	if (codel_drop(edt, t_queue_sz, t_next))
+	if (codel_drop(&edt->codel, t_queue_sz, t_next))
 		return BPF_DROP;
 	
 	/* ECN marking horizon */
