@@ -2,7 +2,7 @@
 
 USER_TARGETS :=
 BPF_TARGETS := edt_pacer01
-BPF_TARGETS += edt_pacer02
+BPF_TARGETS += edt_pacer_vlan
 
 EXTRA_DEPS += config.mk
 
