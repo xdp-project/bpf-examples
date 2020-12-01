@@ -102,7 +102,8 @@ static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 //	t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / RATE_IN_BYTES;
 	// t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / edt->rate;
 
-	now = bpf_ktime_get_ns();
+	// now = bpf_ktime_get_ns();
+	now = bpf_ktime_get_boot_ns(); /* Use same ktime as bpftrace */
 
 	/* Allow others to set skb tstamp prior to us */
 	t_curr  = skb->tstamp;
