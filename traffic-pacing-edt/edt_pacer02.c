@@ -135,6 +135,7 @@ static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 
 		WRITE_ONCE(edt->t_last, t_curr_next);
 		skb->tstamp = t_curr_next;
+		skb->mark = 1; /* No queue - add minimum delay */
 #else
 		WRITE_ONCE(edt->t_last, t_curr);
 #endif
@@ -156,10 +157,14 @@ static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 	// if (codel_drop(edt, t_queue_sz, now))
 	if (codel_drop(&edt->codel, t_queue_sz, t_next))
 		return BPF_DROP;
+
+	skb->mark = 2; /* (time) queue exist - and small/below T_HORIZON_ECN */
 	
 	/* ECN marking horizon */
-	if (t_queue_sz >= T_HORIZON_ECN)
+	if (t_queue_sz >= T_HORIZON_ECN) {
+		skb->mark = 3; /* (time) queue exist - and is large */
 		bpf_skb_ecn_set_ce(skb);
+	}
 
 	/* Advance "time queue" */
 	WRITE_ONCE(edt->t_last, t_next);
