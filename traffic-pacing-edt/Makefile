@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 
 USER_TARGETS :=
-BPF_TARGETS := edt_pacer01
-BPF_TARGETS += edt_pacer_vlan
+BPF_TARGETS := edt_pacer_vlan
 
 EXTRA_DEPS += config.mk
 
