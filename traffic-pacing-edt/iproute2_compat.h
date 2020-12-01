@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* Taken from from #include <iproute2/bpf_elf.h> */
 
 #ifndef __IPROUTE2_COMPAT_H
 #define __IPROUTE2_COMPAT_H
@@ -7,6 +8,11 @@
  * bpf_elf_map from iproute2, but struct bpf_map_def from libbpf have same
  * binary layout until "flags". Thus, BPF-progs can use both if careful.
  */
+
+/* Object pinning settings */
+#define PIN_NONE                0
+#define PIN_OBJECT_NS           1
+#define PIN_GLOBAL_NS           2
 
 /* ELF map definition (copied from iproute2 source code) */
 struct bpf_elf_map {

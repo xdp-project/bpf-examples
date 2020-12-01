@@ -2,7 +2,6 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/compiler.h>
-#include "iproute2_compat.h"
 
 #include <stdbool.h>
 
@@ -59,16 +58,31 @@ struct edt_val {
 	struct codel_state codel;
 } __aligned(64); /* Align struct to cache-size to avoid false-sharing */
 
-/* The tc tool (iproute2) use another ELF map layout than libbpf (struct
- * bpf_map_def), see struct bpf_elf_map from iproute2.
+#ifdef HAVE_TC_LIBBPF /* detected by configure script in config.mk */
+/* Use BTF format to create map */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 4096); /* Max possible VLANs */
+	__type(key, __u32);
+	__type(value, struct edt_val);
+//	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} time_delay_map SEC(".maps");
+
+#else
+/* The (iproute2) tc tool (without libbpf support) use another ELF map
+ * layout than libbpf (struct bpf_map_def), see struct bpf_elf_map
+ * from iproute2.
  */
+#include "iproute2_compat.h"
 struct bpf_elf_map SEC("maps") time_delay_map = {
 	.type		= BPF_MAP_TYPE_ARRAY,
 	.size_key	= sizeof(__u32),
 	.size_value	= sizeof(struct edt_val),
 	.max_elem	= 4096, /* Max possible VLANs */
-	//.pinning	= PIN_GLOBAL_NS,
+//	.pinning	= PIN_GLOBAL_NS,
 };
+#endif
+
 
 /* Role of EDT (Earliest Departure Time) is to schedule departure of packets to
  * be send in the future.
