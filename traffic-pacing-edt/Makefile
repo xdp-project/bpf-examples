@@ -2,6 +2,7 @@
 
 USER_TARGETS :=
 BPF_TARGETS := edt_pacer_vlan
+BPF_TARGETS += xdp_cpumap_qinq
 
 EXTRA_DEPS += config.mk
 
