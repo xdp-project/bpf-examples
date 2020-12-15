@@ -42,6 +42,7 @@ static const struct option long_options[] = {
 	{"dev",		required_argument,	NULL, 'd' },
 	{"qsize",	required_argument,	NULL, 'q' },
 	{"force",	no_argument,		NULL, 'F' },
+	{"remove",	no_argument,		NULL, 'r' },
 	{0, 0, NULL,  0 }
 };
 
@@ -125,7 +126,21 @@ int do_xdp_attach(int ifindex, struct bpf_program *prog, __u32 xdp_flags)
 
 	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
 	if (err) {
-		fprintf(stderr, "link set xdp fd failed (err:%d)\n", err);
+		fprintf(stderr, "%s(): link set xdp fd failed (err:%d)\n",
+			__func__, err);
+		return EXIT_FAIL_XDP;
+	}
+	return EXIT_OK;
+}
+
+int do_xdp_detach(int ifindex, __u32 xdp_flags)
+{
+	int err;
+
+	err = bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+	if (err) {
+		fprintf(stderr, "%s(): link set xdp fd failed (err:%d)\n",
+			__func__, err);
 		return EXIT_FAIL_XDP;
 	}
 	return EXIT_OK;
@@ -134,6 +149,7 @@ int do_xdp_attach(int ifindex, struct bpf_program *prog, __u32 xdp_flags)
 int main(int argc, char **argv)
 {
 	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
+	bool do_detach = false;
 	int opt, longindex = 0;
 	__u32 cfg_qsize = 512;
 	char buf[100];
@@ -144,6 +160,9 @@ int main(int argc, char **argv)
 	int cpumap_fd = -1;
 
 	int n_cpus = get_nprocs_conf();
+
+	/* Always use XDP native driver mode */
+	xdp_flags |= XDP_FLAGS_DRV_MODE;
 
         obj = bpf_object__open_file("xdp_cpumap_qinq.o", NULL);
 	err = libbpf_get_error(obj);
@@ -179,6 +198,9 @@ int main(int argc, char **argv)
 		case 'F':
 			xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
 			break;
+		case 'r':
+			do_detach = true;
+			break;
 		case 'h':
 		error:
 		default:
@@ -193,13 +215,14 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_OPTION;
 	}
 
+	if (do_detach)
+		return do_xdp_detach(ifindex, xdp_flags);
+
 	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
 		perror("setrlimit(RLIMIT_MEMLOCK)");
 		return EXIT_FAIL_MEM;
 	}
 
-	/* Always use XDP native driver mode */
-	xdp_flags |= XDP_FLAGS_DRV_MODE;
 
 	obj = do_load_bpf_obj(obj);
 	if (!obj)
