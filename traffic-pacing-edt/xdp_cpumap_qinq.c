@@ -72,6 +72,10 @@ int  xdp_cpumap_qinq(struct xdp_md *ctx)
 	hash_key = SuperFastHash((char *)&vlan_key, 4, INITVAL);
 	cpu_dest = hash_key % global_max_cpus;
 
+	/* TODO: Find more generic way to exclude CPU-6 */
+	if (cpu_dest == 6)
+		cpu_dest = 11;
+
 	/* Notice: Userspace MUST insert entries into cpumap */
 	action = bpf_redirect_map(&cpumap, cpu_dest, XDP_PASS);
 out:
