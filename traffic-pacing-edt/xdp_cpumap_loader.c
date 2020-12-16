@@ -78,7 +78,7 @@ static int create_cpu_entry(int cpumap_fd, __u32 cpu,
 	err = bpf_map_update_elem(cpumap_fd, &cpu, value, 0);
 	if (err) {
 		fprintf(stderr, "Create CPU entry failed (err:%d)\n", err);
-		exit(EXIT_FAIL_BPF);
+		return EXIT_FAIL_BPF;
 	}
 
 	return 0;

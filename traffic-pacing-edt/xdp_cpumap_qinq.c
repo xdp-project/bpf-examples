@@ -12,6 +12,9 @@
 
 #define MAX_CPUS 24
 
+/* This global variable is used for limiting CPU that can be selected */
+__u32 global_max_cpus = 12; /* TODO: Allow userspace to adjust this */
+
 /* Special map type that can XDP_REDIRECT frames to another CPU */
 struct {
 	__uint(type, BPF_MAP_TYPE_CPUMAP);
@@ -19,6 +22,22 @@ struct {
 	__uint(value_size, sizeof(struct bpf_cpumap_val));
 	__uint(max_entries, MAX_CPUS);
 } cpumap SEC(".maps");
+
+static __always_inline
+__u16 extract_vlan_key(struct collect_vlans *vlans)
+{
+	__u16 vlan_key = 0;
+
+	if (vlans->id[1]) {
+		/* Inner Q-in-Q VLAN present use that as key */
+		vlan_key = vlans->id[1];
+	} else {
+		/* If only one VLAN tag, use it as key */
+		vlan_key = vlans->id[0];
+	}
+
+	return vlan_key;
+}
 
 SEC("xdp")
 int  xdp_cpumap_qinq(struct xdp_md *ctx)
@@ -53,7 +72,10 @@ int  xdp_cpumap_qinq(struct xdp_md *ctx)
 		goto out;
 	}
 
-	// WARNING: Userspace MUST insert entries into cpumap
+	/* Use inner VLAN as key and hash based on max_cpus */
+	cpu_dest = extract_vlan_key(&vlans) % global_max_cpus;
+
+	/* Notice: Userspace MUST insert entries into cpumap */
 	action = bpf_redirect_map(&cpumap, cpu_dest, XDP_PASS);
 out:
 	return action;
