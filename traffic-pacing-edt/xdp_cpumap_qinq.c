@@ -4,6 +4,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/compiler.h>
 
+#define INITVAL 15485863
+#include "hash_func01.h" /* SuperFastHash */
 
 #include <bpf/bpf_helpers.h>
 
@@ -24,18 +26,10 @@ struct {
 } cpumap SEC(".maps");
 
 static __always_inline
-__u16 extract_vlan_key(struct collect_vlans *vlans)
+__u32 extract_vlan_key(struct collect_vlans *vlans)
 {
-	__u16 vlan_key = 0;
-
-	if (vlans->id[1]) {
-		/* Inner Q-in-Q VLAN present use that as key */
-		vlan_key = vlans->id[1];
-	} else {
-		/* If only one VLAN tag, use it as key */
-		vlan_key = vlans->id[0];
-	}
-
+	/* Combine inner and outer VLAN as a key */
+	__u32  vlan_key = (vlans->id[1] << 16) |  vlans->id[0];
 	return vlan_key;
 }
 
@@ -45,6 +39,7 @@ int  xdp_cpumap_qinq(struct xdp_md *ctx)
 	void *data     = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 	struct collect_vlans vlans = { 0 };
+	__u32 hash_key, vlan_key;
 	struct ethhdr *eth;
 	__u32 cpu_dest = 0;
 	__u64 action;
@@ -72,8 +67,10 @@ int  xdp_cpumap_qinq(struct xdp_md *ctx)
 		goto out;
 	}
 
-	/* Use inner VLAN as key and hash based on max_cpus */
-	cpu_dest = extract_vlan_key(&vlans) % global_max_cpus;
+	/* Use inner+outer VLAN as key and hash based on max_cpus */
+	vlan_key = extract_vlan_key(&vlans);
+	hash_key = SuperFastHash((char *)&vlan_key, 4, INITVAL);
+	cpu_dest = hash_key % global_max_cpus;
 
 	/* Notice: Userspace MUST insert entries into cpumap */
 	action = bpf_redirect_map(&cpumap, cpu_dest, XDP_PASS);
