@@ -43,6 +43,8 @@ static const struct option long_options[] = {
 	{"qsize",	required_argument,	NULL, 'q' },
 	{"force",	no_argument,		NULL, 'F' },
 	{"remove",	no_argument,		NULL, 'r' },
+	{"non-cpu",	required_argument,	NULL, 'x' },
+	{"exclude-cpu",	required_argument,	NULL, 'x' },
 	{0, 0, NULL,  0 }
 };
 
@@ -67,18 +69,99 @@ static void usage(char *argv[])
 	printf("\n");
 }
 
-static int create_cpu_entry(int cpumap_fd, __u32 cpu,
-			    struct bpf_cpumap_val *value)
+struct cpumap_config {
+	int fd_cpumap;
+	int fd_cpus_enabled;
+	int fd_cpus_count;
+	int *cpu_exclude;
+	int max_cpus;
+	__u32 qsize;
+};
+
+static int cpumap_config_init(struct cpumap_config *cfg)
 {
-	int err;
+        int n_cpus = get_nprocs_conf();
+	int *cpu_exclude;
+
+	memset(cfg, 0, sizeof(*cfg));
+
+	cpu_exclude = malloc(n_cpus * sizeof(int));
+	if (!cpu_exclude) {
+		fprintf(stderr, "failed to allocate array\n");
+		return EXIT_FAIL_MEM;
+	}
+	memset(cpu_exclude, 0, n_cpus * sizeof(int));
+
+	cfg->cpu_exclude = cpu_exclude;
+	cfg->max_cpus = n_cpus;
+	return 0;
+}
+
+int __find_map_fd_by_name(struct bpf_object *obj, char *name)
+{
+	int fd;
+
+	fd = bpf_object__find_map_fd_by_name(obj, name);
+	if (fd < 0) {
+		printf("No map found! - named: %s\n", name);
+		exit(EXIT_FAIL_BPF);
+	}
+	return fd;
+}
+
+/* Get file descriptors to BPF-maps */
+static int cpumap_config_find_maps(struct bpf_object *obj,
+				   struct cpumap_config *cfg)
+{
+	cfg->fd_cpumap       = __find_map_fd_by_name(obj, "cpumap");
+	cfg->fd_cpus_enabled = __find_map_fd_by_name(obj, "cpus_enabled");
+	cfg->fd_cpus_count   = __find_map_fd_by_name(obj, "cpus_count");
+	return 0;
+}
+
+static int create_cpu_entry(struct cpumap_config *cfg, __u32 cpu,
+			    struct bpf_cpumap_val *value,
+			    __u32 enabled_idx, bool new)
+{
+	__u32 curr_cpus_count = 0;
+	__u32 key = 0;
+	int err, fd;
 
 	/* Add a CPU entry to cpumap, as this allocate a cpu entry in
 	 * the kernel for the cpu.
 	 */
-	err = bpf_map_update_elem(cpumap_fd, &cpu, value, 0);
+	fd = cfg->fd_cpumap;
+	err = bpf_map_update_elem(fd, &cpu, value, 0);
 	if (err) {
-		fprintf(stderr, "Create CPU entry failed (err:%d)\n", err);
+		fprintf(stderr, "Create(fd:%d) CPU(%d) entry failed (err:%d)\n",
+			fd, cpu, err);
 		return EXIT_FAIL_BPF;
+	}
+
+	/* Inform bpf_prog's that a new CPU is enabled and available
+	 * to be select from the map, that maps index to actual CPU.
+	 */
+	fd = cfg->fd_cpus_enabled;
+	err = bpf_map_update_elem(fd, &enabled_idx, &cpu, 0);
+	if (err) {
+		fprintf(stderr, "Add to enabled avail CPUs failed\n");
+		return EXIT_FAIL_BPF;
+	}
+
+	/* When not replacing/updating existing entry, bump the count */
+	fd = cfg->fd_cpus_count;
+	err = bpf_map_lookup_elem(fd, &key, &curr_cpus_count);
+	if (err) {
+		fprintf(stderr, "Failed reading curr cpus_count\n");
+		return EXIT_FAIL_BPF;
+	}
+	if (new) {
+		curr_cpus_count++;
+		err = bpf_map_update_elem(fd, &key, &curr_cpus_count, 0);
+		if (err) {
+			fprintf(stderr, "Failed write curr cpus_count\n");
+			return EXIT_FAIL_BPF;
+		}
 	}
 
 	return 0;
@@ -86,18 +169,30 @@ static int create_cpu_entry(int cpumap_fd, __u32 cpu,
 
 /* Userspace MUST create/populate CPUMAP entries for redirect to work
  */
-static void enable_all_cpus(int cpumap_fd, __u32 qsize)
+static int configure_cpus(struct cpumap_config *cfg)
 {
 	struct bpf_cpumap_val value = { 0 };
-        int n_cpus = get_nprocs_conf();
-	int i;
+        int n_cpus = cfg->max_cpus;
+	int *exclude = cfg->cpu_exclude;
+	int enabled_idx = 0;
+	bool new = true;
+	int cpu, err;
 
-	value.qsize = qsize;
+	value.qsize = cfg->qsize;
 
-	for (i = 0; i < n_cpus; i++) {
-		printf("Enable CPU:%d\n", i);
-		create_cpu_entry(cpumap_fd, i, &value);
+	for (cpu = 0; cpu < n_cpus; cpu++) {
+
+		if (exclude[cpu] == -1) {
+			printf("Excluding CPU:%d\n", cpu);
+			continue;
+		}
+		printf("Enable CPU:%d\n", cpu);
+		err = create_cpu_entry(cfg, cpu, &value, enabled_idx, new);
+		if (err)
+			return err;
+		enabled_idx++;
 	}
+	return 0;
 }
 
 struct bpf_object *do_load_bpf_obj(struct bpf_object *obj)
@@ -151,15 +246,21 @@ int main(int argc, char **argv)
 	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
 	bool do_detach = false;
 	int opt, longindex = 0;
-	__u32 cfg_qsize = 512;
 	char buf[100];
 	int err;
 
 	struct bpf_object *obj = NULL;
 	struct bpf_program *prog;
-	int cpumap_fd = -1;
 
+	/* System to setup and exclude some CPUs */
+	struct cpumap_config cfg;
 	int n_cpus = get_nprocs_conf();
+	int non_cpu = -1;
+	int *cpu_exclude;
+
+	cpumap_config_init(&cfg);
+	cpu_exclude = cfg.cpu_exclude;
+	cfg.qsize = 512; /* Default queue size */
 
 	/* Always use XDP native driver mode */
 	xdp_flags |= XDP_FLAGS_DRV_MODE;
@@ -174,7 +275,7 @@ int main(int argc, char **argv)
 	err = EXIT_OK;
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hSd:s:p:q:c:xzFf:e:r:m:",
+	while ((opt = getopt_long(argc, argv, "hd:q:Frx:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -193,7 +294,7 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'q':
-			cfg_qsize = strtol(optarg, NULL, 10);
+			cfg.qsize = strtol(optarg, NULL, 10);
 			break;
 		case 'F':
 			xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
@@ -201,10 +302,23 @@ int main(int argc, char **argv)
 		case 'r':
 			do_detach = true;
 			break;
+		case 'x': /* --exclude-cpu or --non-cpu */
+			/* Possible to exclude multiple CPUs on cmdline */
+			non_cpu = strtoul(optarg, NULL, 0);
+			if (non_cpu >= n_cpus) {
+				fprintf(stderr,
+				"--cpu nr too large for cpumap err(%d):%s\n",
+					errno, strerror(errno));
+				goto error;
+			}
+			cpu_exclude[non_cpu] = -1;
+			break;
+
 		case 'h':
 		error:
 		default:
 			usage(argv);
+			free(cpu_exclude);
 			return EXIT_FAIL_OPTION;
 		}
 	}
@@ -212,7 +326,8 @@ int main(int argc, char **argv)
 	if (ifindex == -1) {
 		fprintf(stderr, "ERR: required option --dev missing\n");
 		usage(argv);
-		return EXIT_FAIL_OPTION;
+		err = EXIT_FAIL_OPTION;
+		goto out;
 	}
 
 	if (do_detach)
@@ -220,13 +335,15 @@ int main(int argc, char **argv)
 
 	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
 		perror("setrlimit(RLIMIT_MEMLOCK)");
-		return EXIT_FAIL_MEM;
+		err = EXIT_FAIL_MEM;
+		goto out;
 	}
 
-
 	obj = do_load_bpf_obj(obj);
-	if (!obj)
-		return EXIT_FAIL_BPF;
+	if (!obj) {
+		err = EXIT_FAIL_BPF;
+		goto out;
+	}
 
 	/* Pickup first BPF-program */
 	prog = bpf_program__next(NULL, obj);
@@ -236,15 +353,17 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	/* Get file descriptor to BPF-map */
-	cpumap_fd = bpf_object__find_map_fd_by_name(obj, "cpumap");
-	if (cpumap_fd < 0) {
-		printf("No cpumap found!\n");
+	/* Find maps maps */
+	if (cpumap_config_find_maps(obj, &cfg)) {
 		err = EXIT_FAIL_BPF;
 		goto out;
 	}
+
 	/* Configure cpumap */
-	enable_all_cpus(cpumap_fd, cfg_qsize);
+	if (configure_cpus(&cfg)) {
+		err = EXIT_FAIL_BPF;
+		goto out;
+	}
 
 	/* Attach XDP program */
 	err = do_xdp_attach(ifindex, prog, xdp_flags);
@@ -259,5 +378,6 @@ out:
 	if (obj)
 		bpf_object__close(obj);
 
+	free(cpu_exclude);
 	return err;
 }
