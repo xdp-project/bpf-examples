@@ -5,6 +5,8 @@
 #include <bpf/compiler.h>
 
 #define INITVAL 15485863
+//#define INITVAL 2654435761
+
 #include "hash_func01.h" /* SuperFastHash */
 
 #include <bpf/bpf_helpers.h>
@@ -29,7 +31,7 @@ static __always_inline
 __u32 extract_vlan_key(struct collect_vlans *vlans)
 {
 	/* Combine inner and outer VLAN as a key */
-	__u32  vlan_key = (vlans->id[1] << 16) |  vlans->id[0];
+	__u32  vlan_key = (vlans->id[1] << 16) | vlans->id[0];
 	return vlan_key;
 }
 
