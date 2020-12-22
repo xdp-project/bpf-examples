@@ -15,7 +15,7 @@ check_tc_libbpf()
     if echo $tc_version | grep -q libbpf; then
 	libbpf_version=${tc_version##*libbpf }
 	echo "HAVE_TC_LIBBPF:=y" >> $CONFIG
-	echo "CFLAGS += -DHAVE_LIBBPF" >> $CONFIG
+	echo "BPF_CFLAGS += -DHAVE_TC_LIBBPF" >> $CONFIG
 	echo "yes ($libbpf_version)"
     else
 	echo "no"
