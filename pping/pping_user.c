@@ -2,9 +2,9 @@
 #include <linux/if_link.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
-#include <net/if.h>
-#include <linux/err.h> // For IS_ERR_OR_NULL macro
-#include <arpa/inet.h>
+#include <net/if.h> // For if_nametoindex
+//#include <linux/err.h> // For IS_ERR_OR_NULL macro // use libbpf_get_error instead
+#include <arpa/inet.h> // For inet_ntoa and ntohs
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,16 +15,26 @@
 #include <signal.h> // For detecting Ctrl-C
 #include <sys/resource.h> // For setting rlmit
 #include <time.h>
+#include <pthread.h>
 #include "timestamp_map.h" //key and value structs for the ts_start map
 
+#define BILLION 1000000000UL
 #define PPING_ELF_OBJ "pping_kern.o"
 #define XDP_PROG_SEC "pping_ingress"
 #define XDP_FLAGS XDP_FLAGS_UPDATE_IF_NOEXIST
 #define MAP_NAME "ts_start"
+#define MAP_CLEANUP_INTERVAL 1*BILLION // Clean timestamp map once per second 
+#define PERF_BUFFER_NAME "rtt_events"
+#define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
+#define PERF_POLL_TIMEOUT_MS 100
 #define RMEMLIM 512UL << 20 /* 512 MBs */
 #define ERROR_MSG_MAX 1024
-#define BILLION 1000000000UL
 #define TIMESTAMP_LIFETIME 10*BILLION // 10 seconds
+
+struct map_cleanup_args {
+  int map_fd;
+  __u64 max_age_ns;
+};
 
 /* static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args) */
 /* { */
@@ -33,7 +43,7 @@
 
 static volatile int keep_running = 1;
 
-void abort_main_loop(int sig)
+void abort_program(int sig)
 {
   keep_running = 0;
 }
@@ -60,7 +70,6 @@ static int xdp_load_and_attach(int ifindex, char *obj_path, char *sec, __u32 xdp
     //.ifindex = ifindex,
     .file = obj_path,
   };
-  //attr.file = obj_path;
 
   err = bpf_prog_load_xattr(&attr, obj, prog_fd);
   if (err) {
@@ -95,7 +104,6 @@ static __u64 get_time_ns(clockid_t clockid)
   return (__u64)t.tv_sec * BILLION + (__u64)t.tv_nsec;
 }
 
-
 static int remove_old_entries_from_map(int map_fd, __u64 max_age)
 {
   int removed = 0, entries = 0;
@@ -103,7 +111,7 @@ static int remove_old_entries_from_map(int map_fd, __u64 max_age)
   struct ts_timestamp value;
   bool delete_prev = false;
   __u64 now_nsec = get_time_ns(CLOCK_MONOTONIC);
-  if (now_nsec == 0) 
+  if (now_nsec == 0)
     return -errno;
 
   // Cannot delete current key because then loop will reset, see https://www.bouncybouncy.net/blog/bpf_map_get_next_key-pitfalls/
@@ -126,8 +134,38 @@ static int remove_old_entries_from_map(int map_fd, __u64 max_age)
     bpf_map_delete_elem(map_fd, &prev_key);
     removed++;
   }
-  printf("Gone through %d entries and removed %d of them\n", entries, removed);
+  __u64 duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
+  printf("Gone through %d entries and removed %d of them in %llu.%09llu\n", entries, removed, duration / BILLION, duration % BILLION);
   return removed;
+}
+
+static void *periodic_map_cleanup(void *args)
+{
+  struct map_cleanup_args *argp = args;
+  struct timespec interval;
+  interval.tv_sec = MAP_CLEANUP_INTERVAL / BILLION;
+  interval.tv_nsec = MAP_CLEANUP_INTERVAL % BILLION;
+  while (keep_running) {
+    remove_old_entries_from_map(argp->map_fd, argp->max_age_ns);
+    nanosleep(&interval, NULL);
+  }
+  pthread_exit(NULL);
+}
+
+static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
+{
+  const struct rtt_event *e = data;
+  struct in_addr saddr, daddr;
+  saddr.s_addr = e->flow.saddr;
+  daddr.s_addr = e->flow.daddr;
+  printf("%llu.%09llu ms %s:%d+%s:%d\n", e->rtt / BILLION, e->rtt % BILLION,
+	 inet_ntoa(saddr), ntohs(e->flow.sport),
+	 inet_ntoa(daddr), ntohs(e->flow.dport));	 
+}
+
+static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
+{
+  fprintf(stderr, "Lost %llu RTT events on CPU %d\n", lost_cnt, cpu);
 }
 
 int main(int argc, char *argv[])
@@ -137,8 +175,10 @@ int main(int argc, char *argv[])
     return EXIT_FAILURE;
   }
 
-  int err;
+  int err = 0, ifindex = 0;
+  bool xdp_attached = false;
   char error_msg[ERROR_MSG_MAX];
+  struct perf_buffer *pb = NULL;
 
   // Setup libbpf errors and debug info on callback
   //libbpf_set_print(libbpf_print_fn);
@@ -147,15 +187,15 @@ int main(int argc, char *argv[])
   err = set_rlimit(RMEMLIM);
   if (err) {
     fprintf(stderr, "Could not set rlimit to %ld bytes: %s\n", RMEMLIM, strerror(-err));
-    return EXIT_FAILURE;
+    goto cleanup;
   }
 
   // Get index of interface
-  int ifindex = if_nametoindex(argv[1]);
+  ifindex = if_nametoindex(argv[1]);
   if (ifindex == 0) {
     err = -errno;
     fprintf(stderr, "Could not get index of interface %s: %s\n", argv[1], strerror(-err));
-    return EXIT_FAILURE;
+    goto cleanup;
   }
   
   // Load and attach XDP program to interface
@@ -165,29 +205,57 @@ int main(int argc, char *argv[])
   err = xdp_load_and_attach(ifindex, PPING_ELF_OBJ, XDP_PROG_SEC, XDP_FLAGS, &obj, &prog_fd, error_msg);
   if (err) {
     fprintf(stderr, "%s: %s\n", error_msg, strerror(-err));
-    return EXIT_FAILURE;
+    goto cleanup;
   }
+  xdp_attached = true;
+
+  // Find map fd (to perform periodic cleanup)
   int map_fd = bpf_object__find_map_fd_by_name(obj, MAP_NAME);
   if (map_fd < 0) {
     fprintf(stderr, "Failed finding map %s in %s: %s\n", MAP_NAME, PPING_ELF_OBJ, strerror(-map_fd));
-    xdp_deatach(ifindex, XDP_FLAGS);
-    return EXIT_FAILURE;
+    goto cleanup;
+  }
+  pthread_t tid;
+  struct map_cleanup_args args = {.map_fd = map_fd, .max_age_ns = TIMESTAMP_LIFETIME};
+  err = pthread_create(&tid, NULL, periodic_map_cleanup, &args);
+  if (err) {
+    fprintf(stderr, "Failed starting thread to perform periodic map cleanup: %s\n", strerror(err));
+    goto cleanup;
+  }
+
+  // Set up perf buffer
+  struct perf_buffer_opts pb_opts;
+  pb_opts.sample_cb = handle_rtt_event;
+  pb_opts.lost_cb = handle_missed_rtt_event;
+  
+  pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj, PERF_BUFFER_NAME), PERF_BUFFER_PAGES, &pb_opts);
+  err = libbpf_get_error(pb);
+  if (err) {
+    pb = NULL;
+    fprintf(stderr, "Failed to open perf buffer %s: %s\n", PERF_BUFFER_NAME, strerror(err));
+    goto cleanup;
   }
 
   // Main loop
-  signal(SIGINT, abort_main_loop);
+  signal(SIGINT, abort_program);
   while(keep_running) {
-    sleep(1);
-    // TODO - print out 
-    remove_old_entries_from_map(map_fd, TIMESTAMP_LIFETIME);
+    if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0) {
+      if (keep_running) // Only print polling error if it wasn't caused by program termination
+	fprintf(stderr, "Error polling perf buffer: %s\n", strerror(-err));
+      break;
+    }
   }
-
-  err = xdp_deatach(ifindex, XDP_FLAGS);
-  if (err) {
-    fprintf(stderr, "Failed deatching program from ifindex %d: %s\n", ifindex, strerror(-err));
-    return EXIT_FAILURE;
+    
+ cleanup:
+  printf("Cleanup!\n");
+  perf_buffer__free(pb);
+  if (xdp_attached) {
+    err = xdp_deatach(ifindex, XDP_FLAGS);
+    if (err) {
+      fprintf(stderr, "Failed deatching program from ifindex %d: %s\n", ifindex, strerror(-err));
+    }
   }
   
-  return EXIT_SUCCESS;
+  return err != 0;
 }
 

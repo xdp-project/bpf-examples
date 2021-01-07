@@ -7,10 +7,11 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 
+#include <string.h>
+
 #include "timestamp_map.h"
 
 #define MAX_TCP_OPTIONS 10
-#define BILLION 1000000000UL
 
 char _license[] SEC("license") = "GPL";
 
@@ -18,7 +19,13 @@ struct bpf_map_def SEC("maps") ts_start = {
   .type = BPF_MAP_TYPE_HASH,
   .key_size = sizeof(struct ts_key),
   .value_size = sizeof(struct ts_timestamp),
-  .max_entries = 4096,
+  .max_entries = 16384,
+};
+
+struct bpf_map_def SEC("maps") rtt_events = {
+  .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+  .key_size = sizeof(__u32), // CPU ID
+  .value_size = sizeof(__u32), // perf file descriptor?
 };
 
 static __always_inline int fill_ipv4_flow(struct ipv4_flow *flow, __u32 saddr, __u32 daddr, __u16 sport, __u16 dport)
@@ -31,6 +38,7 @@ static __always_inline int fill_ipv4_flow(struct ipv4_flow *flow, __u32 saddr, _
 }
 
 // Parses the TSval and TSecr values from the TCP options field - returns 0 if sucessful and -1 on failure
+// If sucessful the TSval and TSecr values will be stored at tsval and tsecr (in network byte order!)
 static __always_inline int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval, __u32 *tsecr)
 {
   if (tcph + 1 > data_end) // To hopefully please verifier
@@ -58,10 +66,10 @@ static __always_inline int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u
     opt_size = *(__u8 *)(pos+1); // Save value to variable so I don't have to perform any more data_end checks on option size
 
     if (opt == 8 && opt_size == 10) { // Option-kind is TCP timestap (yey!)
-      if (pos + opt_size > opt_end ||pos + opt_size > data_end)
+      if (pos + opt_size > opt_end || pos + opt_size > data_end)
 	return -1;
-      *tsval = bpf_ntohl(*(__u32 *)(pos + 2));
-      *tsecr = bpf_ntohl(*(__u32 *)(pos + 6));
+      *tsval = *(__u32 *)(pos + 2);
+      *tsecr = *(__u32 *)(pos + 6);
       return 0;
     }
 
@@ -99,7 +107,7 @@ int xdp_prog_ingress(struct xdp_md *ctx)
   if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0) // No TCP timestamp
     return XDP_PASS;
   // We have a TCP-timestamp - now we can check if it's in the map
-  bpf_printk("TCP-packet with timestap. TSval: %u, TSecr: %u\n", tsval, tsecr);
+  bpf_printk("TCP-packet with timestap. TSval: %u, TSecr: %u\n", bpf_ntohl(tsval), bpf_ntohl(tsecr));
   struct ts_key key;
   fill_ipv4_flow(&(key.flow), iph->daddr, iph->saddr, tcph->dest, tcph->source); // Fill in reverse order of egress (dest <--> source)
   key.tsval = tsecr;
@@ -113,9 +121,13 @@ int xdp_prog_ingress(struct xdp_md *ctx)
   struct ts_timestamp *ts = bpf_map_lookup_elem(&ts_start, &key);
   if (ts && ts->used == 0) {
     ts->used = 1;
-    __u64 rtt = bpf_ktime_get_ns() - ts->timestamp;
-    // TODO: Push RTT + flow to userspace through perf buffer
-    bpf_printk("RTT: %llu\n", rtt);
+    //__u64 rtt = bpf_ktime_get_ns() - ts->timestamp;
+
+    struct rtt_event event = {0};
+    memcpy(&(event.flow), &(key.flow), sizeof(struct ipv4_flow));
+    event.rtt = bpf_ktime_get_ns() - ts->timestamp;
+    bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    bpf_printk("Pushed rtt event with RTT: %llu", event.rtt);
   }
   
   return XDP_PASS;

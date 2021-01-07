@@ -23,4 +23,11 @@ struct ts_timestamp
   // __u8 pad[7]; // Need to pad it due to compiler optimization, see "Remove struct padding with aligning members by using #pragma pack." at https://docs.cilium.io/en/v1.9/bpf/
 
 };
+
+struct rtt_event
+{
+  struct ipv4_flow flow;
+  __u64 rtt;
+};
+
 #endif

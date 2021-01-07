@@ -3,6 +3,8 @@
 USER_TARGETS := pping_user
 BPF_TARGETS := pping_kern
 
+LDFLAGS = -pthread
+
 LIB_DIR = ../lib
 
 include $(LIB_DIR)/common.mk
