@@ -16,11 +16,14 @@
 #include <sys/resource.h> // For setting rlmit
 #include <time.h>
 #include <pthread.h>
-#include "timestamp_map.h" //key and value structs for the ts_start map
+#include "pping.h" //key and value structs for the ts_start map
 
 #define BILLION 1000000000UL
-#define PPING_ELF_OBJ "pping_kern.o"
+#define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
+#define PPING_XDP_OBJ "pping_kern_xdp.o"
 #define XDP_PROG_SEC "pping_ingress"
+#define PPING_TCBPF_OBJ "pping_kern_tc.o"
+#define TCBPF_PROG_SEC "pping_egress"
 #define XDP_FLAGS XDP_FLAGS_UPDATE_IF_NOEXIST
 #define MAP_NAME "ts_start"
 #define MAP_CLEANUP_INTERVAL 1*BILLION // Clean timestamp map once per second 
@@ -28,6 +31,7 @@
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
 #define PERF_POLL_TIMEOUT_MS 100
 #define RMEMLIM 512UL << 20 /* 512 MBs */
+#define MAX_COMMAND_LEN 1024
 #define ERROR_MSG_MAX 1024
 #define TIMESTAMP_LIFETIME 10*BILLION // 10 seconds
 
@@ -79,7 +83,7 @@ static int xdp_load_and_attach(int ifindex, char *obj_path, char *sec, __u32 xdp
 
   prog = bpf_object__find_program_by_title(*obj, sec);
   if (!prog) {
-    if (error_buf) { snprintf(error_buf, ERROR_MSG_MAX, "Could not find section %s in ELF object %s", sec, obj_path); }
+    if (error_buf) { snprintf(error_buf, ERROR_MSG_MAX, "Could not find section %s in object %s", sec, obj_path); }
     return -1;
   }
 
@@ -197,12 +201,23 @@ int main(int argc, char *argv[])
     fprintf(stderr, "Could not get index of interface %s: %s\n", argv[1], strerror(-err));
     goto cleanup;
   }
+
+  //Load tc-bpf section on egress
+  char tc_bpf_load[MAX_COMMAND_LEN];
+  snprintf(tc_bpf_load, MAX_COMMAND_LEN, "%s --dev %s --obj %s --sec %s",
+	   TCBPF_LOADER_SCRIPT, argv[1], PPING_TCBPF_OBJ, TCBPF_PROG_SEC);
+  err = system(tc_bpf_load);
+  if (err) {
+    fprintf(stderr, "Could not load section %s of %s on interface %s: %s\n",
+	    TCBPF_PROG_SEC, PPING_TCBPF_OBJ, argv[1], strerror(err));
+    goto cleanup;
+  }
   
   // Load and attach XDP program to interface
   struct bpf_object *obj = NULL;
   int prog_fd = -1;
 
-  err = xdp_load_and_attach(ifindex, PPING_ELF_OBJ, XDP_PROG_SEC, XDP_FLAGS, &obj, &prog_fd, error_msg);
+  err = xdp_load_and_attach(ifindex, PPING_XDP_OBJ, XDP_PROG_SEC, XDP_FLAGS, &obj, &prog_fd, error_msg);
   if (err) {
     fprintf(stderr, "%s: %s\n", error_msg, strerror(-err));
     goto cleanup;
@@ -212,7 +227,7 @@ int main(int argc, char *argv[])
   // Find map fd (to perform periodic cleanup)
   int map_fd = bpf_object__find_map_fd_by_name(obj, MAP_NAME);
   if (map_fd < 0) {
-    fprintf(stderr, "Failed finding map %s in %s: %s\n", MAP_NAME, PPING_ELF_OBJ, strerror(-map_fd));
+    fprintf(stderr, "Failed finding map %s in %s: %s\n", MAP_NAME, PPING_XDP_OBJ, strerror(-map_fd));
     goto cleanup;
   }
   pthread_t tid;
@@ -247,7 +262,6 @@ int main(int argc, char *argv[])
   }
     
  cleanup:
-  printf("Cleanup!\n");
   perf_buffer__free(pb);
   if (xdp_attached) {
     err = xdp_deatach(ifindex, XDP_FLAGS);
@@ -255,6 +269,7 @@ int main(int argc, char *argv[])
       fprintf(stderr, "Failed deatching program from ifindex %d: %s\n", ifindex, strerror(-err));
     }
   }
+  // TODO: Unload TC-BPF program
   
   return err != 0;
 }

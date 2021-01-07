@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 
-USER_TARGETS := pping_user
-BPF_TARGETS := pping_kern
+USER_TARGETS := pping
+BPF_TARGETS  := pping_kern_xdp pping_kern_tc
 
 LDFLAGS = -pthread
 
