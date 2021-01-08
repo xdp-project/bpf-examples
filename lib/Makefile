@@ -31,15 +31,18 @@ endif
 
 # Detect submodule libbpf source file changes
 LIBBPF_SOURCES := $(wildcard libbpf/src/*.[ch])
+LIBBPF_INSTALL := libbpf-install
+INSTDIR=../../$(LIBBPF_INSTALL)
 
 .PHONY: libbpf_clean
 libbpf/src/libbpf.a: $(LIBBPF_SOURCES)
 	@echo ; echo "  libbpf"
 	$(QUIET_CC)$(MAKE) -C libbpf/src CFLAGS="$(LIBBPF_CFLAGS)" $P
-	$(QUIET_INSTALL)$(MAKE) -C libbpf/src install_headers DESTDIR=root $P
+	$(QUIET_INSTALL)$(MAKE) -C libbpf/src DESTDIR=$(INSTDIR) install_headers $P
 
 libbpf_clean:
 	$(Q)$(MAKE) -C libbpf/src clean $P
+	$(Q)$(RM) -r $(LIBBPF_INSTALL)
 
 else
 
