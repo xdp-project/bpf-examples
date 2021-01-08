@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-2-clause) */
 /*
- * This file contains parsing functions that can be used in eXDP programs. The
- * functions are marked as __always_inline, and fully defined in this header
- * file to be included in the BPF program.
+ * This file contains parsing functions that are used in the packetXX XDP
+ * programs. The functions are marked as __always_inline, and fully defined in
+ * this header file to be included in the BPF program.
  *
  * Each helper parses a packet header, including doing bounds checking, and
  * returns the type of its contents if successful, and -1 otherwise.
@@ -10,6 +10,10 @@
  * For Ethernet and IP headers, the content type is the type of the payload
  * (h_proto for Ethernet, nexthdr for IPv6), for ICMP it is the ICMP type field.
  * All return values are in host byte order.
+ *
+ * The versions of the functions included here are slightly expanded versions of
+ * the functions in the packet01 lesson. For instance, the Ethernet header
+ * parsing has support for parsing VLAN tags.
  */
 
 #ifndef __PARSING_HELPERS_H
@@ -54,7 +58,7 @@ struct icmphdr_common {
 
 /* Allow users of header file to redefine VLAN max depth */
 #ifndef VLAN_MAX_DEPTH
-#define VLAN_MAX_DEPTH 4
+#define VLAN_MAX_DEPTH 2
 #endif
 
 /* Longest chain of IPv6 extension headers to resolve */
@@ -62,6 +66,11 @@ struct icmphdr_common {
 #define IPV6_EXT_MAX_CHAIN 6
 #endif
 
+#define VLAN_VID_MASK		0x0fff /* VLAN Identifier */
+/* Struct for collecting VLANs after parsing via parse_ethhdr_vlan */
+struct collect_vlans {
+	__u16 id[VLAN_MAX_DEPTH];
+};
 
 static __always_inline int proto_is_vlan(__u16 h_proto)
 {
@@ -74,18 +83,24 @@ static __always_inline int proto_is_vlan(__u16 h_proto)
  * Ethernet header. Thus, caller can look at eth->h_proto to see if this was a
  * VLAN tagged packet.
  */
-static __always_inline int parse_ethhdr(struct hdr_cursor *nh, void *data_end,
-					struct ethhdr **ethhdr)
+static __always_inline int parse_ethhdr_vlan(struct hdr_cursor *nh,
+					     void *data_end,
+					     struct ethhdr **ethhdr,
+					     struct collect_vlans *vlans)
 {
 	struct ethhdr *eth = nh->pos;
+	int hdrsize = sizeof(*eth);
 	struct vlan_hdr *vlh;
 	__u16 h_proto;
 	int i;
 
-	if (eth + 1 > data_end)
+	/* Byte-count bounds check; check if current pointer + size of header
+	 * is after data_end.
+	 */
+	if (nh->pos + hdrsize > data_end)
 		return -1;
 
-	nh->pos = eth + 1;
+	nh->pos += hdrsize;
 	*ethhdr = eth;
 	vlh = nh->pos;
 	h_proto = eth->h_proto;
@@ -102,11 +117,23 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh, void *data_end,
 			break;
 
 		h_proto = vlh->h_vlan_encapsulated_proto;
+		if (vlans) /* collect VLAN ids */
+			vlans->id[i] =
+				(bpf_ntohs(vlh->h_vlan_TCI) & VLAN_VID_MASK);
+
 		vlh++;
 	}
 
 	nh->pos = vlh;
 	return h_proto; /* network-byte-order */
+}
+
+static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
+					void *data_end,
+					struct ethhdr **ethhdr)
+{
+	/* Expect compiler removes the code that collects VLAN ids */
+	return parse_ethhdr_vlan(nh, data_end, ethhdr, NULL);
 }
 
 static __always_inline int skip_ip6hdrext(struct hdr_cursor *nh,
@@ -174,6 +201,9 @@ static __always_inline int parse_iphdr(struct hdr_cursor *nh,
 		return -1;
 
 	hdrsize = iph->ihl * 4;
+	/* Sanity check packet field is valid */
+	if(hdrsize < sizeof(iph))
+		return -1;
 
 	/* Variable-length IPv4 header, need to use byte-based arithmetic */
 	if (nh->pos + hdrsize > data_end)
@@ -267,10 +297,15 @@ static __always_inline int parse_tcphdr(struct hdr_cursor *nh,
 		return -1;
 
 	len = h->doff * 4;
-	if ((void *) h + len > data_end)
+	/* Sanity check packet field is valid */
+	if(len < sizeof(h))
 		return -1;
 
-	nh->pos  = h + 1;
+	/* Variable-length TCP header, need to use byte-based arithmetic */
+	if (nh->pos + len > data_end)
+		return -1;
+
+	nh->pos += len;
 	*tcphdr = h;
 
 	return len;

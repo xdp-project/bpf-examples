@@ -1,0 +1,78 @@
+#!/usr/local/bin/bpftrace
+
+#include <linux/skbuff.h>
+
+// tracepoint:net:net_dev_start_xmit
+tracepoint:net:net_dev_xmit
+{
+	$skb = (struct sk_buff *)args->skbaddr;
+	//$tstamp = (uint64)$skb->tstamp;
+	$tstamp = $skb->skb_mstamp_ns;
+	$now = nsecs;
+
+//	if ($skb->mark > 0) {
+	if ($tstamp > 0) {
+		if ($now >= $tstamp) {
+			$diff_late = $now - $tstamp;
+		} else {
+			$diff_ahead = $tstamp - $now;
+		}
+		@tstamp_usec_diff_late = hist($diff_late / 1000);
+		@tstamp_usec_diff_ahead = hist($diff_ahead / 1000);
+	}
+
+	/* Capture burstiness over a time period, by dividing nanosec
+	 * timestamp with wanted period, and keeping state byte counter as
+	 * long as timestamp match.
+	 *
+	 * Practical usage shows that bpftrace uses a hash-map to implement
+	 * this, which unfortunately cost too much (shows 5% jhash cpu
+	 * usage), enough overhead to change behavior of prod system.
+	 */
+	//$period = $now / 10000; /* 10000 = 10 usec */
+	$period = $now / 30000; /* 30000 = 30 usec */
+	if (@state[cpu] == $period) {
+		@state_bytes[cpu] += $skb->len;
+	} else {	
+		@state[cpu] = $period;
+		if (@state_bytes[cpu] > 0) {
+			@byte_burst[cpu] = hist(@state_bytes[cpu]);
+		}
+		@state_bytes[cpu] = $skb->len; /* Reset counter */
+	}
+}
+
+/*
+tracepoint:qdisc:qdisc_dequeue
+{
+	@qdisc_bulk_dequeue = lhist(args->packets, 0,64,1);
+}
+*/
+
+/*
+kretfunc:dev_hard_start_xmit
+{
+// Wanted to know if ret == NETDEV_TX_BUSY
+# ERROR: kfunc/kretfunc not available for your linked against bcc version.
+}
+*/
+
+
+/* How often does FQ-pacer find no-packets are qualified to be
+ * scheduled, which leads to scheduling an hrtimer event, that will
+ * start qdisc again at a later time.
+ *
+ * We cannot kprobe fq_dequeue as it is a module.
+ */
+
+/*
+kprobe:qdisc_watchdog_schedule_range_ns
+{
+	@qdisc_watchdog[cpu] = count();
+}
+
+kprobe:__netif_schedule
+{
+	@__netif_schedule[cpu] = count();
+}
+*/

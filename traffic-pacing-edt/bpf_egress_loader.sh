@@ -11,12 +11,12 @@ root_check_run_with_sudo "$@"
 # Use common parameters
 source ${basedir}/parameters.sh
 
-export TC=/sbin/tc
+export TC=tc
 
 # This can be changed via --file or --obj
 if [[ -z ${BPF_OBJ} ]]; then
     # Fallback default
-    BPF_OBJ=edt_pacer02.o
+    BPF_OBJ=edt_pacer_vlan.o
 fi
 
 info "Applying TC-BPF egress setup on device: $DEV with object file: $BPF_OBJ"
