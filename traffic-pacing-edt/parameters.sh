@@ -10,10 +10,10 @@ function usage() {
     echo "Usage: $0 [-vh] --dev ethX"
     echo "  -d | --dev     : (\$DEV)        Interface/device (required)"
     echo "  -v | --verbose : (\$VERBOSE)    verbose"
-    echo "  --remove       : (\$REMOVE)     Remove the TC rules"
+    echo "  --remove       : (\$REMOVE)     Remove the rules"
     echo "  --dry-run      : (\$DRYRUN)     Dry-run only (echo tc commands)"
-    echo "  -s | --stats   : (\$STATS_ONLY) Call TC statistics command"
-    echo "  -l | --list    : (\$LIST)       List TC filter setup after setup"
+    echo "  -s | --stats   : (\$STATS_ONLY) Call statistics command"
+    echo "  -l | --list    : (\$LIST)       List setup after setup"
     echo "  --file | --obj : (\$BPF_OBJ)    BPF-object file to load"
     echo ""
 }
@@ -80,5 +80,5 @@ done
 
 if [ -z "$DEV" ]; then
     usage
-    err 2 "Please specify TC net_device"
+    err 2 "Please specify net_device (\$DEV)"
 fi

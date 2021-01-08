@@ -1,0 +1,31 @@
+#!/usr/local/bin/bpftrace
+
+#include <linux/skbuff.h>
+
+/* Measure time difference between EDT-time and real "NIC" TX-time.
+ *
+ * Assuming packets are EDT timestamped by the BPF-program, we can
+ * detect/measure how accuratly packets are actually transmitted
+ * towards the NIC driver, by comparing EDT-time against "now"
+ * timestamp in the function transmitting to the NIC driver.
+ */
+
+// tracepoint:net:net_dev_start_xmit
+tracepoint:net:net_dev_xmit
+{
+	$skb = (struct sk_buff *)args->skbaddr;
+	//$tstamp = (uint64)$skb->tstamp;
+	$tstamp = $skb->skb_mstamp_ns;
+	$now = nsecs;
+
+	// if ($skb->mark > 0) {
+	if ($tstamp > 0) {
+		if ($now >= $tstamp) {
+			$diff_late = $now - $tstamp;
+		} else {
+			$diff_ahead = $tstamp - $now;
+		}
+		@tstamp_diff_late = hist($diff_late / 1000);
+		@tstamp_diff_ahead = hist($diff_ahead / 1000);
+	}
+}
