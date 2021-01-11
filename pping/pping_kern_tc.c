@@ -1,5 +1,6 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <iproute2/bpf_elf.h>
 #include <xdp/parsing_helpers.h>
 
 #include <linux/in.h>
@@ -15,11 +16,12 @@
 
 char _license[] SEC("license") = "GPL";
 
-struct bpf_map_def SEC("maps") ts_start = {
+struct bpf_elf_map SEC("maps") ts_start = {
   .type = BPF_MAP_TYPE_HASH,
-  .key_size = sizeof(struct ts_key),
-  .value_size = sizeof(struct ts_timestamp),
-  .max_entries = 16384,
+  .size_key = sizeof(struct ts_key),
+  .size_value = sizeof(struct ts_timestamp),
+  .max_elem = 16384,
+  .pinning = PIN_GLOBAL_NS,
 };
 
 // TC-BFP for parsing TSVAL from egress traffic and add to map
@@ -29,7 +31,7 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
   void *data     = (void *)(long)skb->data;
   void *data_end = (void *)(long)skb->data_end;
 
-  bpf_printk("Sent packet of size %d bytes\n", data_end - data);
+  // bpf_printk("Sent packet of size %d bytes\n", data_end - data);
   
   int proto = -1;
   struct hdr_cursor nh = {.pos = data};
@@ -47,20 +49,19 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
   if (proto < 0)
     goto end; // Failed parsing TCP-header
 
-  bpf_printk("TCP-packet with %d byte header and %lu bytes of data\n", proto, data_end - nh.pos);
+  //bpf_printk("TCP-packet with %d byte header and %lu bytes of data\n", proto, data_end - nh.pos);
 
-    __u32 tsval, tsecr;
+  __u32 tsval, tsecr;
   if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0) // No TCP timestamp
     goto end;
-  // We have a TCP-timestamp - now we can check if it's in the map
-  bpf_printk("TCP-packet with timestap. TSval: %u, TSecr: %u\n", bpf_ntohl(tsval), bpf_ntohl(tsecr));
+  // We have a TCP timestamp, try adding it to the map
+  //bpf_printk("TCP-packet with timestap. TSval: %u, TSecr: %u\n", bpf_ntohl(tsval), bpf_ntohl(tsecr));
   struct ts_key key;
   fill_ipv4_flow(&(key.flow), iph->saddr, iph->daddr, tcph->source, tcph->dest);
   key.tsval = tsval;
 
-  // Should only look up map (filling done on egress), but temporarily add to map before I get the TC-BPF part working
   struct ts_timestamp ts = {0};
-  ts.timestamp = bpf_ktime_get_ns(); //Verifier was unhappy when using bpf_ktime_get_boot_ns
+  ts.timestamp = bpf_ktime_get_ns(); // Consider using bpf_ktime_get_boot_ns if kernel supports it
   bpf_map_update_elem(&ts_start, &key, &ts, BPF_NOEXIST);
 
  end:

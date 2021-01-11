@@ -55,18 +55,12 @@ int xdp_prog_ingress(struct xdp_md *ctx)
   __u32 tsval, tsecr;
   if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0) // No TCP timestamp
     goto end;
+
   // We have a TCP-timestamp - now we can check if it's in the map
   //bpf_printk("TCP-packet with timestap. TSval: %u, TSecr: %u\n", bpf_ntohl(tsval), bpf_ntohl(tsecr));
   struct ts_key key;
   fill_ipv4_flow(&(key.flow), iph->daddr, iph->saddr, tcph->dest, tcph->source); // Fill in reverse order of egress (dest <--> source)
   key.tsval = tsecr;
-
-  // Should only look up map map (filling done on egress), but temporarily add to map before I get the TC-BPF part working
-  struct ts_timestamp wrong_value = {0};
-  wrong_value.timestamp = bpf_ktime_get_ns(); //Verifier was unhappy when using bpf_ktime_get_boot_ns
-  bpf_map_update_elem(&ts_start, &key, &wrong_value, BPF_NOEXIST);
-
-
   struct ts_timestamp *ts = bpf_map_lookup_elem(&ts_start, &key);
   if (ts && ts->used == 0) { // Only calculate RTT for first packet with matching TSecr
     // As used is not set atomically with the lookup, could potentially have multiple "first" packets (on different CPUs), but all those should then also have very similar RTT, so don't consider it a significant issue
@@ -76,7 +70,7 @@ int xdp_prog_ingress(struct xdp_md *ctx)
     memcpy(&(event.flow), &(key.flow), sizeof(struct ipv4_flow));
     event.rtt = bpf_ktime_get_ns() - ts->timestamp;
     bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-    bpf_printk("Pushed rtt event with RTT: %llu\n", event.rtt);
+    //bpf_printk("Pushed rtt event with RTT: %llu\n", event.rtt);
   }
  end:
   return XDP_PASS;

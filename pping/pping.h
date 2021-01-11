@@ -19,6 +19,7 @@ struct ts_key
 struct ts_timestamp
 {
   __u64 timestamp;
+  //__u64 ttl; // Delete entry after ttl, allows more dynamic map cleaning where entries for flows with short RTTs can be removed earlier
   __u8 used;
   // __u8 pad[7]; // Need to pad it due to compiler optimization, see "Remove struct padding with aligning members by using #pragma pack." at https://docs.cilium.io/en/v1.9/bpf/
 
