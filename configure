@@ -87,7 +87,7 @@ check_libbpf()
 {
     local libbpf_err
 
-    if ${PKG_CONFIG} libbpf --exists || [ -n "$LIBBPF_DIR" ]; then
+    if [ "${FORCE_SUBMODULE_LIBBPF:-0}" -ne "1" ] && ${PKG_CONFIG} libbpf --exists || [ -n "$LIBBPF_DIR" ]; then
 
         if [ -n "$LIBBPF_DIR" ]; then
             LIBBPF_CFLAGS="-I${LIBBPF_DIR}/include -L${LIBBPF_DIR}/lib"
@@ -119,8 +119,6 @@ EOF
             echo 'OBJECT_LIBBPF = ' >>$CONFIG
             echo system
 
-            echo -n "perf_buffer__consume support: "
-            check_perf_consume
             return 0
         fi
     else
