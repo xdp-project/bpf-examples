@@ -10,6 +10,7 @@ endif
 
 ifeq ($(VERBOSE),0)
 MAKEFLAGS += --no-print-directory
+Q = @
 endif
 
 SUBDIRS := encap-forward lsm-nobpf
@@ -54,8 +55,9 @@ clobber:
 distclean: clobber
 
 clean: check_submodule
-	@for i in $(SUBDIRS); \
+	$(Q)for i in $(SUBDIRS); \
 	do $(MAKE) -C $$i clean; done
+	$(Q)$(MAKE) -C lib clean
 
 compile_commands.json: clean
 	compiledb make V=1
