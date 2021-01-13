@@ -1,3 +1,4 @@
 [submodule "lib/libbpf"]
 	path = lib/libbpf
 	url = https://github.com/xdp-project/libbpf.git
+	ignore = dirty
