@@ -2,6 +2,7 @@
 
 USER_TARGETS :=
 BPF_TARGETS := tc_bpf_inc_pkt_size
+BPF_TARGETS += tc_mtu_enforce
 EXTRA_DEPS := encap.h
 
 LIB_DIR = ../lib
