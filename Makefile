@@ -1,6 +1,5 @@
-
 # SPDX-License-Identifier: GPL-2.0
-# Top level Makefile for xdp-tools
+# Top level Makefile for bpf-examples
 
 ifeq ("$(origin V)", "command line")
 VERBOSE = $(V)
@@ -11,6 +10,7 @@ endif
 
 ifeq ($(VERBOSE),0)
 MAKEFLAGS += --no-print-directory
+Q = @
 endif
 
 SUBDIRS := encap-forward lsm-nobpf
@@ -36,7 +36,7 @@ help:
 	@echo "Make Arguments:"
 	@echo " V=[0|1]             - set build verbosity level"
 
-config.mk:
+config.mk: configure
 	sh configure
 
 check_submodule:
@@ -55,8 +55,9 @@ clobber:
 distclean: clobber
 
 clean: check_submodule
-	@for i in $(SUBDIRS); \
+	$(Q)for i in $(SUBDIRS); \
 	do $(MAKE) -C $$i clean; done
+	$(Q)$(MAKE) -C lib clean
 
 compile_commands.json: clean
 	compiledb make V=1

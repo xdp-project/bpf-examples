@@ -9,7 +9,8 @@ LIB_DIR = ../lib
 
 include $(LIB_DIR)/common.mk
 
-# The iproute2 'tc' tool doesn't understand BTF debug info
+ifndef HAVE_TC_LIBBPF
+# If the iproute2 'tc' tool doesn't understand BTF debug info
 # use llvm-strip to remove this debug info from object file
 #
 # *BUT* cannot strip everything as it removes ELF elems needed for
@@ -20,3 +21,4 @@ strip_tc_obj: tc_bpf_inc_pkt_size.o
 	$(Q) llvm-strip --no-strip-all --remove-section .BTF $?
 
 all: strip_tc_obj
+endif
