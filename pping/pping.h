@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef TIMESTAMP_MAP_H
 #define TIMESTAMP_MAP_H
 #include <linux/types.h>
