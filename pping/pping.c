@@ -23,7 +23,7 @@
 #define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
 #define PINNED_DIR "/sys/fs/bpf/tc/globals"
 #define PPING_XDP_OBJ "pping_kern_xdp.o"
-#define XDP_PROG_SEC "pping_ingress"
+#define XDP_PROG_SEC "xdp"
 #define PPING_TCBPF_OBJ "pping_kern_tc.o"
 #define TCBPF_PROG_SEC "pping_egress"
 #define XDP_FLAGS XDP_FLAGS_UPDATE_IF_NOEXIST
@@ -74,80 +74,14 @@ static int set_rlimit(long int lim)
 }
 
 static int bpf_obj_open(struct bpf_object **obj, const char *obj_path,
-			enum bpf_prog_type prog_type)
+			char *map_path)
 {
-	struct bpf_object_open_attr attr = {
-		.prog_type = prog_type,
-		.file = obj_path,
+	struct bpf_object_open_opts opts = {
+		.sz = sizeof(struct bpf_object_open_opts),
+		.pin_root_path = map_path,
 	};
-	*obj = bpf_object__open_xattr(&attr);
+	*obj = bpf_object__open_file(obj_path, map_path ? &opts : NULL);
 	return libbpf_get_error(*obj);
-}
-
-static int bpf_obj_load(struct bpf_object *obj, enum bpf_prog_type prog_type)
-{
-	struct bpf_program *prog;
-	bpf_object__for_each_program(prog, obj)
-	{
-		bpf_program__set_type(prog, prog_type);
-	}
-
-	return bpf_object__load(obj);
-}
-
-static int reuse_pinned_map(int *map_fd, const char *map_name,
-			    const char *pinned_dir, struct bpf_object *obj,
-			    struct bpf_map_info *expec_map_info)
-{
-	struct bpf_map *map;
-	struct bpf_map_info map_info = { 0 };
-	__u32 info_len = sizeof(map_info);
-	char pinned_map_path[MAX_PATH_LEN];
-	int err;
-
-	// Find map in object file
-	map = bpf_object__find_map_by_name(obj, map_name);
-	err = libbpf_get_error(map);
-	if (err) {
-		fprintf(stderr, "Could not find map %s in object\n", map_name);
-		return err;
-	}
-
-	// Find pinned map
-	snprintf(pinned_map_path, sizeof(pinned_map_path), "%s/%s", pinned_dir,
-		 map_name);
-	*map_fd = bpf_obj_get(pinned_map_path);
-	if (*map_fd < 0) {
-		fprintf(stderr, "Could not find map %s in path %s\n", map_name,
-			pinned_dir);
-		return *map_fd;
-	}
-
-	// Verify map has expected format
-	err = bpf_obj_get_info_by_fd(*map_fd, &map_info, &info_len);
-	if (err) {
-		fprintf(stderr, "Could not get map info from %s\n",
-			pinned_map_path);
-		return err;
-	}
-
-	if (map_info.type != expec_map_info->type ||
-	    map_info.key_size != expec_map_info->key_size ||
-	    map_info.value_size != expec_map_info->value_size ||
-	    map_info.max_entries != expec_map_info->max_entries) {
-		fprintf(stderr,
-			"Pinned map at %s does not match expected format\n",
-			pinned_map_path);
-		return -EINVAL;
-	}
-
-	// Try reusing map
-	err = bpf_map__reuse_fd(map, *map_fd);
-	if (err) {
-		fprintf(stderr, "Failed reusing map fd\n");
-		return err;
-	}
-	return 0;
 }
 
 static int xdp_detach(int ifindex, __u32 xdp_flags)
@@ -257,6 +191,25 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "Lost %llu RTT events on CPU %d\n", lost_cnt, cpu);
 }
 
+static void print_maps(struct bpf_object *obj)
+{
+	struct bpf_map *map;
+	bpf_object__for_each_map(map, obj) {
+		printf("Map name: %s, fd: %d\n",
+		       bpf_map__name(map), bpf_map__fd(map));
+	}
+	printf("\n");
+}
+
+static int get_first_map_fd(struct bpf_object *obj)
+{
+	struct bpf_map *map;
+	bpf_object__for_each_map(map, obj) {
+		return bpf_map__fd(map);
+	}
+	return -1;
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc < 2) {
@@ -264,10 +217,21 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	int err = 0, ifindex = 0;
+	int err = 0;
+	int ifindex = 0;
 	bool xdp_attached = false;
-	struct perf_buffer *pb = NULL;
 
+	char tc_bpf_load[MAX_COMMAND_LEN];
+	
+	struct bpf_object *obj = NULL;
+	
+	pthread_t tid;
+	struct map_cleanup_args clean_args;
+
+	struct perf_buffer *pb = NULL;
+	struct perf_buffer_opts pb_opts;
+
+	
 	// Increase rlimit
 	err = set_rlimit(RMEMLIM);
 	if (err) {
@@ -286,7 +250,6 @@ int main(int argc, char *argv[])
 	}
 
 	//Load tc-bpf section on interface egress
-	char tc_bpf_load[MAX_COMMAND_LEN];
 	snprintf(tc_bpf_load, MAX_COMMAND_LEN, "%s --dev %s --obj %s --sec %s",
 		 TCBPF_LOADER_SCRIPT, argv[1], PPING_TCBPF_OBJ, TCBPF_PROG_SEC);
 	err = system(tc_bpf_load);
@@ -298,38 +261,29 @@ int main(int argc, char *argv[])
 		goto cleanup;
 	}
 
-	// Reuse map pinned by tc for the xpd-program
-	struct bpf_object *obj;
-	int map_fd = 0;
-	struct bpf_map_info expected_map_info = {
-		.type = BPF_MAP_TYPE_HASH,
-		.key_size = sizeof(struct ts_key),
-		.value_size = sizeof(struct ts_timestamp),
-		.max_entries = 16384,
-	};
-
-	err = bpf_obj_open(&obj, PPING_XDP_OBJ, BPF_PROG_TYPE_XDP);
+	// Open XDP object
+	err = bpf_obj_open(&obj, PPING_XDP_OBJ, PINNED_DIR);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
 			PPING_XDP_OBJ, strerror(-err));
 		goto cleanup;
 	}
 
-	err = reuse_pinned_map(&map_fd, MAP_NAME, PINNED_DIR, obj,
-			       &expected_map_info);
-	if (err) {
-		fprintf(stderr, "Failed reusing fd for map %s: %s\n", MAP_NAME,
-			strerror(-err));
-		goto cleanup;
-	}
+	printf("Maps after opening object\n");
+	print_maps(obj);
 
-	// Load and attach XDP program
-	err = bpf_obj_load(obj, BPF_PROG_TYPE_XDP);
+	// Load XDP program
+	err = bpf_object__load(obj);
 	if (err) {
 		fprintf(stderr, "Failed loading XDP program: %s\n",
 			strerror(-err));
 		goto cleanup;
 	}
+
+	printf("Maps after loading object\n");
+	print_maps(obj);
+
+	// Attach XDP program to interface
 	err = xdp_attach(obj, XDP_PROG_SEC, ifindex, XDP_FLAGS, false);
 	if (err) {
 		fprintf(stderr, "Failed attaching XDP program to %s: %s\n",
@@ -338,11 +292,17 @@ int main(int argc, char *argv[])
 	}
 	xdp_attached = true;
 
-	// Setup periodic cleanup of ts_start
-	pthread_t tid;
-	struct map_cleanup_args args = { .map_fd = map_fd,
-					 .max_age_ns = TIMESTAMP_LIFETIME };
-	err = pthread_create(&tid, NULL, periodic_map_cleanup, &args);
+	// Set up the periodical map cleaning	
+	//clean_args.map_fd = bpf_object__find_map_fd_by_name(obj, MAP_NAME); //doesn't work?
+	clean_args.map_fd = get_first_map_fd(obj);
+	if (clean_args.map_fd < 0) {
+		fprintf(stderr, "Could not find map %s in object %s: %s\n",
+			MAP_NAME, PPING_XDP_OBJ, strerror(-clean_args.map_fd));
+		goto cleanup;
+	}
+
+	clean_args.max_age_ns = TIMESTAMP_LIFETIME;
+	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
 	if (err) {
 		fprintf(stderr,
 			"Failed starting thread to perform periodic map cleanup: %s\n",
@@ -351,7 +311,6 @@ int main(int argc, char *argv[])
 	}
 
 	// Set up perf buffer
-	struct perf_buffer_opts pb_opts;
 	pb_opts.sample_cb = handle_rtt_event;
 	pb_opts.lost_cb = handle_missed_rtt_event;
 

@@ -15,21 +15,22 @@
 
 char _license[] SEC("license") = "GPL";
 
-struct bpf_map_def SEC("maps") ts_start = {
-	.type = BPF_MAP_TYPE_HASH,
-	.key_size = sizeof(struct ts_key),
-	.value_size = sizeof(struct ts_timestamp),
-	.max_entries = 16384,
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(struct ts_key));
+	__uint(value_size, sizeof(struct ts_timestamp));
+	__uint(max_entries, 16384);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} ts_start SEC(".maps");
 
-struct bpf_map_def SEC("maps") rtt_events = {
-	.type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-	.key_size = sizeof(__u32), // CPU ID
-	.value_size = sizeof(__u32), // perf file descriptor?
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u32));
+} rtt_events SEC(".maps");
 
 // XDP program for parsing TSECR-val from ingress traffic and check for match in map
-SEC("pping_ingress")
+SEC("xdp")
 int xdp_prog_ingress(struct xdp_md *ctx)
 {
 	void *data = (void *)(long)ctx->data;
