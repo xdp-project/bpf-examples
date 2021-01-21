@@ -4,11 +4,12 @@
 - [x] Clean up commits and add signed-off-by tags
 - [x] Add SPDX-license-identifier tags
 - [x] Format C-code in kernel style
-- [ ] Use existing funcionality to reuse maps by using BTF-defined maps
+- [x] Use existing funcionality to reuse maps by using BTF-defined maps
+  - [ ] Use BTF-defined maps for TC-BPF as well if iproute has libbpf support
 
 ## Future
 - [ ] Use libxdp to load XDP program
-- [ ] Cleanup: Unload TC-BPF at program shutdown, and unpin and delete map - In userspace part
+- [x] Cleanup: Unload TC-BPF at program shutdown, and unpin map - In userspace part
 - [ ] Add IPv6 support - In TC-BPF, XDP and userspace part
 - [ ] Check for existance of reverse flow before adding to hash-map (to avoid adding timestamps for flows that we can't see the reverse traffic for) - In TC-BPF part
   -  This could miss the first few packets, would not be ideal for short flows
