@@ -16,6 +16,16 @@
 
 char _license[] SEC("license") = "GPL";
 
+#ifdef HAVE_TC_LIBBPF /* detected by configure script in config.mk */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(struct ts_key));
+	__uint(value_size, sizeof(struct ts_timestamp));
+	__uint(max_entries, 16384);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} ts_start SEC(".maps");
+
+#else
 struct bpf_elf_map SEC("maps") ts_start = {
 	.type = BPF_MAP_TYPE_HASH,
 	.size_key = sizeof(struct ts_key),
@@ -23,6 +33,7 @@ struct bpf_elf_map SEC("maps") ts_start = {
 	.max_elem = 16384,
 	.pinning = PIN_GLOBAL_NS,
 };
+#endif
 
 // TC-BFP for parsing TSVAL from egress traffic and add to map
 SEC("pping_egress")

@@ -3,6 +3,9 @@
 # Author: Jesper Dangaaard Brouer <netoptimizer@brouer.com>
 # License: GPLv2
 #
+# Extended by Simon Sundberg <simon.sundberg@kau.se> to add support
+# of optional section (--sec) option
+#
 basedir=`dirname $0`
 source ${basedir}/functions.sh
 
@@ -16,13 +19,13 @@ export TC=/sbin/tc
 # This can be changed via --file or --obj
 if [[ -z ${BPF_OBJ} ]]; then
     # Fallback default
-    BPF_OBJ=pping.bpf.o
+    BPF_OBJ=pping_kern_tc.o
 fi
 
 # This can be changed via --sec
-if [[ -z ${BPF_OBJ} ]]; then
+if [[ -z ${SEC} ]]; then
     # Fallback default
-    SEC=egress
+    SEC=pping_egress
 fi
 
 info "Applying TC-BPF egress setup on device: $DEV with object file: $BPF_OBJ"
@@ -57,9 +60,8 @@ function tc_egress_bpf_attach()
     local section=${3:-$SEC}
     shift 3
 
-    # TODO: Handle selecting program 'sec' - Simon Sundberg added section option 2021-01-08
     call_tc filter add dev "$device" pref 2  handle 2 \
-            egress bpf da obj "$objfile" sec "$section"
+	    egress bpf da obj "$objfile" sec "$section"
 }
 
 function tc_egress_list()
