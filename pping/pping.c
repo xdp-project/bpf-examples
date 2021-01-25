@@ -178,9 +178,10 @@ static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 	struct in_addr saddr, daddr;
 	saddr.s_addr = e->flow.saddr;
 	daddr.s_addr = e->flow.daddr;
-	printf("%llu.%06llu ms %s:%d+%s:%d\n", e->rtt / MILLION,
-	       e->rtt % MILLION, inet_ntoa(saddr), ntohs(e->flow.sport),
-	       inet_ntoa(daddr), ntohs(e->flow.dport));
+	// inet_ntoa is deprecated, will switch to inet_ntop when adding IPv6 support
+	printf("%llu.%06llu ms %s:%d+", e->rtt / MILLION,
+	       e->rtt % MILLION, inet_ntoa(daddr), ntohs(e->flow.dport));
+	printf("%s:%d\n", inet_ntoa(saddr), ntohs(e->flow.sport));
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
