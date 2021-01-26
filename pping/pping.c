@@ -3,7 +3,6 @@
 #include <bpf/libbpf.h>
 #include <linux/if_link.h>
 #include <net/if.h> // For if_nametoindex
-//#include <linux/err.h> // For IS_ERR_OR_NULL macro // use libbpf_get_error instead
 #include <arpa/inet.h> // For inet_ntoa and ntohs
 
 #include <stdio.h>
@@ -14,28 +13,31 @@
 #include <stdbool.h>
 #include <signal.h> // For detecting Ctrl-C
 #include <sys/resource.h> // For setting rlmit
+#include <sys/wait.h>
 #include <time.h>
 #include <pthread.h>
+
 #include "pping.h" //key and value structs for the ts_start map
 
-#define BILLION 1000000000UL
-#define MILLION 1000000UL
+#define NS_PER_SECOND 1000000000UL
+#define NS_PER_MS 1000000UL
+
 #define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
 #define PINNED_DIR "/sys/fs/bpf/tc/globals"
 #define PPING_XDP_OBJ "pping_kern_xdp.o"
-#define XDP_PROG_SEC "xdp"
 #define PPING_TCBPF_OBJ "pping_kern_tc.o"
-#define TCBPF_PROG_SEC "pping_egress"
+
 #define XDP_FLAGS XDP_FLAGS_UPDATE_IF_NOEXIST
-#define MAP_NAME "ts_start"
-#define MAP_CLEANUP_INTERVAL 1 * BILLION // Clean timestamp map once per second
-#define PERF_BUFFER_NAME "rtt_events"
+
+#define TS_MAP "ts_start"
+#define MAP_CLEANUP_INTERVAL 1 * NS_PER_SECOND // Clean timestamp map once per second
+#define TIMESTAMP_LIFETIME 10 * NS_PER_SECOND // Clear out entries from ts_start if they're over 10 seconds
+
+#define PERF_BUFFER "rtt_events"
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
 #define PERF_POLL_TIMEOUT_MS 100
-#define RMEMLIM 512UL << 20 /* 512 MBs */
-#define MAX_COMMAND_LEN 1024
+
 #define MAX_PATH_LEN 1024
-#define TIMESTAMP_LIFETIME 10 * BILLION // Clear out entries from ts_start if they're over 10 seconds
 
 /* 
  * BPF implementation of pping using libbpf
@@ -50,6 +52,7 @@
  *   (together with the related flow) and printed out 
  */
 
+// Structure to contain arguments for clean_map (for passing to pthread_create)
 struct map_cleanup_args {
 	int map_fd;
 	__u64 max_age_ns;
@@ -97,6 +100,7 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 		prog = bpf_object__find_program_by_title(obj, sec);
 	else
 		prog = bpf_program__next(NULL, obj);
+
 	prog_fd = bpf_program__fd(prog);
 	if (prog_fd < 0) {
 		fprintf(stderr, "Could not find program to attach\n");
@@ -105,6 +109,7 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 
 	if (force) // detach current (if any) xdp-program first
 		xdp_detach(ifindex, xdp_flags);
+
 	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
 	if (err < 0) {
 		fprintf(stderr, "Failed loading xdp-program on interface %d\n",
@@ -114,21 +119,76 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 	return 0;
 }
 
+static int tc_bpf_load(const char *bpf_object, const char *section,
+		       const char *interface)
+{
+	int status;
+	int ret = -1;
+
+	pid_t pid = fork();
+
+	if (pid < 0)
+		return -errno;
+	if (pid == 0) {
+		execl(TCBPF_LOADER_SCRIPT, TCBPF_LOADER_SCRIPT,
+		      "--dev", interface, "--obj", bpf_object,
+		      "--sec", section, NULL);
+		return -errno;
+	}
+	else { //pid > 0
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status))
+			ret = WEXITSTATUS(status);
+		return ret;
+	}
+}
+
+static int tc_bpf_clear(const char *interface)
+{
+	int status;
+	int ret = -1;
+
+	pid_t pid = fork();
+
+	if (pid < 0)
+		return -errno;
+	if (pid == 0) {
+		execl(TCBPF_LOADER_SCRIPT, TCBPF_LOADER_SCRIPT,
+		      "--dev", interface, "--remove", NULL);
+		return -errno;
+	}
+	else { //pid > 0
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status))
+			ret = WEXITSTATUS(status);
+		return ret;
+	}
+}
+
+/*
+ * Returns time of CLOCK_MONOTONIC as nanoseconds in a single __u64.
+ * On failure, the value 0 is returned (and errno will be set).
+ */
 static __u64 get_time_ns(clockid_t clockid)
 {
 	struct timespec t;
 	if (clock_gettime(clockid, &t) != 0) // CLOCK_BOOTTIME if using bpf_get_ktime_boot_ns
 		return 0;
-	return (__u64)t.tv_sec * BILLION + (__u64)t.tv_nsec;
+
+	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
-static int remove_old_entries_from_map(int map_fd, __u64 max_age)
+static int clean_map(int map_fd, __u64 max_age)
 {
-	int removed = 0, entries = 0;
+	int removed = 0;
 	struct ts_key key, prev_key = { 0 };
 	struct ts_timestamp value;
 	bool delete_prev = false;
 	__u64 now_nsec = get_time_ns(CLOCK_MONOTONIC);
+
+	int entries = 0; // Just for debug
+	__u64 duration; // Just for debug
+
 	if (now_nsec == 0)
 		return -errno;
 
@@ -153,9 +213,9 @@ static int remove_old_entries_from_map(int map_fd, __u64 max_age)
 		bpf_map_delete_elem(map_fd, &prev_key);
 		removed++;
 	}
-	__u64 duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
+	duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
 	printf("Gone through %d entries and removed %d of them in %llu.%09llu s\n",
-	       entries, removed, duration / BILLION, duration % BILLION);
+	       entries, removed, duration / NS_PER_SECOND, duration % NS_PER_SECOND);
 	return removed;
 }
 
@@ -163,10 +223,11 @@ static void *periodic_map_cleanup(void *args)
 {
 	struct map_cleanup_args *argp = args;
 	struct timespec interval;
-	interval.tv_sec = MAP_CLEANUP_INTERVAL / BILLION;
-	interval.tv_nsec = MAP_CLEANUP_INTERVAL % BILLION;
+	interval.tv_sec = MAP_CLEANUP_INTERVAL / NS_PER_SECOND;
+	interval.tv_nsec = MAP_CLEANUP_INTERVAL % NS_PER_SECOND;
+
 	while (keep_running) {
-		remove_old_entries_from_map(argp->map_fd, argp->max_age_ns);
+		clean_map(argp->map_fd, argp->max_age_ns);
 		nanosleep(&interval, NULL);
 	}
 	pthread_exit(NULL);
@@ -178,9 +239,10 @@ static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 	struct in_addr saddr, daddr;
 	saddr.s_addr = e->flow.saddr;
 	daddr.s_addr = e->flow.daddr;
+
 	// inet_ntoa is deprecated, will switch to inet_ntop when adding IPv6 support
-	printf("%llu.%06llu ms %s:%d+", e->rtt / MILLION,
-	       e->rtt % MILLION, inet_ntoa(daddr), ntohs(e->flow.dport));
+	printf("%llu.%06llu ms %s:%d+", e->rtt / NS_PER_MS,
+	       e->rtt % NS_PER_MS, inet_ntoa(daddr), ntohs(e->flow.dport));
 	printf("%s:%d\n", inet_ntoa(saddr), ntohs(e->flow.sport));
 }
 
@@ -191,17 +253,10 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 
 int main(int argc, char *argv[])
 {
-	if (argc < 2) {
-		printf("Usage: ./pping_user <dev>\n");
-		return EXIT_FAILURE;
-	}
-
 	int err = 0;
 	int ifindex = 0;
 	bool xdp_attached = false;
 	bool tc_attached = false;
-
-	char tc_cmd[MAX_COMMAND_LEN];
 	char map_path[MAX_PATH_LEN];
 	
 	struct bpf_object *obj = NULL;
@@ -213,12 +268,17 @@ int main(int argc, char *argv[])
 	struct perf_buffer *pb = NULL;
 	struct perf_buffer_opts pb_opts;
 
+	// TODO - better argument parsing (more relevant as featureas are added)
+	if (argc < 2) {
+		printf("Usage: ./pping_user <dev>\n");
+		return EXIT_FAILURE;
+	}
 	
 	// Increase rlimit
-	err = set_rlimit(RMEMLIM);
+	err = set_rlimit(RLIM_INFINITY);
 	if (err) {
-		fprintf(stderr, "Could not set rlimit to %ld bytes: %s\n",
-			RMEMLIM, strerror(-err));
+		fprintf(stderr, "Could not set rlimit to infinity: %s\n",
+			strerror(-err));
 		goto cleanup;
 	}
 
@@ -240,15 +300,14 @@ int main(int argc, char *argv[])
 	}
 
 	// Get map here to allow for unpinning at cleanup
-	map = bpf_object__find_map_by_name(obj, MAP_NAME);
+	map = bpf_object__find_map_by_name(obj, TS_MAP);
 	err = libbpf_get_error(map);
 	if (err) {
 		fprintf(stderr, "Could not find map %s in %s: %s\n",
-			MAP_NAME, PPING_XDP_OBJ, strerror(err));
+			TS_MAP, PPING_XDP_OBJ, strerror(err));
 		map = NULL;
 	}
 		
-
 	err = bpf_object__load(obj);
 	if (err) {
 		fprintf(stderr, "Failed loading XDP program: %s\n",
@@ -264,27 +323,26 @@ int main(int argc, char *argv[])
 	}
 	xdp_attached = true;
 
-	//Load tc-bpf section on interface egress
-	snprintf(tc_cmd, MAX_COMMAND_LEN, "%s --dev %s --obj %s --sec %s",
-		 TCBPF_LOADER_SCRIPT, argv[1], PPING_TCBPF_OBJ, TCBPF_PROG_SEC);
-	err = system(tc_cmd);
+	// Load tc-bpf section on interface egress
+	err = tc_bpf_load(PPING_TCBPF_OBJ, TCBPF_PROG_SEC, argv[1]);
 	if (err) {
 		fprintf(stderr,
 			"Could not load section %s of %s on interface %s: %s\n",
 			TCBPF_PROG_SEC, PPING_TCBPF_OBJ, argv[1],
-			strerror(err));
+			strerror(-err));
 		goto cleanup;
 	}
 	tc_attached = true;
 
 	// Set up the periodical map cleaning
+	clean_args.max_age_ns = TIMESTAMP_LIFETIME;
 	clean_args.map_fd = bpf_map__fd(map);
 	if (clean_args.map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map  %s in object %s: %s\n",
-			MAP_NAME, PPING_XDP_OBJ, strerror(-clean_args.map_fd));
+			TS_MAP, PPING_XDP_OBJ, strerror(-clean_args.map_fd));
 		goto cleanup;
 	}
-	clean_args.max_age_ns = TIMESTAMP_LIFETIME;
+
 	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
 	if (err) {
 		fprintf(stderr,
@@ -298,13 +356,13 @@ int main(int argc, char *argv[])
 	pb_opts.lost_cb = handle_missed_rtt_event;
 
 	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
-							      PERF_BUFFER_NAME),
+							      PERF_BUFFER),
 			      PERF_BUFFER_PAGES, &pb_opts);
 	err = libbpf_get_error(pb);
 	if (err) {
 		pb = NULL;
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
-			PERF_BUFFER_NAME, strerror(err));
+			PERF_BUFFER, strerror(err));
 		goto cleanup;
 	}
 
@@ -326,7 +384,7 @@ cleanup:
 	perf_buffer__free(pb);
 	if (map && bpf_map__is_pinned(map)) {
 		snprintf(map_path, sizeof(map_path), "%s/%s",
-			 PINNED_DIR, MAP_NAME);
+			 PINNED_DIR, TS_MAP);
 		err = bpf_map__unpin(map, map_path);
 		if (err) {
 			fprintf(stderr,
@@ -343,13 +401,11 @@ cleanup:
 		}
 	}
 	if (tc_attached) {
-		snprintf(tc_cmd, MAX_COMMAND_LEN, "%s --dev %s --remove",
-			 TCBPF_LOADER_SCRIPT, argv[1]);
-		err = system(tc_cmd);
+		err = tc_bpf_clear(argv[1]); //system(tc_cmd);
 		if (err) {
 			fprintf(stderr,
 				"Failed removing tc-bpf program from interface %s: %s\n",
-				argv[1], strerror(err));
+				argv[1], strerror(-err));
 		}
 
 	}

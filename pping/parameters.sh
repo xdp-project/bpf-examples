@@ -4,6 +4,10 @@
 #
 # Author: Jesper Dangaaard Brouer <netoptimizer@brouer.com>
 # License: GPLv2
+#
+# Modified by Simon Sundberg <simon.sundberg@kau.se> to add support
+# of optional section (--sec) option
+#
 
 function usage() {
     echo ""

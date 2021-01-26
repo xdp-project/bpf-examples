@@ -3,8 +3,8 @@
 # Author: Jesper Dangaaard Brouer <netoptimizer@brouer.com>
 # License: GPLv2
 #
-# Extended by Simon Sundberg <simon.sundberg@kau.se> to add support
-# of optional section (--sec) option
+# Modified by Simon Sundberg <simon.sundberg@kau.se> to add support
+# of optional section (--sec) option and changed default BPF_OBJ
 #
 basedir=`dirname $0`
 source ${basedir}/functions.sh

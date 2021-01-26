@@ -5,7 +5,7 @@
 - [x] Add SPDX-license-identifier tags
 - [x] Format C-code in kernel style
 - [x] Use existing funcionality to reuse maps by using BTF-defined maps
-  - [ ] Use BTF-defined maps for TC-BPF as well if iproute has libbpf support
+  - [x] Use BTF-defined maps for TC-BPF as well if iproute has libbpf support
 
 ## Future
 - [ ] Use libxdp to load XDP program

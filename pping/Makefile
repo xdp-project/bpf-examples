@@ -6,7 +6,7 @@ BPF_TARGETS    := pping_kern_xdp
 BPF_TARGETS    += $(TC_BPF_TARGETS)
 
 LDFLAGS    += -pthread
-EXTRA_DEPS += config.mk
+EXTRA_DEPS += config.mk pping.h pping_helpers.h
 
 LIB_DIR = ../lib
 

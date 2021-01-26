@@ -1,8 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef TIMESTAMP_MAP_H
-#define TIMESTAMP_MAP_H
+#ifndef PPING_H
+#define PPING_H
+
 #include <linux/types.h>
 
+#define XDP_PROG_SEC "xdp"
+#define TCBPF_PROG_SEC "pping_egress"
+
+// TODO - change to support both IPv4 and IPv6 (IPv4 addresses can be mapped to IPv6 addresses)
 struct ipv4_flow {
 	__u32 saddr;
 	__u32 daddr;
@@ -17,9 +22,7 @@ struct ts_key {
 
 struct ts_timestamp {
 	__u64 timestamp;
-	//__u64 ttl; // Delete entry after ttl, allows more dynamic map cleaning where entries for flows with short RTTs can be removed earlier
 	__u8 used;
-	// __u8 pad[7]; // Need to pad it due to compiler optimization, see "Remove struct padding with aligning members by using #pragma pack." at https://docs.cilium.io/en/v1.9/bpf/
 };
 
 struct rtt_event {
