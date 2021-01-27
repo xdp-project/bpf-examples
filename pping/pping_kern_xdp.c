@@ -44,23 +44,23 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 
 	proto = parse_ethhdr(&nh, data_end, &eth);
 	if (bpf_ntohs(proto) != ETH_P_IP)
-		goto end; 
+		goto end;
 	proto = parse_iphdr(&nh, data_end, &iph);
 	if (proto != IPPROTO_TCP)
-		goto end; 
+		goto end;
 	proto = parse_tcphdr(&nh, data_end, &tcph);
 	if (proto < 0)
-		goto end; 
+		goto end;
 
 	__u32 tsval, tsecr;
-	if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0) 
+	if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0)
 		goto end;
 
 	// We have a TCP-timestamp - now we can check if it's in the map
 	struct ts_key key;
 	// Fill in reverse order of egress (dest <--> source)
-	fill_ipv4_flow(&(key.flow), iph->daddr, iph->saddr,
-		       tcph->dest, tcph->source);
+	fill_ipv4_flow(&(key.flow), iph->daddr, iph->saddr, tcph->dest,
+		       tcph->source);
 	key.tsval = tsecr;
 	struct ts_timestamp *ts = bpf_map_lookup_elem(&ts_start, &key);
 

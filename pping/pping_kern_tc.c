@@ -50,13 +50,13 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 
 	proto = parse_ethhdr(&nh, data_end, &eth);
 	if (bpf_ntohs(proto) != ETH_P_IP)
-		goto end; 
+		goto end;
 	proto = parse_iphdr(&nh, data_end, &iph);
 	if (proto != IPPROTO_TCP)
-		goto end; 
+		goto end;
 	proto = parse_tcphdr(&nh, data_end, &tcph);
 	if (proto < 0)
-		goto end; 
+		goto end;
 
 	__u32 tsval, tsecr;
 	if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0)
@@ -64,8 +64,8 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 
 	// We have a TCP timestamp, try adding it to the map
 	struct ts_key key;
-	fill_ipv4_flow(&(key.flow), iph->saddr, iph->daddr,
-		       tcph->source, tcph->dest);
+	fill_ipv4_flow(&(key.flow), iph->saddr, iph->daddr, tcph->source,
+		       tcph->dest);
 	key.tsval = tsval;
 
 	struct ts_timestamp ts = { 0 };
