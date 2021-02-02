@@ -14,6 +14,7 @@
 #include <signal.h> // For detecting Ctrl-C
 #include <sys/resource.h> // For setting rlmit
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -75,6 +76,21 @@ static int set_rlimit(long int lim)
 	};
 
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
+}
+
+static int mkdir_if_noexist(const char *path)
+{
+	int ret;
+	struct stat st = {0};
+
+	ret = stat(path, &st);
+	if (ret) {
+		if (errno != ENOENT)
+			return -errno;
+
+		return mkdir(path, 0700) ? -errno : 0;
+	}
+	return S_ISDIR(st.st_mode) ? 0 : -EEXIST;
 }
 
 static int bpf_obj_open(struct bpf_object **obj, const char *obj_path,
@@ -265,6 +281,12 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	// Detect if running as root
+	if (geteuid() != 0) {
+		printf("This program must be run as root.\n");
+		return EXIT_FAILURE;
+	}
+
 	// Increase rlimit
 	err = set_rlimit(RLIM_INFINITY);
 	if (err) {
@@ -283,6 +305,14 @@ int main(int argc, char *argv[])
 	}
 
 	// Load and attach the XDP program
+	err = mkdir_if_noexist("/sys/fs/bpf/tc");
+	if (err) {
+		fprintf(stderr,
+			"Failed creating directory %s in which to pin map: %s\n",
+			"/sys/fs/bpf/tc", strerror(-err));
+		goto cleanup;
+	}
+
 	err = bpf_obj_open(&obj, PPING_XDP_OBJ, PINNED_DIR);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
