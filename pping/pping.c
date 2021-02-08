@@ -187,8 +187,8 @@ static __u64 get_time_ns(void)
 static int clean_map(int map_fd, __u64 max_age)
 {
 	int removed = 0;
-	struct ts_key key, prev_key = { 0 };
-	struct ts_timestamp value;
+	struct packet_id key, prev_key = { 0 };
+	struct packet_timestamp value;
 	bool delete_prev = false;
 	__u64 now_nsec = get_time_ns();
 
@@ -240,17 +240,33 @@ static void *periodic_map_cleanup(void *args)
 	pthread_exit(NULL);
 }
 
+/*
+ * Wrapper around inet_ntop designed to handle the "bug" that mapped IPv4
+ * addresses are formated as IPv6 addresses for AF_INET6
+ */
+static int format_ip_address(int af, const struct in6_addr *addr, char *buf,
+			     size_t size)
+{
+	if (af == AF_INET)
+		return inet_ntop(af, &(addr->s6_addr[12]),
+				 buf, size) ? -errno : 0;
+	else if (af == AF_INET6)
+		return inet_ntop(af, addr, buf, size) ? -errno : 0;
+	return -EINVAL;
+}
+
 static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 {
 	const struct rtt_event *e = data;
-	struct in_addr saddr, daddr;
-	saddr.s_addr = e->flow.saddr;
-	daddr.s_addr = e->flow.daddr;
+	char saddr[INET6_ADDRSTRLEN];
+	char daddr[INET6_ADDRSTRLEN];
 
-	// inet_ntoa is deprecated, will switch to inet_ntop when adding IPv6 support
-	printf("%llu.%06llu ms %s:%d+", e->rtt / NS_PER_MS, e->rtt % NS_PER_MS,
-	       inet_ntoa(daddr), ntohs(e->flow.dport));
-	printf("%s:%d\n", inet_ntoa(saddr), ntohs(e->flow.sport));
+	format_ip_address(e->flow.ipv, &(e->flow.saddr), saddr, sizeof(saddr));
+	format_ip_address(e->flow.ipv, &(e->flow.daddr), daddr, sizeof(daddr));
+
+	printf("%llu.%06llu ms %s:%d+%s:%d\n", e->rtt / NS_PER_MS,
+	       e->rtt % NS_PER_MS, saddr, ntohs(e->flow.sport), daddr,
+	       ntohs(e->flow.dport));
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)

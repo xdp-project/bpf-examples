@@ -2,19 +2,27 @@
 #ifndef PPING_HELPERS_H
 #define PPING_HELPERS_H
 
-#include "pping.h"
+#include <linux/in6.h>
 #include <linux/tcp.h>
+#include <string.h>
+#include "pping.h"
 
 #define MAX_TCP_OPTIONS 10
 
-static __always_inline int fill_ipv4_flow(struct ipv4_flow *flow, __u32 saddr,
-					  __u32 daddr, __u16 sport, __u16 dport)
+/*
+ * Maps and IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
+ */
+static __always_inline void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
 {
-	flow->saddr = saddr;
-	flow->daddr = daddr;
-	flow->sport = sport;
-	flow->dport = dport;
-	return 0;
+	/* __u16 ipv4_prefix[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0xffff}; */
+	/* memcpy(&(ipv6->in6_u.u6_addr8), ipv4_prefix, sizeof(ipv4_prefix)); */
+	memset(&(ipv6->in6_u.u6_addr8[0]), 0x00, 10);
+	memset(&(ipv6->in6_u.u6_addr8[10]), 0xff, 2);
+#if __UAPI_DEF_IN6_ADDR_ALT
+	ipv6->in6_u.u6_addr32[3] = ipv4;
+#else
+	memcpy(&(ipv6->in6_u.u6_addr8[12]), &ipv4, sizeof(ipv4));
+#endif
 }
 
 /*
