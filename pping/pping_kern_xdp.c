@@ -76,8 +76,8 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 	p_id.flow.proto == proto;
 	// Fill in reverse order of egress (dest <--> source)
 	if (p_id.flow.ipv == AF_INET) {
-		map_ipv4_to_ipv6(iph->daddr, &(p_id.flow.saddr));
-		map_ipv4_to_ipv6(iph->saddr, &(p_id.flow.daddr));
+		map_ipv4_to_ipv6(iph->daddr, &p_id.flow.saddr);
+		map_ipv4_to_ipv6(iph->saddr, &p_id.flow.daddr);
 	} else { // IPv6
 		p_id.flow.saddr = ip6h->daddr;
 		p_id.flow.daddr = ip6h->saddr;
@@ -98,8 +98,7 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 		p_ts->used = 1;
 		// TODO - Optional delete of entry (if identifier is garantued unique)
 
-		memcpy(&(event.flow), &(p_id.flow),
-		       sizeof(struct network_tuple));
+		memcpy(&event.flow, &p_id.flow, sizeof(struct network_tuple));
 		event.rtt = bpf_ktime_get_ns() - p_ts->timestamp;
 		bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU,
 				      &event, sizeof(event));

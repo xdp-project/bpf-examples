@@ -56,13 +56,13 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 	struct packet_id p_id = { 0 };
 	struct packet_timestamp p_ts = { 0 };
 
-	proto = bpf_ntohs(parse_ethhdr(&nh, data_end, &eth));
+	proto = parse_ethhdr(&nh, data_end, &eth);
 
 	// Parse IPv4/6 header
-	if (proto == ETH_P_IP) {
+	if (proto == bpf_htons(ETH_P_IP)) {
 		p_id.flow.ipv = AF_INET;
 		proto = parse_iphdr(&nh, data_end, &iph);
-	} else if (proto == ETH_P_IPV6) {
+	} else if (proto == bpf_htons(ETH_P_IPV6)) {
 		p_id.flow.ipv = AF_INET6;
 		proto = parse_ip6hdr(&nh, data_end, &ip6h);
 	} else
@@ -79,8 +79,8 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 	// We have a TCP timestamp, try adding it to the map
 	p_id.identifier = tsval;
 	if (p_id.flow.ipv == AF_INET) {
-		map_ipv4_to_ipv6(iph->saddr, &(p_id.flow.saddr));
-		map_ipv4_to_ipv6(iph->daddr, &(p_id.flow.daddr));
+		map_ipv4_to_ipv6(iph->saddr, &p_id.flow.saddr);
+		map_ipv4_to_ipv6(iph->daddr, &p_id.flow.daddr);
 	} else { // IPv6
 		p_id.flow.saddr = ip6h->saddr;
 		p_id.flow.daddr = ip6h->daddr;

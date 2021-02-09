@@ -18,12 +18,12 @@
  * is extended to work for other protocols than TCP
  */
 struct network_tuple {
-	__u8 ipv; //AF_INET or AF_INET6
 	struct in6_addr saddr;
 	struct in6_addr daddr;
 	__u16 sport;
 	__u16 dport;
 	__u16 proto; //IPPROTO_TCP, IPPROTO_ICMP, QUIC etc
+	__u16 ipv; //AF_INET or AF_INET6
 };
 
 struct packet_id {
@@ -37,8 +37,8 @@ struct packet_timestamp {
 };
 
 struct rtt_event {
-	struct network_tuple flow;
 	__u64 rtt;
+	struct network_tuple flow;
 };
 
 #endif

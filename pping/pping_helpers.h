@@ -7,6 +7,8 @@
 #include <string.h>
 #include "pping.h"
 
+#define AF_INET 2
+#define AF_INET6 10
 #define MAX_TCP_OPTIONS 10
 
 /*
@@ -15,14 +17,10 @@
 static __always_inline void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
 {
 	/* __u16 ipv4_prefix[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0xffff}; */
-	/* memcpy(&(ipv6->in6_u.u6_addr8), ipv4_prefix, sizeof(ipv4_prefix)); */
-	memset(&(ipv6->in6_u.u6_addr8[0]), 0x00, 10);
-	memset(&(ipv6->in6_u.u6_addr8[10]), 0xff, 2);
-#if __UAPI_DEF_IN6_ADDR_ALT
+	/* memcpy(ipv6, ipv4_prefix, sizeof(ipv4_prefix)); // Won't load on TC */
+	memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
+	memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
 	ipv6->in6_u.u6_addr32[3] = ipv4;
-#else
-	memcpy(&(ipv6->in6_u.u6_addr8[12]), &ipv4, sizeof(ipv4));
-#endif
 }
 
 /*

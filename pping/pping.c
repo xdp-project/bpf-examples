@@ -248,7 +248,7 @@ static int format_ip_address(int af, const struct in6_addr *addr, char *buf,
 			     size_t size)
 {
 	if (af == AF_INET)
-		return inet_ntop(af, &(addr->s6_addr[12]),
+		return inet_ntop(af, &addr->s6_addr[12],
 				 buf, size) ? -errno : 0;
 	else if (af == AF_INET6)
 		return inet_ntop(af, addr, buf, size) ? -errno : 0;
@@ -261,8 +261,8 @@ static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
 
-	format_ip_address(e->flow.ipv, &(e->flow.saddr), saddr, sizeof(saddr));
-	format_ip_address(e->flow.ipv, &(e->flow.daddr), daddr, sizeof(daddr));
+	format_ip_address(e->flow.ipv, &e->flow.saddr, saddr, sizeof(saddr));
+	format_ip_address(e->flow.ipv, &e->flow.daddr, daddr, sizeof(daddr));
 
 	printf("%llu.%06llu ms %s:%d+%s:%d\n", e->rtt / NS_PER_MS,
 	       e->rtt % NS_PER_MS, saddr, ntohs(e->flow.sport), daddr,
