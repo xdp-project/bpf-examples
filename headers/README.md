@@ -10,7 +10,7 @@ For example [bpf/compiler.h](bpf/compiler.h) contains practical compile macros
 like `READ_ONCE` and `WRITE_ONCE` with verifier workarounds via
 `bpf_barrier()`.  And the `likely()` + `unlikely()` annotations.
 
-The include file [linux/bpf.h](linux/bpf.h) is the more central file that all
+The include file [linux/bpf.h](linux/bpf.h) is the most central file that all
 BPF (kernel-side) programs include.  It is maintained in this directory,
 because this project knows what BPF features it uses, which makes the update
 cycle tied to the project itself.  We prefer not to depend on the OS distro
