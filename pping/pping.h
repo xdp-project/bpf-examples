@@ -9,21 +9,29 @@
 #define TCBPF_PROG_SEC "pping_egress"
 
 /*
- * Struct to hold a full network tuple
+ * Struct that can hold the source or destination address for a flow (l3+l4).
  * Works for both IPv4 and IPv6, as IPv4 addresses can be mapped to IPv6 ones
- * based on RFC 4291 Section 2.5.5.2. The ipv member is technically not 
- * necessary, but makes it easier to determine if it is an IPv4 or IPv6 address
- * (don't need to look at the first 12 bytes of address).
- * The proto memeber is not currently used, but could be useful once pping
- * is extended to work for other protocols than TCP
+ * based on RFC 4291 Section 2.5.5.2.
+ */
+struct flow_address {
+	struct in6_addr ip;
+	__u16 port;
+	__u16 reserved;
+};
+
+/*
+ * Struct to hold a full network tuple
+ * The ipv member is technically not necessary, but makes it easier to 
+ * determine if saddr/daddr are IPv4 or IPv6 address (don't need to look at the
+ * first 12 bytes of address). The proto memeber is not currently used, but 
+ * could be useful once pping is extended to work for other protocols than TCP.
  */
 struct network_tuple {
-	struct in6_addr saddr;
-	struct in6_addr daddr;
-	__u16 sport;
-	__u16 dport;
+	struct flow_address saddr;
+	struct flow_address daddr;
 	__u16 proto; //IPPROTO_TCP, IPPROTO_ICMP, QUIC etc
-	__u16 ipv; //AF_INET or AF_INET6
+	__u8 ipv; //AF_INET or AF_INET6
+	__u8 reserved;
 };
 
 struct packet_id {
@@ -34,11 +42,13 @@ struct packet_id {
 struct packet_timestamp {
 	__u64 timestamp;
 	__u8 used;
+	__u8 reserved[7];
 };
 
 struct rtt_event {
 	__u64 rtt;
 	struct network_tuple flow;
+	__u32 reserved;
 };
 
 #endif

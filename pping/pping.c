@@ -81,7 +81,7 @@ static int set_rlimit(long int lim)
 static int mkdir_if_noexist(const char *path)
 {
 	int ret;
-	struct stat st = {0};
+	struct stat st = { 0 };
 
 	ret = stat(path, &st);
 	if (ret) {
@@ -261,12 +261,12 @@ static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
 
-	format_ip_address(e->flow.ipv, &e->flow.saddr, saddr, sizeof(saddr));
-	format_ip_address(e->flow.ipv, &e->flow.daddr, daddr, sizeof(daddr));
+	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
+	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
 
 	printf("%llu.%06llu ms %s:%d+%s:%d\n", e->rtt / NS_PER_MS,
-	       e->rtt % NS_PER_MS, saddr, ntohs(e->flow.sport), daddr,
-	       ntohs(e->flow.dport));
+	       e->rtt % NS_PER_MS, saddr, ntohs(e->flow.saddr.port), daddr,
+	       ntohs(e->flow.daddr.port));
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
