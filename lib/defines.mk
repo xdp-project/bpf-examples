@@ -13,7 +13,10 @@ BPF_DIR_MNT ?=/sys/fs/bpf
 BPF_OBJECT_DIR ?=$(LIBDIR)/bpf
 MAX_DISPATCHER_ACTIONS ?=10
 
+# headers/ dir contains include header files needed to compile BPF programs
 HEADER_DIR = $(LIB_DIR)/../headers
+# include/ dir contains the projects own include header files
+INCLUDE_DIR = $(LIB_DIR)/../include
 TEST_DIR = $(LIB_DIR)/testing
 LIBBPF_DIR := $(LIB_DIR)/libbpf
 
