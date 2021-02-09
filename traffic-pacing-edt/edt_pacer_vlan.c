@@ -90,6 +90,7 @@ struct bpf_elf_map SEC("maps") time_delay_map = {
 static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 {
 	struct edt_val *edt;
+	__u64 rate_in_bytes;
 	__u64 t_queue_sz;
 	__u64 t_xmit_ns;
 	__u64 wire_len;
@@ -101,6 +102,10 @@ static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 	if (!edt)
 		return BPF_DROP;
 
+	rate_in_bytes = RATE_IN_BYTES;
+	if (edt->rate > 0)
+		rate_in_bytes = edt->rate;
+
 	/* Calc transmission time it takes to send packet 'bytes'.
 	 *
 	 * Details on getting precise bytes on wire.  The skb->len does include
@@ -111,10 +116,7 @@ static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 	wire_len = skb->wire_len + OVERHEAD;
 	wire_len = wire_len > ETH_MIN ? wire_len : ETH_MIN;
 
-	t_xmit_ns = (wire_len) * NS_PER_SEC / RATE_IN_BYTES;
-
-//	t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / RATE_IN_BYTES;
-	// t_xmit_ns = ((__u64)skb->wire_len) * NS_PER_SEC / edt->rate;
+	t_xmit_ns = (wire_len) * NS_PER_SEC / rate_in_bytes;
 
 	// now = bpf_ktime_get_ns();
 	now = bpf_ktime_get_boot_ns(); /* Use same ktime as bpftrace */
@@ -145,7 +147,7 @@ static __always_inline int sched_departure(struct __sk_buff *skb, __u32 key)
 
 		/* Minimum delay for all packet if no time-queue */
 		wire_len = (wire_len > min_len) ?  wire_len : min_len;
-		t_xmit_ns = (wire_len) * NS_PER_SEC / RATE_IN_BYTES;
+		t_xmit_ns = (wire_len) * NS_PER_SEC / rate_in_bytes;
 		t_curr_next = t_curr + t_xmit_ns;
 
 		WRITE_ONCE(edt->t_last, t_curr_next);
