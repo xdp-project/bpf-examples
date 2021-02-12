@@ -19,6 +19,21 @@
 #define MAX_TCP_OPTIONS 10
 
 /*
+ * This struct keeps track of the data and data_end pointers from the xdp_md or
+ * __skb_buff contexts, as well as a currently parsed to position kept in nh.
+ * The member data_end_end pointer which has the adress that would correspond
+ * to the logical end of the packet (for XDP, this is the same as data_end,
+ * but for TC this is skb->data + skb->len), which is useful for determining
+ * how much data a certain header encloses.
+ */
+struct parsing_context {
+	void *data;           //Start of eth hdr
+	void *data_end;       //End of safe acessible area
+	void *data_end_end;   //Logical end of packet
+	struct hdr_cursor nh; //Position to parse next
+};
+
+/*
  * Maps and IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
  */
 static void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
@@ -85,18 +100,21 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
  * and dest, respectively, and 0 will be returned. On failure, -1 will be
  * returned.
  */
-// Has 6 parameters (one too many)
-static int parse_tcp_identifier(struct hdr_cursor *nh, void *data_end,
-				bool is_egress, struct flow_address *saddr,
+static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
+				struct flow_address *saddr,
 				struct flow_address *daddr, __u32 *identifier)
 {
 	__u32 tsval, tsecr;
 	struct tcphdr *tcph;
 
-	if (parse_tcphdr(nh, data_end, &tcph) < 0)
+	if (parse_tcphdr(&ctx->nh, ctx->data_end, &tcph) < 0)
 		return -1;
 
-	if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0)
+	// Do not timestamp pure ACKs
+	if (is_egress && ctx->data_end_end <= ctx->nh.pos && !tcph->syn)
+		return -1;
+
+	if (parse_tcp_ts(tcph, ctx->data_end, &tsval, &tsecr) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead
 
 	saddr->port = tcph->source;
@@ -116,11 +134,10 @@ static int parse_tcp_identifier(struct hdr_cursor *nh, void *data_end,
  * destination and source of packet, respectively), and identifier will be
  * set to the identifier of a response.
  */
-static int parse_packet_identifier(void *data, void *data_end, bool is_egress,
+static int parse_packet_identifier(struct parsing_context *ctx, bool is_egress,
 				   struct packet_id *p_id)
 {
 	int proto, err;
-	struct hdr_cursor nh = { .pos = data };
 	struct ethhdr *eth;
 	struct iphdr *iph;
 	struct ipv6hdr *ip6h;
@@ -135,23 +152,23 @@ static int parse_packet_identifier(void *data, void *data_end, bool is_egress,
 		daddr = &p_id->flow.saddr;
 	}
 
-	proto = parse_ethhdr(&nh, data_end, &eth);
+	proto = parse_ethhdr(&ctx->nh, ctx->data_end, &eth);
 
 	// Parse IPv4/6 header
 	if (proto == bpf_htons(ETH_P_IP)) {
 		p_id->flow.ipv = AF_INET;
-		proto = parse_iphdr(&nh, data_end, &iph);
+		proto = parse_iphdr(&ctx->nh, ctx->data_end, &iph);
 	} else if (proto == bpf_htons(ETH_P_IPV6)) {
 		p_id->flow.ipv = AF_INET6;
-		proto = parse_ip6hdr(&nh, data_end, &ip6h);
+		proto = parse_ip6hdr(&ctx->nh, ctx->data_end, &ip6h);
 	} else {
 		return -1;
 	}
 
 	// Add new protocols here
 	if (proto == IPPROTO_TCP) {
-		err = parse_tcp_identifier(&nh, data_end, is_egress, saddr,
-					   daddr, &p_id->identifier);
+		err = parse_tcp_identifier(ctx, is_egress, saddr, daddr,
+					   &p_id->identifier);
 		if (err)
 			return -1;
 	} else {

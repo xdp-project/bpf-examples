@@ -25,14 +25,17 @@ struct {
 SEC(XDP_PROG_SEC)
 int xdp_prog_ingress(struct xdp_md *ctx)
 {
+	struct parsing_context pctx;
 	struct packet_id p_id = { 0 };
 	struct packet_timestamp *p_ts;
 	struct rtt_event event = { 0 };
 
-	void *data = (void *)(long)ctx->data;
-	void *data_end = (void *)(long)ctx->data_end;
+	pctx.data = (void *)(long)ctx->data;
+	pctx.data_end = (void *)(long)ctx->data_end;
+	pctx.data_end_end = pctx.data_end;
+	pctx.nh.pos = pctx.data;
 
-	if (parse_packet_identifier(data, data_end, false, &p_id) < 0)
+	if (parse_packet_identifier(&pctx, false, &p_id) < 0)
 		goto end;
 
 	p_ts = bpf_map_lookup_elem(&ts_start, &p_id);

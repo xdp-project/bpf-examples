@@ -31,13 +31,16 @@ struct bpf_elf_map SEC("maps") ts_start = {
 SEC(TCBPF_PROG_SEC)
 int tc_bpf_prog_egress(struct __sk_buff *skb)
 {
+	struct parsing_context pctx;
 	struct packet_id p_id = { 0 };
 	struct packet_timestamp p_ts = { 0 };
 
-	void *data = (void *)(long)skb->data;
-	void *data_end = (void *)(long)skb->data_end;
+	pctx.data = (void *)(long)skb->data;
+	pctx.data_end = (void *)(long)skb->data_end;
+	pctx.data_end_end = pctx.data + skb->len;
+	pctx.nh.pos = pctx.data;
 
-	if (parse_packet_identifier(data, data_end, true, &p_id) < 0)
+	if (parse_packet_identifier(&pctx, true, &p_id) < 0)
 		goto end;
 
 	p_ts.timestamp = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
