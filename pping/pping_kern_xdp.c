@@ -32,9 +32,7 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 
-	// saddr and daddr in reverse order of egress (source <--> dest)
-	if (parse_packet_identifier(data, data_end, false, &p_id,
-				    &p_id.flow.daddr, &p_id.flow.saddr) < 0)
+	if (parse_packet_identifier(data, data_end, false, &p_id) < 0)
 		goto end;
 
 	p_ts = bpf_map_lookup_elem(&ts_start, &p_id);

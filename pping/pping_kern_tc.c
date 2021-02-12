@@ -37,8 +37,7 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
 
-	if (parse_packet_identifier(data, data_end, true, &p_id,
-				    &p_id.flow.saddr, &p_id.flow.daddr) < 0)
+	if (parse_packet_identifier(data, data_end, true, &p_id) < 0)
 		goto end;
 
 	p_ts.timestamp = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns

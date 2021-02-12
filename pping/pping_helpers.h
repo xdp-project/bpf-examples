@@ -23,8 +23,6 @@
  */
 static void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
 {
-	/* __u16 ipv4_prefix[6] = {0x0, 0x0, 0x0, 0x0, 0x0, 0xffff}; */
-	/* __builtin_memcpy(ipv6, ipv4_prefix, sizeof(ipv4_prefix)); */
 	__builtin_memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
 	__builtin_memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
 	ipv6->in6_u.u6_addr32[3] = ipv4;
@@ -87,6 +85,7 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
  * and dest, respectively, and 0 will be returned. On failure, -1 will be
  * returned.
  */
+// Has 6 parameters (one too many)
 static int parse_tcp_identifier(struct hdr_cursor *nh, void *data_end,
 				bool is_egress, struct flow_address *saddr,
 				struct flow_address *daddr, __u32 *identifier)
@@ -96,6 +95,7 @@ static int parse_tcp_identifier(struct hdr_cursor *nh, void *data_end,
 
 	if (parse_tcphdr(nh, data_end, &tcph) < 0)
 		return -1;
+
 	if (parse_tcp_ts(tcph, data_end, &tsval, &tsecr) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead
 
@@ -108,20 +108,32 @@ static int parse_tcp_identifier(struct hdr_cursor *nh, void *data_end,
 /*
  * Attempts to parse the packet limited by the data and data_end pointers,
  * to retrieve a protocol dependent packet identifier. If sucessful, the
- * ipv and identifier of p_id will be set, saddr and daddr (which may be part
- * of p_id) will be filled with the source and destionation addresses of the
+ * pointed to p_id will be filled with parsed information from the packet
  * packet, and 0 will be returned. On failure, -1 will be returned.
+ * If is_egress saddr and daddr will match source and destination of packet,
+ * respectively, and identifier will be set to the identifer for an outgoing
+ * packet. Otherwise, saddr and daddr will be swapped (will match
+ * destination and source of packet, respectively), and identifier will be
+ * set to the identifier of a response.
  */
 static int parse_packet_identifier(void *data, void *data_end, bool is_egress,
-				   struct packet_id *p_id,
-				   struct flow_address *saddr,
-				   struct flow_address *daddr)
+				   struct packet_id *p_id)
 {
+	int proto, err;
 	struct hdr_cursor nh = { .pos = data };
 	struct ethhdr *eth;
 	struct iphdr *iph;
 	struct ipv6hdr *ip6h;
-	int proto, err;
+	struct flow_address *saddr, *daddr;
+
+	// Switch saddr <--> daddr on ingress to match egress
+	if (is_egress) {
+		saddr = &p_id->flow.saddr;
+		daddr = &p_id->flow.daddr;
+	} else {
+		saddr = &p_id->flow.daddr;
+		daddr = &p_id->flow.saddr;
+	}
 
 	proto = parse_ethhdr(&nh, data_end, &eth);
 
@@ -132,18 +144,19 @@ static int parse_packet_identifier(void *data, void *data_end, bool is_egress,
 	} else if (proto == bpf_htons(ETH_P_IPV6)) {
 		p_id->flow.ipv = AF_INET6;
 		proto = parse_ip6hdr(&nh, data_end, &ip6h);
-	} else
+	} else {
 		return -1;
+	}
 
 	// Add new protocols here
-	if (proto == IPPROTO_TCP)
+	if (proto == IPPROTO_TCP) {
 		err = parse_tcp_identifier(&nh, data_end, is_egress, saddr,
 					   daddr, &p_id->identifier);
-	else
+		if (err)
+			return -1;
+	} else {
 		return -1;
-
-	if (err)
-		return -1;
+	}
 
 	// Sucessfully parsed packet identifier - fill in IP-addresses and return
 	if (p_id->flow.ipv == AF_INET) {
