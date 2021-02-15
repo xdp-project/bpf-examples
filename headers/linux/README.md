@@ -5,7 +5,7 @@ kernel tree**.  Some of them have been modified to ease compiling BPF
 programs.
 
 Linux distributions usually have a 'kernel-headers' software package
-that also contain these files.  As BPF is in rabid development the
+that also contain these files.  As BPF is in rapid development the
 distro version of these header files might not be new enough to
 contain the features needed by this git repo.
 

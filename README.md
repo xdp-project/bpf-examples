@@ -7,7 +7,7 @@ It is meant to ease doing **rapid prototyping and development**, writing C-code
 BPF programs using libbpf.  The goal is to make is **easier for developers** to
 get started coding.
 
-Most developers struggle to get a working BPF build environment.  The repo
+Many developers struggle to get a working BPF build environment.  The repo
 enviroment makes it easy to build/compile BPF programs by doing the necessary
 libbpf setup transparently and detect missing compile dependencies (via the
 (configure)[configure] script). It is a declared goal to **make BPF programming
