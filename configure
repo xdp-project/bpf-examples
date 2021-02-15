@@ -155,6 +155,32 @@ EOF
     echo "HAVE_LIBBPF_PERF_BUFFER__CONSUME:=y" >>"$CONFIG"
 }
 
+check_bpf_use_errno()
+{
+    local compile_err
+
+    # Clang BPF-progs when compiled with proper -target bpf cause
+    # build dependencies to include <gnu/stubs-32.h> file.
+    #
+    cat >$TMPDIR/bpf_use_errno_test.c <<EOF
+#include <errno.h>
+int dummy(void *ctx) { return 0; }
+EOF
+
+    compile_err=$($CLANG -target bpf -c $TMPDIR/bpf_use_errno_test.c 2>&1)
+    if [ "$?" -ne "0" ]; then
+	echo "*** ERROR - Clang BPF-prog cannot include <errno.h>"
+	echo "          - Install missing userspace header file"
+	echo ""
+	echo "Compile error: $compile_err"
+	echo ""
+	echo " On Fedora install:"
+	echo "   dnf install glibc-devel.i686"
+	echo ""
+	exit 1
+    fi
+}
+
 quiet_config()
 {
     cat <<EOF
@@ -194,6 +220,8 @@ check_toolchain
 
 echo -n "libbpf support: "
 check_libbpf
+
+check_bpf_use_errno
 
 if [ -n "$KERNEL_HEADERS" ]; then
     echo "kernel headers: $KERNEL_HEADERS"
