@@ -21,20 +21,19 @@
 /*
  * This struct keeps track of the data and data_end pointers from the xdp_md or
  * __skb_buff contexts, as well as a currently parsed to position kept in nh.
- * The member data_end_end pointer which has the adress that would correspond
- * to the logical end of the packet (for XDP, this is the same as data_end,
- * but for TC this is skb->data + skb->len), which is useful for determining
- * how much data a certain header encloses.
+ * Additionally, it also keeps the length of the entire packet, which together
+ * with the other members can be used to determine ex. how much data each
+ * header encloses.
  */
 struct parsing_context {
 	void *data;           //Start of eth hdr
 	void *data_end;       //End of safe acessible area
-	void *data_end_end;   //Logical end of packet
 	struct hdr_cursor nh; //Position to parse next
+	__u32 len;            //Full packet length (headers+data)
 };
 
 /*
- * Maps and IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
+ * Maps an IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
  */
 static void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
 {
@@ -101,8 +100,7 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
  * returned.
  */
 static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
-				struct flow_address *saddr,
-				struct flow_address *daddr, __u32 *identifier)
+				__be16 *sport, __be16 *dport, __u32 *identifier)
 {
 	__u32 tsval, tsecr;
 	struct tcphdr *tcph;
@@ -111,14 +109,14 @@ static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
 		return -1;
 
 	// Do not timestamp pure ACKs
-	if (is_egress && ctx->data_end_end <= ctx->nh.pos && !tcph->syn)
+	if (is_egress && ctx->nh.pos - ctx->data >= ctx->len && !tcph->syn)
 		return -1;
 
 	if (parse_tcp_ts(tcph, ctx->data_end, &tsval, &tsecr) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead
 
-	saddr->port = tcph->source;
-	daddr->port = tcph->dest;
+	*sport = tcph->source;
+	*dport = tcph->dest;
 	*identifier = is_egress ? tsval : tsecr;
 	return 0;
 }
@@ -167,8 +165,8 @@ static int parse_packet_identifier(struct parsing_context *ctx, bool is_egress,
 
 	// Add new protocols here
 	if (proto == IPPROTO_TCP) {
-		err = parse_tcp_identifier(ctx, is_egress, saddr, daddr,
-					   &p_id->identifier);
+		err = parse_tcp_identifier(ctx, is_egress, &saddr->port,
+					   &daddr->port, &p_id->identifier);
 		if (err)
 			return -1;
 	} else {

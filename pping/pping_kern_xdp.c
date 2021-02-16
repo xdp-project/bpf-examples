@@ -32,7 +32,7 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 
 	pctx.data = (void *)(long)ctx->data;
 	pctx.data_end = (void *)(long)ctx->data_end;
-	pctx.data_end_end = pctx.data_end;
+	pctx.len = pctx.data_end - pctx.data;
 	pctx.nh.pos = pctx.data;
 
 	if (parse_packet_identifier(&pctx, false, &p_id) < 0)

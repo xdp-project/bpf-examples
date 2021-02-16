@@ -37,7 +37,7 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 
 	pctx.data = (void *)(long)skb->data;
 	pctx.data_end = (void *)(long)skb->data_end;
-	pctx.data_end_end = pctx.data + skb->len;
+	pctx.len = skb->len;
 	pctx.nh.pos = pctx.data;
 
 	if (parse_packet_identifier(&pctx, true, &p_id) < 0)
