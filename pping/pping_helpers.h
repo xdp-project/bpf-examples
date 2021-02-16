@@ -29,7 +29,7 @@ struct parsing_context {
 	void *data;           //Start of eth hdr
 	void *data_end;       //End of safe acessible area
 	struct hdr_cursor nh; //Position to parse next
-	__u32 len;            //Full packet length (headers+data)
+	__u32 pkt_len;        //Full packet length (headers+data)
 };
 
 /*
@@ -109,7 +109,7 @@ static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
 		return -1;
 
 	// Do not timestamp pure ACKs
-	if (is_egress && ctx->nh.pos - ctx->data >= ctx->len && !tcph->syn)
+	if (is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len && !tcph->syn)
 		return -1;
 
 	if (parse_tcp_ts(tcph, ctx->data_end, &tsval, &tsecr) < 0)
