@@ -3,31 +3,52 @@
 #define PPING_H
 
 #include <linux/types.h>
+#include <linux/in6.h>
 
 #define XDP_PROG_SEC "xdp"
 #define TCBPF_PROG_SEC "pping_egress"
 
-// TODO - change to support both IPv4 and IPv6 (IPv4 addresses can be mapped to IPv6 addresses)
-struct ipv4_flow {
-	__u32 saddr;
-	__u32 daddr;
-	__u16 sport;
-	__u16 dport;
+/*
+ * Struct that can hold the source or destination address for a flow (l3+l4).
+ * Works for both IPv4 and IPv6, as IPv4 addresses can be mapped to IPv6 ones
+ * based on RFC 4291 Section 2.5.5.2.
+ */
+struct flow_address {
+	struct in6_addr ip;
+	__u16 port;
+	__u16 reserved;
 };
 
-struct ts_key {
-	struct ipv4_flow flow;
-	__u32 tsval;
+/*
+ * Struct to hold a full network tuple
+ * The ipv member is technically not necessary, but makes it easier to 
+ * determine if saddr/daddr are IPv4 or IPv6 address (don't need to look at the
+ * first 12 bytes of address). The proto memeber is not currently used, but 
+ * could be useful once pping is extended to work for other protocols than TCP.
+ */
+struct network_tuple {
+	struct flow_address saddr;
+	struct flow_address daddr;
+	__u16 proto; //IPPROTO_TCP, IPPROTO_ICMP, QUIC etc
+	__u8 ipv; //AF_INET or AF_INET6
+	__u8 reserved;
 };
 
-struct ts_timestamp {
+struct packet_id {
+	struct network_tuple flow;
+	__u32 identifier; //tsval for TCP packets
+};
+
+struct packet_timestamp {
 	__u64 timestamp;
 	__u8 used;
+	__u8 reserved[7];
 };
 
 struct rtt_event {
-	struct ipv4_flow flow;
 	__u64 rtt;
+	struct network_tuple flow;
+	__u32 reserved;
 };
 
 #endif
