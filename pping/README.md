@@ -1,5 +1,7 @@
 # PPing using XDP and TC-BPF
-An implementation of the passive ping ([pping](https://github.com/pollere/pping)) utility based on XDP (for ingress) and TC-BPF (for egress)
+A re-implementation of [Kathie Nichols' passive ping
+(pping)](https://github.com/pollere/pping) utility using XDP (on ingress)
+and TC-BPF (on egress) for the packet capture logic.
 
 ## Simple description
 Passive Ping (PPing) makes use of the TCP Timestamp option to calculate the RTT for TCP traffic passing through.
