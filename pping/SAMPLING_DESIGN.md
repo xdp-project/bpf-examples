@@ -1,6 +1,10 @@
 # Introduction
 This file is intended to document some of the challenges and design
-decisions for adding sampling functionality to pping.
+decisions for adding sampling functionality to pping. It is partly
+based on discussions from my supervisor meeting on 2021-02-22, and the
+contents of my 
+[status slides](https://github.com/xdp-project/bpf-research/blob/master/meetings/simon/work_summary_20210222.org)
+from that meeting.
 
 ## Purpose of sampling
 The main purpose of adding sampling to pping is to prevent a massive
@@ -84,7 +88,7 @@ flows of the right (or wrong depending on how you look at it)
 intensity, slow enough where consecutive packets are likely to get
 different TCP timestamps, but fast enough for the delayed ACKs to
 acknowledge multiple packets, then you essentially have a 50/50 chance
-of timestamping the wrong identifier an miss the RTT. 
+of timestamping the wrong identifier and miss the RTT.
 
 ## Handing duplicate identifiers
 TCP timestamps are only updated at a limited rate (ex. 1000 Hz), and
@@ -100,8 +104,8 @@ RTT with as much as the TCP timestamp clock rate (ex. 1 ms).
 ### Current solution
 The current solution to this is very simple. For outgoing packets, a
 timestamp entry is only allowed to be created if no previous entry for
-the identifier exists (realized through the BPF_NOEXIST flag to
-bpf_map_update_elem() call). Thus only the first outgoing packet with
+the identifier exists (realized through the `BPF_NOEXIST` flag to
+`bpf_map_update_elem()` call). Thus only the first outgoing packet with
 a specific identifier can be timestamped. On egress, the first packet
 with a matching identifier will mark the timestamp as used, preventing
 later incoming responses from using that timestamp. The reason why the
@@ -131,7 +135,7 @@ only delay the sampling until a packet with a new identifier is found.
 
 Another advantage with this solution is that it should allow for
 timestamp entries to be deleted as soon as the matching response is
-found on egress. The timestamp no longer needs to be kept around only
+found on ingress. The timestamp no longer needs to be kept around only
 to prevent egress to create a new timestamp with the same identifier,
 as this new solution should take care of that. This would help a lot
 with keeping the map clean, as the timestamp entries would then
@@ -141,12 +145,185 @@ occasional entries that were never matched for some reason (e.g. the
 previously mentioned issue with delayed ACKs, flow stopped, the
 reverse flow can't be observed etc.).
 
+This mechanism could perhaps also be useful for adding support to QUIC
+based on the spinbit?
+
+## Keeping per-flow information
+In order for the per-flow rate limiting to work, some per-flow state
+must be maintained, namely when the last timestamp for that flow was
+added (so that one can check that sufficient time has passed before
+attempting to add another one).
+
+There may be some drawbacks with having to keep per-flow state. First
+off, there will be some additional overhead from having to keep track
+of this state. However, the savings from sampling the per-packet state
+(the identifier/timestamps mappings) should hopefully cover the
+overhead from keeping some per-flow state (and then some). Another
+issue that is worth keeping in mind is that this flow-state will also
+need to be cleaned up eventually. This cleanup could be handled in a
+similar manner as the current per-packet state is cleaned up, by
+having the userspace process occasionally remove old entries. In this
+case, the entries could be deemed as old if there was a long time
+since the last timestamp was added for the flow, ex 300 seconds as
+used by the 
+[original pping](https://github.com/pollere/pping/blob/777eb72fd9b748b4bb628ef97b7fff19b751f1fd/pping.cpp#L117).
+
+Later on, this per-flow state could potentially be expanded to include
+other information deemed useful (such as ex. minimum and average RTT).
+
+### Alternative solution - keeping identifier in flow-state
+One idea that came up during my supervisor meeting, was that instead
+of creating timestamps for individual packets as is currently done,
+you only create a timestamp for the flow. That is, you would simply
+add the timestamped identifier to the per-flow information.
+
+While this would be rather efficient, limiting the number of timestamp
+entries to a single per flow, I'm opposed to this idea for two
+reasons:
+
+1. It would make it impossible to sample RTTs at a timescale smaller
+   than the RTT of the flow. As if identifier is updated faster than
+   the response arrives, then the response will fail to match against
+   the identifier and no RTT can be calculated. While in many
+   instances not needed, I think it may still be useful to be able to
+   query timestamps more frequently than once per RTT, especially for
+   flows with a large bandwidth-delay product.
+2. In case no match is found for the identifier, this could
+   effectively block new timestamps from being created (and thus from
+   RTTs being calculated) for the flow until it can be relatively
+   safely assumed that the response was indeed missed, ant not just
+   delayed.
+
+## Graceful degradation
+Another aspect I've been asked to consider is how to gracefully reduce
+the functionality of pping as the timestamp entry map gets full (as
+with sufficiently many and heavy flows, it's likely inevitable).
+
+What currently happens when the timestamp entry map is full, is simply
+that no more entries can be made until some have been cleared
+out. When adding a rate-limit to the number of entries per flow, as
+well as directly deleting entries upon match, I believe this is a
+reasonable way to handle the situation. As soon as some RTTs for
+current flows have been reported, space for new entries will be
+available. The next outgoing packet with a valid identifier from any
+flow that does not have to currently wait for its rate limit will then
+be able to grab the next spot. However this will still favor heavy
+flows over smaller flows, as heavy flows are more likely to be able to
+get in a packet first, but they will at least still be limited by the
+rate limit, and thus have to take turns with other flows.
+
+It also worth noting that as per-flow state will need to be kept,
+there will be strict limit to the number of concurrent flows that can
+be monitored, corresponding to the number of entries that can be held
+by the map for the per-flow state. Once the per-flow state map is
+full, no new flows can be added until one is cleared. It also doesn't
+make sense to add packet timestamp entries for flows which state
+cannot be tracked, as the rate limit cannot be enforced then.
+
+I see a few ways to more actively handle degradation, depending on what
+one views as desirable:
+
+1. One can attempt to monitor many flows, with infrequent RTT
+   calculations for each. In this case, the userspace process that
+   occasionally clears out the timestamp map could automatically
+   decrease the per-flow rate limit if it detects the map is getting
+   close to full. That way, fewer entries would be generated per flow,
+   and flows would be forced to take turns to a greater degree when
+   the map is completely full. Similarly, one may wish to reduce the
+   timeout for old flows if the per-flow map is getting full, in order
+   to more quickly allow new flows to be monitored, and only keeping
+   the most active flows around.
+2. One can attempt to monitor fewer flows, but with more frequent RTT
+   calculations for each. The easiest way to achieve this is to
+   probably to set a more limited size on the per-flow map. In case
+   one wants to primarily focus on heavier flows, one could possibly
+   add ex. packet rate to the per-flow information, and remove the
+   flows with the lowest packet rates.
+3. One can attempt to focus on flows with shorter RTTs. Flows with
+   shorter RTTs should make more efficient use of timestamp entries,
+   as they can be cleared out faster allowing for new entries. On the
+   other hand, flows with longer RTTs may be the more interesting
+   ones, as they are more likely to indicate some issue.
+
+While I'm leaning towards option 1, I don't have a very strong
+personal opinion here, and would like some input on what others (who
+may have more experience with network measurements) think are
+reasonable trade-offs to do.
+
 # Implementation considerations
-TODO (can partly be found in
-[status-slides](https://github.com/xdp-project/bpf-research/blob/master/meetings/simon/work_summary_20210222.org))
+There are of course several more practical considerations as well when
+implementing the sampling, some of which I'll try to address here.
+
 ## "Global" vs PERCPU maps
+In general, it's likely wise to go with PERCPU maps over "global" (aka
+non-PERCPU) maps whenever possible, as PERCPU maps should be more
+performant, and also avoids concurrency issues. But this only applies
+of course, if the BPF programs don't need to act on global state.
+
+For pping, I unfortunately see no way for the program to work with
+only information local to each CPU core individually. The per-packet
+identifier and timestamps need to be global, as there is no guarantee
+that the same core that timestamped a packet will process the response
+for that packet. Likewise, the per-flow information, like the time of
+the last timestamping, also needs to be global. Otherwise rate limit
+would be per-CPU-per-flow rather than just per-flow.
+
 ## Concurrency issues
+In addition to the performance hit, sharing global state between
+multiple concurrent processes risks running into concurrency issues
+unless access is synchronized in some manner (in BPF, the two
+mechanics I know of are atomic adds and spin-locks for maps). With the
+risk of me misunderstanding the memory model for BPF programs (which
+from what I can tell I'm probably not alone about), I will attempt to
+explain the potential concurrency issues I see with the pping
+implementation.
+
+The current pping implementation already has a potential concurrency
+issue. When matches for identifiers are found on ingress, a check is
+performed to see if the timestamp has already been used or
+not. Multiple packets processed in parallel could potentially all
+find that the timestamp is unused, before any of them manage to mark
+it as used for the others. This may result in pping matching several
+responses to a single timestamp entry and reporting the RTTs for each
+of them. I do not consider this a significant issue however, as if
+they are concurrent enough that they manage to lookup the used status
+before another has time to set it, the difference in time between them
+should be very small, and therefore compute very similar RTTs. So the
+reported RTTs should still be rather accurate, just over-reported.
+
+When adding sampling and per-flow information, some additional
+concurrency issues may be encountered. Mainly, multiple packets may
+find that they are allowed to add a new timestamp, before they manage
+to update the time of last added time-stamp in the per-flow
+state. This may lead to multiple attempts at creating a timestamp at
+approximately the same time. For TCP timestamps, all the identifiers
+are likely to be identical (as the TCP timestamp itself is only
+updated at limited rate), so only one of them should succeed
+anyways. If using identifiers that are more unique however, such as
+TCP sequence numbers, then it's possible that a short burst of entries
+would be created instead of just a single entry within the rate-limit
+for the flow.
+
+Overall, I don't think these concurrency issues are that severe, as
+they should still result in accurate RTTs, just some possible
+over-reporting. I don't believe these issues warrants the performance
+impact and potential code complexity of trying to synchronize access.
+
 ## Global variable vs single-entry map
+With BTF, there seems like BPF programs now support the use of global
+variables. These global variables can supposedly be modified from user
+space, and should from what I've heard also be more efficient than map
+lookups. They therefore seem like promising way to pass some
+user-configured options from userspace to the BPF programs.
+
+I would however need to lookup how to actually use these, as the
+examples I've seen have used a slightly different libbpf setup, where
+a "skeleton" header-file is compiled and imported to the userspace
+program.
+
+The alternative I guess would be to use a
+`BPF_MAP_TYPE_PERCPU_ARRAY` with a single entry, which is filled in
+with the user-configured option by the userspace program.
 
 
 
