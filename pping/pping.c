@@ -188,7 +188,7 @@ static int clean_map(int map_fd, __u64 max_age)
 {
 	int removed = 0;
 	struct packet_id key, prev_key = { 0 };
-	struct packet_timestamp value;
+	__u64 value;
 	bool delete_prev = false;
 	__u64 now_nsec = get_time_ns();
 
@@ -207,8 +207,8 @@ static int clean_map(int map_fd, __u64 max_age)
 		}
 
 		if (bpf_map_lookup_elem(map_fd, &key, &value) == 0) {
-			if (now_nsec > value.timestamp &&
-			    now_nsec - value.timestamp > max_age) {
+			if (now_nsec > value &&
+			    now_nsec - value > max_age) {
 				delete_prev = true;
 			}
 		}

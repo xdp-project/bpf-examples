@@ -10,7 +10,7 @@ char _license[] SEC("license") = "GPL";
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(key_size, sizeof(struct packet_id));
-	__uint(value_size, sizeof(struct packet_timestamp));
+	__uint(value_size, sizeof(__u64));
 	__uint(max_entries, 16384);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } ts_start SEC(".maps");
@@ -26,7 +26,7 @@ SEC(XDP_PROG_SEC)
 int xdp_prog_ingress(struct xdp_md *ctx)
 {
 	struct packet_id p_id = { 0 };
-	struct packet_timestamp *p_ts;
+	__u64 *p_ts;
 	struct rtt_event event = { 0 };
 	struct parsing_context pctx = {
 		.data = (void *)(long)ctx->data,
@@ -39,24 +39,20 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 		goto end;
 
 	p_ts = bpf_map_lookup_elem(&ts_start, &p_id);
+	if (!p_ts)
+		goto end;
 
-	// Only calculate RTT for first packet with matching identifer
-	if (p_ts && p_ts->used == 0) {
-		/*
-		 * As used is not set atomically with the lookup, could 
-		 * potentially have multiple "first" packets (on different 
-		 * CPUs), but all those should then also have very similar RTT,
-		 * so don't consider it a significant issue
-		 */
-		p_ts->used = 1;
-		// TODO - Optional delete of entry (if identifier is garantued unique)
+	event.rtt = bpf_ktime_get_ns() - *p_ts;
+	/*
+	 * Attempt to delete timestamp entry as soon as RTT is calculated.
+	 * But could have potential concurrency issue where multiple packets
+	 * manage to match against the identifier before it can be deleted.
+	 */
+	bpf_map_delete_elem(&ts_start, &p_id);
 
-		__builtin_memcpy(&event.flow, &p_id.flow,
-				 sizeof(struct network_tuple));
-		event.rtt = bpf_ktime_get_ns() - p_ts->timestamp;
-		bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU,
-				      &event, sizeof(event));
-	}
+	__builtin_memcpy(&event.flow, &p_id.flow, sizeof(struct network_tuple));
+	bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event,
+			      sizeof(event));
 
 end:
 	return XDP_PASS;
