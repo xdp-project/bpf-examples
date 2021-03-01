@@ -31,6 +31,9 @@ performed, ex:
     samples.
 - Sample completely random packets
   - Probably not a good idea...
+- Head sampling (sample the first few packets of each flow)
+  - Not suitable for monitoring long flows
+  - RTT may change over lifetime of flow (due to buffer bloat)
 - Probabilistic approach
   - Probabilistic approaches have been used to for example capture
     most relevant information with limited overhead in INT
@@ -75,7 +78,7 @@ the flow is known.
 ### User configurable
 Regardless if a static or RTT-based (or some other alternative) is
 used, it should probably be user configurable (including allowing the
-user to disable to sampling entirely).
+user to disable sampling entirely).
 
 ## Allowing bursts
 It may be desirable to allow to allow for multiple packets in a short
@@ -84,11 +87,23 @@ response for every other packet. If the first packed is timestamped,
 and shortly after a second packet is sent (that has a different
 identifier), then the response will effectively be for the second
 packet, and no match for the timestamped identifier will be found. For
-flows of the right (or wrong depending on how you look at it)
+flows of the right (or wrong, depending on how you look at it)
 intensity, slow enough where consecutive packets are likely to get
 different TCP timestamps, but fast enough for the delayed ACKs to
 acknowledge multiple packets, then you essentially have a 50/50 chance
 of timestamping the wrong identifier and miss the RTT.
+
+To handle this, you could timestamp multiple consecutive packets (with
+unique indentifiers) in a short burst. You probably need to limit this
+burst in both number of packets, as well as timeframe after the first
+packet that additional packets may be included. For example, allowing
+up to 3 packets (with different identifiers) get a timestamp for up to
+4 ms after the first one of them are timestamped.
+
+If allowing bursts of timestamps to be created, it may also be
+desirable to rate limit the output, in order to not get a burst of
+similar RTTs for the flow in the output (which may also skew averages
+and other post-processing).
 
 ## Handing duplicate identifiers
 TCP timestamps are only updated at a limited rate (ex. 1000 Hz), and
@@ -123,11 +138,11 @@ introduced. With sampling, there's no guarantee that the sampled
 packed will be the first outgoing packet in the sequence of packets
 with identical timestamps. Thus the RTT may still be underestimated by
 as much as the TCP timestamp clock rate (ex. 1 ms). Therefore, a new
-solution is needed. The current idea is to keep track of what the most
-recent identifier of each flow is, and only allow a packet to be
-sampled for timestamping if its identifier differs from the tracked
-identifier of the flow, i.e. it is the first packet in the flow with
-that identifier. This would perhaps be problematic with some sampling
+solution is needed. The current idea is to keep track of the last-seen
+identifier of each flow, and only allow a packet to be sampled for
+timestamping if its identifier differs from the last-seen identifier
+of the flow, i.e. it is the first packet in the flow with that
+identifier. This would perhaps be problematic with some sampling
 approaches as it requires that the packet is both the first one with a
 specific identifier, as well as being elected for sampling. However
 for the rate-limited sampling it should work quite well, as it will
@@ -145,8 +160,20 @@ occasional entries that were never matched for some reason (e.g. the
 previously mentioned issue with delayed ACKs, flow stopped, the
 reverse flow can't be observed etc.).
 
-This mechanism could perhaps also be useful for adding support to QUIC
-based on the spinbit?
+One issue for this new solution is handling out-of-order packets. If
+an entry with an older identifier is a bit delayed, it may arrive after
+the last seen identifier for the flow has been updated. This old
+identifier may then be considered new (as it differs from the current
+one), allowing an entry to be created for it and reverting the last
+seen identifier to a previous one. Additionally, this may
+now allow the next packet having what used to be the current
+identifier, also being detected as a new identifier (as the out-of
+order packet reverted the last-seen identifier to an old one, creating
+a bit of a ping-pong effect). For TCP timestamps this can easily be
+avoided by simply requiring the new identifier to be greater than the
+last-seen identifier (as TCP timestamps should be monotonically
+increasing). That solution may however not be suitable if one wants to
+reuse this mechanic for other protocols, such as the QUIC spinbit.
 
 ## Keeping per-flow information
 In order for the per-flow rate limiting to work, some per-flow state
@@ -158,15 +185,19 @@ There may be some drawbacks with having to keep per-flow state. First
 off, there will be some additional overhead from having to keep track
 of this state. However, the savings from sampling the per-packet state
 (the identifier/timestamps mappings) should hopefully cover the
-overhead from keeping some per-flow state (and then some). Another
-issue that is worth keeping in mind is that this flow-state will also
-need to be cleaned up eventually. This cleanup could be handled in a
-similar manner as the current per-packet state is cleaned up, by
-having the userspace process occasionally remove old entries. In this
-case, the entries could be deemed as old if there was a long time
-since the last timestamp was added for the flow, ex 300 seconds as
-used by the 
-[original pping](https://github.com/pollere/pping/blob/777eb72fd9b748b4bb628ef97b7fff19b751f1fd/pping.cpp#L117).
+overhead from keeping some per-flow state (and then some). 
+
+Another issue that is worth keeping in mind is that this flow-state
+will also need to be cleaned up eventually. This cleanup could be
+handled in a similar manner as the current per-packet state is cleaned
+up, by having the userspace process occasionally remove old
+entries. In this case, the entries could be deemed as old if there was
+a long time since the last timestamp was added for the flow, ex 300
+seconds as used by the [original
+pping](https://github.com/pollere/pping/blob/777eb72fd9b748b4bb628ef97b7fff19b751f1fd/pping.cpp#L117).
+Additionally, one can parse the packets for indications that the
+connection is being closed (ex TCP FIN/RST), and then directly delete
+the flow-state for that flow from the BPF programs.
 
 Later on, this per-flow state could potentially be expanded to include
 other information deemed useful (such as ex. minimum and average RTT).
@@ -174,25 +205,34 @@ other information deemed useful (such as ex. minimum and average RTT).
 ### Alternative solution - keeping identifier in flow-state
 One idea that came up during my supervisor meeting, was that instead
 of creating timestamps for individual packets as is currently done,
-you only create a timestamp for the flow. That is, you would simply
-add the timestamped identifier to the per-flow information.
+you only create a number of timestamps for each flow. That is, instead
+of creating per-packet entries in a separate map, you include a number
+of timestamp/identifier pairs in the flow-state information itself.
 
-While this would be rather efficient, limiting the number of timestamp
-entries to a single per flow, I'm opposed to this idea for two
-reasons:
+While this would potentially be rather efficient, limiting the number
+of timestamp entries to a fixed number per flow, I'm opposed to this
+idea for a few reasons:
 
-1. It would make it impossible to sample RTTs at a timescale smaller
-   than the RTT of the flow. As if identifier is updated faster than
-   the response arrives, then the response will fail to match against
-   the identifier and no RTT can be calculated. While in many
-   instances not needed, I think it may still be useful to be able to
-   query timestamps more frequently than once per RTT, especially for
-   flows with a large bandwidth-delay product.
-2. In case no match is found for the identifier, this could
-   effectively block new timestamps from being created (and thus from
-   RTTs being calculated) for the flow until it can be relatively
-   safely assumed that the response was indeed missed, ant not just
-   delayed.
+1. The sampling rate would be inherently tied to the RTT of the
+   flow. While this may in many cases be desirable, it is not very
+   flexible. It would also make it hard to ex. turn of sampling
+   completely.
+2. The number of timestamps per flow would need to be fixed and known
+   at compile time(?). As the timestamps/identifier pairs are kept in
+   the state-flow information itself, and the state-flow information
+   needs to be of a known and fixed size when creating the maps. This
+   may also result in some wasted space if the flow-state includes
+   spots for several timestamp/identifier pairs, but most flows only
+   makes use of a few (although having an additional timestamp entry
+   map of fixed size wastes space in a similar manner).
+2. If a low number of timestamp/identifier pairs are kept, selecting
+   an identifier that is missed (ex due to delayed ACKs) could
+   effectivly block new timestamps from being created (and thus from
+   RTTs being calculated) for the flow for a relatively long
+   while. New timestamps can only be created if you have a free slot,
+   and you can only free a slot by either getting a matching reply, or
+   waiting until it can be safely assumed that the response was missed
+   (and not just delayed).
 
 ## Graceful degradation
 Another aspect I've been asked to consider is how to gracefully reduce
@@ -235,17 +275,22 @@ one views as desirable:
    the most active flows around.
 2. One can attempt to monitor fewer flows, but with more frequent RTT
    calculations for each. The easiest way to achieve this is to
-   probably to set a more limited size on the per-flow map. In case
-   one wants to primarily focus on heavier flows, one could possibly
-   add ex. packet rate to the per-flow information, and remove the
-   flows with the lowest packet rates.
+   probably to set a smaller size on the per-flow map relative to the
+   per-packet timestamp map. In case one wants to primarily focus on
+   heavier flows, one could possibly add ex. packet rate to the
+   per-flow information, and remove the flows with the lowest packet
+   rates.
 3. One can attempt to focus on flows with shorter RTTs. Flows with
    shorter RTTs should make more efficient use of timestamp entries,
    as they can be cleared out faster allowing for new entries. On the
    other hand, flows with longer RTTs may be the more interesting
    ones, as they are more likely to indicate some issue.
+4. One can simply try to create a larger map (and copy over the old
+   contents) once the map is approaching full. This way one can start
+   with reasonably small maps, and only start eating up more memory if
+   required. 
 
-While I'm leaning towards option 1, I don't have a very strong
+While I'm leaning towards option 1 or 4, I don't have a very strong
 personal opinion here, and would like some input on what others (who
 may have more experience with network measurements) think are
 reasonable trade-offs to do.
@@ -267,6 +312,12 @@ that the same core that timestamped a packet will process the response
 for that packet. Likewise, the per-flow information, like the time of
 the last timestamping, also needs to be global. Otherwise rate limit
 would be per-CPU-per-flow rather than just per-flow.
+
+In practice, packets from the same flow are apparently often handled
+by the same CPU, but this is not guaranteed, and therefore not
+something we can rely on (especially when state needs to be shared by
+both ingress and egress). Could try to use a CPU map to enforce this
+behavior, but probably not a great idea.
 
 ## Concurrency issues
 In addition to the performance hit, sharing global state between
@@ -307,7 +358,10 @@ for the flow.
 Overall, I don't think these concurrency issues are that severe, as
 they should still result in accurate RTTs, just some possible
 over-reporting. I don't believe these issues warrants the performance
-impact and potential code complexity of trying to synchronize access.
+impact and potential code complexity of trying to synchronize
+access. Furthermore, from what I understand these concurrency issues
+are not too likely to occur in reality, as packets from the same flow
+are often processed on the same core.
 
 ## Global variable vs single-entry map
 With BTF, there seems like BPF programs now support the use of global
@@ -319,7 +373,8 @@ user-configured options from userspace to the BPF programs.
 I would however need to lookup how to actually use these, as the
 examples I've seen have used a slightly different libbpf setup, where
 a "skeleton" header-file is compiled and imported to the userspace
-program.
+program. There should be some examples in the [xdp-tools
+repository](https://github.com/xdp-project/xdp-tools).
 
 The alternative I guess would be to use a
 `BPF_MAP_TYPE_PERCPU_ARRAY` with a single entry, which is filled in
