@@ -32,6 +32,15 @@ struct parsing_context {
 	__u32 pkt_len;        //Full packet length (headers+data)
 };
 
+// Timestamp map
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct packet_id);
+	__type(value, __u64);
+	__uint(max_entries, 16384);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} ts_start SEC(".maps");
+
 /*
  * Maps an IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
  */

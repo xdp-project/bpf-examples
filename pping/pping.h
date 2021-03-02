@@ -6,7 +6,7 @@
 #include <linux/in6.h>
 
 #define XDP_PROG_SEC "xdp"
-#define TCBPF_PROG_SEC "pping_egress"
+#define TCBPF_PROG_SEC "classifier"
 
 /*
  * Struct that can hold the source or destination address for a flow (l3+l4).

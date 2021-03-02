@@ -4,7 +4,7 @@
 # License: GPLv2
 #
 # Modified by Simon Sundberg <simon.sundberg@kau.se> to add support
-# of optional section (--sec) option and changed default BPF_OBJ
+# of optional section (--sec) option or attaching a pinned program
 #
 basedir=`dirname $0`
 source ${basedir}/functions.sh
@@ -64,6 +64,16 @@ function tc_egress_bpf_attach()
 	    egress bpf da obj "$objfile" sec "$section"
 }
 
+function tc_egress_bpf_attach_pinned()
+{
+    local device=${1:-$DEV}
+    local pinprog=${2:-$PIN_PROG}
+    shift 2
+
+    call_tc filter add dev "$device" pref 2  handle 2 \
+	    egress bpf da pinned "$pinprog"
+}
+
 function tc_egress_list()
 {
     local device=${1:-$DEV}
@@ -77,7 +87,12 @@ if [[ -n $REMOVE ]]; then
 fi
 
 tc_init_clsact $DEV
-tc_egress_bpf_attach $DEV $BPF_OBJ $SEC
+
+if [[ -n $PIN_PROG ]]; then
+    tc_egress_bpf_attach_pinned $DEV $PIN_PROG
+else
+    tc_egress_bpf_attach $DEV $BPF_OBJ $SEC
+fi
 
 # Practical to list egress filters after setup.
 # (It's a common mistake to have several progs loaded)

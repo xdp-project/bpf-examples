@@ -8,14 +8,6 @@
 char _license[] SEC("license") = "GPL";
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(struct packet_id));
-	__uint(value_size, sizeof(__u64));
-	__uint(max_entries, 16384);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} ts_start SEC(".maps");
-
-struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(__u32));
@@ -36,11 +28,11 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 	};
 
 	if (parse_packet_identifier(&pctx, false, &p_id) < 0)
-		goto end;
+		goto out;
 
 	p_ts = bpf_map_lookup_elem(&ts_start, &p_id);
 	if (!p_ts)
-		goto end;
+		goto out;
 
 	event.rtt = bpf_ktime_get_ns() - *p_ts;
 	/*
@@ -54,6 +46,6 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 	bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event,
 			      sizeof(event));
 
-end:
+out:
 	return XDP_PASS;
 }

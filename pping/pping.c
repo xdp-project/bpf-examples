@@ -24,7 +24,7 @@
 #define NS_PER_MS 1000000UL
 
 #define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
-#define PINNED_DIR "/sys/fs/bpf/tc/globals"
+#define PINNED_DIR "/sys/fs/bpf/pping"
 #define PPING_XDP_OBJ "pping_kern_xdp.o"
 #define PPING_TCBPF_OBJ "pping_kern_tc.o"
 
@@ -78,20 +78,20 @@ static int set_rlimit(long int lim)
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
 }
 
-static int mkdir_if_noexist(const char *path)
-{
-	int ret;
-	struct stat st = { 0 };
+/* static int mkdir_if_noexist(const char *path) */
+/* { */
+/* 	int ret; */
+/* 	struct stat st = { 0 }; */
 
-	ret = stat(path, &st);
-	if (ret) {
-		if (errno != ENOENT)
-			return -errno;
+/* 	ret = stat(path, &st); */
+/* 	if (ret) { */
+/* 		if (errno != ENOENT) */
+/* 			return -errno; */
 
-		return mkdir(path, 0700) ? -errno : 0;
-	}
-	return S_ISDIR(st.st_mode) ? 0 : -EEXIST;
-}
+/* 		return mkdir(path, 0700) ? -errno : 0; */
+/* 	} */
+/* 	return S_ISDIR(st.st_mode) ? 0 : -EEXIST; */
+/* } */
 
 static int bpf_obj_open(struct bpf_object **obj, const char *obj_path,
 			char *map_path)
@@ -157,10 +157,14 @@ static int run_program(const char *path, char *const argv[])
 	}
 }
 
-static int tc_bpf_load(char *bpf_object, char *section, char *interface)
+static int tc_bpf_attach(char *pin_dir, char *section, char *interface)
 {
-	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface, "--obj",
-			       bpf_object,	    "--sec", section,	NULL };
+	char prog_path[MAX_PATH_LEN];
+	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface, "--pinned", prog_path, NULL };
+
+	if(snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, section) < 0)
+		return -EINVAL;
+
 	return run_program(TCBPF_LOADER_SCRIPT, argv);
 }
 
@@ -184,6 +188,7 @@ static __u64 get_time_ns(void)
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
+// TODO - generalize mechanic so it can be used for cleaning both ts_start and flow_state maps
 static int clean_map(int map_fd, __u64 max_age)
 {
 	int removed = 0;
@@ -280,9 +285,10 @@ int main(int argc, char *argv[])
 	int ifindex = 0;
 	bool xdp_attached = false;
 	bool tc_attached = false;
-	char map_path[MAX_PATH_LEN];
+	char path_buffer[MAX_PATH_LEN];
 
-	struct bpf_object *obj = NULL;
+	struct bpf_object *xdp_obj = NULL;
+	struct bpf_object *tc_obj = NULL;
 	struct bpf_map *map = NULL;
 
 	pthread_t tid;
@@ -321,38 +327,21 @@ int main(int argc, char *argv[])
 	}
 
 	// Load and attach the XDP program
-	err = mkdir_if_noexist("/sys/fs/bpf/tc");
-	if (err) {
-		fprintf(stderr,
-			"Failed creating directory %s in which to pin map: %s\n",
-			"/sys/fs/bpf/tc", strerror(-err));
-		goto cleanup;
-	}
-
-	err = bpf_obj_open(&obj, PPING_XDP_OBJ, PINNED_DIR);
+	err = bpf_obj_open(&xdp_obj, PPING_XDP_OBJ, PINNED_DIR);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
 			PPING_XDP_OBJ, strerror(-err));
 		goto cleanup;
 	}
 
-	// Get map here to allow for unpinning at cleanup
-	map = bpf_object__find_map_by_name(obj, TS_MAP);
-	err = libbpf_get_error(map);
-	if (err) {
-		fprintf(stderr, "Could not find map %s in %s: %s\n", TS_MAP,
-			PPING_XDP_OBJ, strerror(err));
-		map = NULL;
-	}
-
-	err = bpf_object__load(obj);
+	err = bpf_object__load(xdp_obj);
 	if (err) {
 		fprintf(stderr, "Failed loading XDP program: %s\n",
 			strerror(-err));
 		goto cleanup;
 	}
 
-	err = xdp_attach(obj, XDP_PROG_SEC, ifindex, XDP_FLAGS, false);
+	err = xdp_attach(xdp_obj, XDP_PROG_SEC, ifindex, XDP_FLAGS, false);
 	if (err) {
 		fprintf(stderr, "Failed attaching XDP program to %s: %s\n",
 			argv[1], strerror(-err));
@@ -360,20 +349,40 @@ int main(int argc, char *argv[])
 	}
 	xdp_attached = true;
 
-	// Load tc-bpf section on interface egress
-	err = tc_bpf_load(PPING_TCBPF_OBJ, TCBPF_PROG_SEC, argv[1]);
+	// Load, pin and attach tc program on egress
+	err = bpf_obj_open(&tc_obj, PPING_TCBPF_OBJ, PINNED_DIR);
+	if (err) {
+		fprintf(stderr, "Failed opening object file %s: %s\n",
+			PPING_TCBPF_OBJ, strerror(-err));
+		goto cleanup;
+	}
+
+	err = bpf_object__load(tc_obj);
+	if (err) {
+		fprintf(stderr, "Failed loading tc program: %s\n",
+			strerror(-err));
+		goto cleanup;
+	}
+
+	err = bpf_object__pin_programs(tc_obj, PINNED_DIR);
+	if (err) {
+		fprintf(stderr, "Failed pinning tc program to %s: %s\n",
+			PINNED_DIR, strerror(-err));
+		goto cleanup;
+	}
+
+	err = tc_bpf_attach(PINNED_DIR, TCBPF_PROG_SEC, argv[1]);
 	if (err) {
 		fprintf(stderr,
-			"Could not load section %s of %s on interface %s: %s\n",
-			TCBPF_PROG_SEC, PPING_TCBPF_OBJ, argv[1],
-			strerror(-err));
+			"Failed attaching tc program on interface %s: %s\n",
+			argv[1], strerror(-err));
 		goto cleanup;
 	}
 	tc_attached = true;
 
 	// Set up the periodical map cleaning
 	clean_args.max_age_ns = TIMESTAMP_LIFETIME;
-	clean_args.map_fd = bpf_map__fd(map);
+	clean_args.map_fd = bpf_object__find_map_fd_by_name(xdp_obj, TS_MAP);
 	if (clean_args.map_fd < 0) {
 		fprintf(stderr,
 			"Could not get file descriptor of map  %s in object %s: %s\n",
@@ -393,7 +402,8 @@ int main(int argc, char *argv[])
 	pb_opts.sample_cb = handle_rtt_event;
 	pb_opts.lost_cb = handle_missed_rtt_event;
 
-	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj, PERF_BUFFER),
+	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(xdp_obj,
+							      PERF_BUFFER),
 			      PERF_BUFFER_PAGES, &pb_opts);
 	err = libbpf_get_error(pb);
 	if (err) {
@@ -419,29 +429,47 @@ int main(int argc, char *argv[])
 
 cleanup:
 	perf_buffer__free(pb);
-	if (map && bpf_map__is_pinned(map)) {
-		snprintf(map_path, sizeof(map_path), "%s/%s", PINNED_DIR,
-			 TS_MAP);
-		err = bpf_map__unpin(map, map_path);
-		if (err) {
-			fprintf(stderr, "Failed unpinning map from %s: %s\n",
-				map_path, strerror(-err));
-		}
-	}
+
 	if (xdp_attached) {
 		err = xdp_detach(ifindex, XDP_FLAGS);
-		if (err) {
+		if (err)
 			fprintf(stderr,
 				"Failed deatching program from ifindex %d: %s\n",
 				ifindex, strerror(-err));
-		}
 	}
+
 	if (tc_attached) {
-		err = tc_bpf_clear(argv[1]); //system(tc_cmd);
-		if (err) {
+		err = tc_bpf_clear(argv[1]);
+		if (err)
 			fprintf(stderr,
 				"Failed removing tc-bpf program from interface %s: %s\n",
 				argv[1], strerror(-err));
+	}
+
+	if (tc_obj) {
+		err = bpf_object__unpin_programs(tc_obj, PINNED_DIR);
+		if (err)
+			fprintf(stderr,
+				"Failed unpinning tc program from %s: %s\n",
+				PINNED_DIR, strerror(-err));
+	}
+
+	/* 
+	 * Could use bpf_obj__unpin_maps(obj, PINNED_DIR) if it only tried
+	 * unpinning pinned maps. But as it also attempts (and fails) to unpin
+	 * maps that aren't pinned, will instead manually unpin the one pinned
+	 * map for now.
+	 */
+	if (xdp_obj) {
+		if ((map = bpf_object__find_map_by_name(xdp_obj, TS_MAP)) &&
+		    bpf_map__is_pinned(map)) {
+			snprintf(path_buffer, sizeof(path_buffer), "%s/%s",
+				 PINNED_DIR, TS_MAP);
+			err = bpf_map__unpin(map, path_buffer);
+			if (err)
+				fprintf(stderr,
+					"Failed unpinning map from %s: %s\n",
+					path_buffer, strerror(-err));
 		}
 	}
 
