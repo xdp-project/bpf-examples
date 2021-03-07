@@ -1,0 +1,68 @@
+#include <linux/bpf.h>
+#include <linux/in.h>
+#include <bpf/bpf_helpers.h>
+#include <xdp/parsing_helpers.h>
+
+#ifndef memcpy
+#define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
+#endif
+
+struct bpf_map_def SEC("maps") dhcp_server = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(int),
+	.value_size = sizeof(u32),
+	.max_entries = 1,
+};
+
+static __always_inline int modify_dhcp_options(struct hdr_cursor* nh,void* data_end,struct collect_vlans* vlans) {
+  
+
+
+}
+
+
+SEC(XDP_PROG_SEC)
+int xdp_dhcp_relay(struct xdp_md* ctx) {
+  void* data_end = (void*)(long)ctx->data_end;
+  void* data = (void*)(long)ctx->data;
+  struct collect_vlans vlans = { 0 };
+  struct ethhdr *eth;
+  struct iphdr *ip;
+  struct udphdr *udp;
+  __u32 *dhcp_srv;
+  int rc = XDP_PASS;
+  
+  /* These keep track of the next header type and iterator pointer */
+	struct hdr_cursor nh;
+	int ether_type;
+  int h_proto;
+  int key = 0;
+	nh.pos = data;
+  
+  ether_type = parse_ethhdr_vlan(&nh, data_end, &eth, &vlans);
+  if(ether_type < 0) {
+    rc = XDP_ABORTED;
+    goto out;
+    }
+  if(ether_type == bpf_htons(ETH_P_IP)) {
+    h_proto = parse_iphdr(&nh,data_end,&ip);
+    if(h_proto == bpf_htons(IPPROTO_UDP)) {
+      int len = parse_udphdr(&nh,data_end,  &udp);
+      if(udp->dest == bpf_htons(67)) {
+        modify_dhcp_options(&nh,data_end,vlans);
+        dhcp_srv = bpf_map_lookup_elem(&dhcp_server,&key);
+        ip->dst = bpf_htons(*dhcp_srv);
+        //re-calc ip checksum
+        rc = XDP_PASS;
+        goto out;
+        }
+    
+    out:
+      return rc;
+      
+}
+  
+    
+  
+  
+  
