@@ -31,10 +31,13 @@
 #define XDP_FLAGS XDP_FLAGS_UPDATE_IF_NOEXIST
 
 #define TS_MAP "ts_start"
+#define FLOW_MAP "flow_state"
 #define MAP_CLEANUP_INTERVAL                                                   \
 	(1 * NS_PER_SECOND) // Clean timestamp map once per second
 #define TIMESTAMP_LIFETIME                                                     \
-	(10 * NS_PER_SECOND) // Clear out entries from ts_start if they're over 10 seconds
+	(10 * NS_PER_SECOND) // Clear out packet timestamps if they're over 10 seconds
+#define FLOW_LIFETIME                                                     \
+	(300 * NS_PER_SECOND) // Clear out flows if they're inactive over 300 seconds
 
 #define PERF_BUFFER "rtt_events"
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
@@ -57,8 +60,8 @@
 
 // Structure to contain arguments for clean_map (for passing to pthread_create)
 struct map_cleanup_args {
-	int map_fd;
-	__u64 max_age_ns;
+	int packet_map_fd;
+	int flow_map_fd;
 };
 
 static volatile int keep_running = 1;
@@ -173,49 +176,94 @@ static __u64 get_time_ns(void)
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
-// TODO - generalize mechanic so it can be used for cleaning both ts_start and flow_state maps
-static int clean_map(int map_fd, __u64 max_age)
+static bool packet_ts_timeout(void *val_ptr, __u64 now)
+{
+	__u64 ts = *(__u64 *)val_ptr;
+	if (now > ts && now - ts > TIMESTAMP_LIFETIME)
+		return true;
+	return false;
+}
+
+static bool flow_timeout(void *val_ptr, __u64 now)
+{
+	__u64 ts = ((struct flow_state *)val_ptr)->last_timestamp;
+	if (now > ts && now - ts > FLOW_LIFETIME)
+		return true;
+	return false;
+}
+
+/*
+ * Loops through all entries in a map, running del_decision_func(value, time)
+ * on every entry, and deleting those for which it returns true.
+ * On sucess, returns the number of entries deleted, otherwise returns the
+ * (negative) error code.
+ */
+//TODO - maybe add some pointer to arguments for del_decision_func?
+static int clean_map(int map_fd, size_t key_size, size_t value_size,
+		     bool (*del_decision_func)(void *, __u64))
 {
 	int removed = 0;
-	struct packet_id key, prev_key = { 0 };
-	__u64 value;
+	void *key, *prev_key, *value;
 	bool delete_prev = false;
 	__u64 now_nsec = get_time_ns();
 
-	int entries = 0; // Just for debug
-	__u64 duration; // Just for debug
+#ifdef DEBUG
+	int entries = 0;
+	__u64 duration;
+#endif
 
 	if (now_nsec == 0)
 		return -errno;
 
+	key = malloc(key_size);
+	prev_key = malloc(key_size);
+	value = malloc(value_size);
+	if (!key || !prev_key || !value) {
+		removed = -ENOMEM;
+		goto cleanup;
+	}
+
 	// Cannot delete current key because then loop will reset, see https://www.bouncybouncy.net/blog/bpf_map_get_next_key-pitfalls/
-	while (bpf_map_get_next_key(map_fd, &prev_key, &key) == 0) {
+	while (bpf_map_get_next_key(map_fd, prev_key, key) == 0) {
 		if (delete_prev) {
-			bpf_map_delete_elem(map_fd, &prev_key);
+			bpf_map_delete_elem(map_fd, prev_key);
 			removed++;
 			delete_prev = false;
 		}
 
-		if (bpf_map_lookup_elem(map_fd, &key, &value) == 0) {
-			if (now_nsec > value &&
-			    now_nsec - value > max_age) {
-				delete_prev = true;
-			}
-		}
+		if (bpf_map_lookup_elem(map_fd, key, value) == 0)
+			delete_prev = del_decision_func(value, now_nsec);
+#ifdef DEBUG
 		entries++;
-		prev_key = key;
+#endif
+		memcpy(prev_key, key, key_size);
 	}
 	if (delete_prev) {
-		bpf_map_delete_elem(map_fd, &prev_key);
+		bpf_map_delete_elem(map_fd, prev_key);
 		removed++;
 	}
+#ifdef DEBUG
 	duration = get_time_ns() - now_nsec;
-	printf("Gone through %d entries and removed %d of them in %llu.%09llu s\n",
-	       entries, removed, duration / NS_PER_SECOND,
+	printf("%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
+	       map_fd, entries, removed, duration / NS_PER_SECOND,
 	       duration % NS_PER_SECOND);
+#endif
+cleanup:
+	if (key)
+		free(key);
+	if (prev_key)
+		free(prev_key);
+	if (value)
+		free(value);
 	return removed;
 }
 
+/*
+ * Periodically cleans out entries from both the packet timestamp map and the
+ * flow state map. Maybe better to split up the cleaning of the maps into two
+ * separate threads instead, to better utilize multi-threading and allow for
+ * maps to be cleaned up at different intervals?
+ */
 static void *periodic_map_cleanup(void *args)
 {
 	struct map_cleanup_args *argp = args;
@@ -224,7 +272,10 @@ static void *periodic_map_cleanup(void *args)
 	interval.tv_nsec = MAP_CLEANUP_INTERVAL % NS_PER_SECOND;
 
 	while (keep_running) {
-		clean_map(argp->map_fd, argp->max_age_ns);
+		clean_map(argp->packet_map_fd, sizeof(struct packet_id),
+			  sizeof(__u64), packet_ts_timeout);
+		clean_map(argp->flow_map_fd, sizeof(struct network_tuple),
+			  sizeof(struct flow_state), flow_timeout);
 		nanosleep(&interval, NULL);
 	}
 	pthread_exit(NULL);
@@ -364,12 +415,23 @@ int main(int argc, char *argv[])
 	tc_attached = true;
 
 	// Set up the periodical map cleaning
-	clean_args.max_age_ns = TIMESTAMP_LIFETIME;
-	clean_args.map_fd = bpf_object__find_map_fd_by_name(xdp_obj, TS_MAP);
-	if (clean_args.map_fd < 0) {
+	clean_args.packet_map_fd =
+		bpf_object__find_map_fd_by_name(xdp_obj, TS_MAP);
+	if (clean_args.packet_map_fd < 0) {
 		fprintf(stderr,
 			"Could not get file descriptor of map  %s in object %s: %s\n",
-			TS_MAP, PPING_XDP_OBJ, strerror(-clean_args.map_fd));
+			TS_MAP, PPING_XDP_OBJ,
+			strerror(-clean_args.packet_map_fd));
+		goto cleanup;
+	}
+
+	clean_args.flow_map_fd =
+		bpf_object__find_map_fd_by_name(tc_obj, FLOW_MAP);
+	if (clean_args.flow_map_fd < 0) {
+		fprintf(stderr,
+			"Could not get file descriptor of map  %s in object %s: %s\n",
+			FLOW_MAP, PPING_TCBPF_OBJ,
+			strerror(-clean_args.flow_map_fd));
 		goto cleanup;
 	}
 
