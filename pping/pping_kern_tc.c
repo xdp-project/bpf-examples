@@ -11,16 +11,9 @@
 
 char _license[] SEC("license") = "GPL";
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct network_tuple);
-	__type(value, struct flow_state);
-	__uint(max_entries, 16384);
-} flow_state SEC(".maps");
-
 // TC-BFP for parsing packet identifier from egress traffic and add to map
 SEC(TCBPF_PROG_SEC)
-int tc_bpf_prog_egress(struct __sk_buff *skb)
+int pping_egress(struct __sk_buff *skb)
 {
 	struct packet_id p_id = { 0 };
 	__u64 p_ts;
@@ -29,12 +22,20 @@ int tc_bpf_prog_egress(struct __sk_buff *skb)
 		.data_end = (void *)(long)skb->data_end,
 		.pkt_len = skb->len,
 		.nh = { .pos = pctx.data },
+		.is_egress = true,
 	};
+	bool flow_closing = false;
 	struct flow_state *f_state;
 	struct flow_state new_state = { 0 };
 
-	if (parse_packet_identifier(&pctx, true, &p_id) < 0)
+	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
 		goto out;
+
+	// Delete flow and create no timestamp entry if flow is closing
+	if (flow_closing) {
+		bpf_map_delete_elem(&flow_state, &p_id.flow);
+		goto out;
+	}
 
 	// Check flow state
 	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);

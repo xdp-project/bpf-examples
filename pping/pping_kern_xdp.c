@@ -15,7 +15,7 @@ struct {
 
 // XDP program for parsing identifier in ingress traffic and check for match in map
 SEC(XDP_PROG_SEC)
-int xdp_prog_ingress(struct xdp_md *ctx)
+int pping_ingress(struct xdp_md *ctx)
 {
 	struct packet_id p_id = { 0 };
 	__u64 *p_ts;
@@ -25,10 +25,17 @@ int xdp_prog_ingress(struct xdp_md *ctx)
 		.data_end = (void *)(long)ctx->data_end,
 		.pkt_len = pctx.data_end - pctx.data,
 		.nh = { .pos = pctx.data },
+		.is_egress = false,
 	};
+	bool flow_closing = false;
 
-	if (parse_packet_identifier(&pctx, false, &p_id) < 0)
+	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
 		goto out;
+
+	/* // Delete flow, but allow final attempt at RTT calculation */
+	/* if (flow_closing) // For some reason verifier is very unhappy about this */
+	/* 	bpf_map_delete_elem(&flow_state, &p_id.flow); */
+
 
 	p_ts = bpf_map_lookup_elem(&ts_start, &p_id);
 	if (!p_ts)

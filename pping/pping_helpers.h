@@ -30,6 +30,7 @@ struct parsing_context {
 	void *data_end;       //End of safe acessible area
 	struct hdr_cursor nh; //Position to parse next
 	__u32 pkt_len;        //Full packet length (headers+data)
+	bool is_egress;       //Is packet on egress or ingress?
 };
 
 // Timestamp map
@@ -40,6 +41,15 @@ struct {
 	__uint(max_entries, 16384);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } ts_start SEC(".maps");
+
+// Flow state map
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct network_tuple);
+	__type(value, struct flow_state);
+	__uint(max_entries, 16384);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} flow_state SEC(".maps");
 
 /*
  * Maps an IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
@@ -101,15 +111,18 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 	}
 	return -1;
 }
+
 /*
  * Attempts to fetch an identifier for TCP packets, based on the TCP timestamp
  * option. If sucessful, identifier will be set to TSval if is_ingress, TSecr
  * otherwise, the port-members of saddr and daddr will be set the the TCP source
  * and dest, respectively, and 0 will be returned. On failure, -1 will be
- * returned.
+ * returned. Additionally, if the connection is closing (FIN or RST flag), sets
+ * flow_closing to true.
  */
-static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
-				__be16 *sport, __be16 *dport, __u32 *identifier)
+static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
+				__be16 *dport, bool *flow_closing,
+				__u32 *identifier)
 {
 	__u32 tsval, tsecr;
 	struct tcphdr *tcph;
@@ -117,8 +130,16 @@ static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
 	if (parse_tcphdr(&ctx->nh, ctx->data_end, &tcph) < 0)
 		return -1;
 
+	// Check if connection is closing
+	if (tcph->fin || tcph->rst) {
+		*flow_closing = true;
+		/* bpf_printk("Detected connection closing on %d\n", */
+		/* 	   ctx->is_egress); //Upsets verifier? */
+	}
+
 	// Do not timestamp pure ACKs
-	if (is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len && !tcph->syn)
+	if (ctx->is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len &&
+	    !tcph->syn)
 		return -1;
 
 	if (parse_tcp_ts(tcph, ctx->data_end, &tsval, &tsecr) < 0)
@@ -126,7 +147,7 @@ static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
 
 	*sport = tcph->source;
 	*dport = tcph->dest;
-	*identifier = is_egress ? tsval : tsecr;
+	*identifier = ctx->is_egress ? tsval : tsecr;
 	return 0;
 }
 
@@ -141,8 +162,8 @@ static int parse_tcp_identifier(struct parsing_context *ctx, bool is_egress,
  * destination and source of packet, respectively), and identifier will be
  * set to the identifier of a response.
  */
-static int parse_packet_identifier(struct parsing_context *ctx, bool is_egress,
-				   struct packet_id *p_id)
+static int parse_packet_identifier(struct parsing_context *ctx,
+				   struct packet_id *p_id, bool *flow_closing)
 {
 	int proto, err;
 	struct ethhdr *eth;
@@ -151,7 +172,7 @@ static int parse_packet_identifier(struct parsing_context *ctx, bool is_egress,
 	struct flow_address *saddr, *daddr;
 
 	// Switch saddr <--> daddr on ingress to match egress
-	if (is_egress) {
+	if (ctx->is_egress) {
 		saddr = &p_id->flow.saddr;
 		daddr = &p_id->flow.daddr;
 	} else {
@@ -174,8 +195,8 @@ static int parse_packet_identifier(struct parsing_context *ctx, bool is_egress,
 
 	// Add new protocols here
 	if (proto == IPPROTO_TCP) {
-		err = parse_tcp_identifier(ctx, is_egress, &saddr->port,
-					   &daddr->port, &p_id->identifier);
+		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port,
+					   flow_closing, &p_id->identifier);
 		if (err)
 			return -1;
 	} else {
