@@ -46,8 +46,8 @@ struct {
  */
 static void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
 {
-	__builtin_memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
-	__builtin_memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
+	__u16 ipv4_prefix[] = { 0x0, 0x0, 0x0, 0x0, 0x0, 0xffff };
+	__builtin_memcpy(ipv6, ipv4_prefix, sizeof(ipv4_prefix));
 	ipv6->in6_u.u6_addr32[3] = ipv4;
 }
 

@@ -78,21 +78,6 @@ static int set_rlimit(long int lim)
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
 }
 
-/* static int mkdir_if_noexist(const char *path) */
-/* { */
-/* 	int ret; */
-/* 	struct stat st = { 0 }; */
-
-/* 	ret = stat(path, &st); */
-/* 	if (ret) { */
-/* 		if (errno != ENOENT) */
-/* 			return -errno; */
-
-/* 		return mkdir(path, 0700) ? -errno : 0; */
-/* 	} */
-/* 	return S_ISDIR(st.st_mode) ? 0 : -EEXIST; */
-/* } */
-
 static int bpf_obj_open(struct bpf_object **obj, const char *obj_path,
 			char *map_path)
 {
@@ -285,11 +270,9 @@ int main(int argc, char *argv[])
 	int ifindex = 0;
 	bool xdp_attached = false;
 	bool tc_attached = false;
-	char path_buffer[MAX_PATH_LEN];
 
 	struct bpf_object *xdp_obj = NULL;
 	struct bpf_object *tc_obj = NULL;
-	struct bpf_map *map = NULL;
 
 	pthread_t tid;
 	struct map_cleanup_args clean_args;
@@ -454,23 +437,11 @@ cleanup:
 				PINNED_DIR, strerror(-err));
 	}
 
-	/* 
-	 * Could use bpf_obj__unpin_maps(obj, PINNED_DIR) if it only tried
-	 * unpinning pinned maps. But as it also attempts (and fails) to unpin
-	 * maps that aren't pinned, will instead manually unpin the one pinned
-	 * map for now.
-	 */
 	if (xdp_obj) {
-		if ((map = bpf_object__find_map_by_name(xdp_obj, TS_MAP)) &&
-		    bpf_map__is_pinned(map)) {
-			snprintf(path_buffer, sizeof(path_buffer), "%s/%s",
-				 PINNED_DIR, TS_MAP);
-			err = bpf_map__unpin(map, path_buffer);
-			if (err)
-				fprintf(stderr,
-					"Failed unpinning map from %s: %s\n",
-					path_buffer, strerror(-err));
-		}
+		err = bpf_object__unpin_maps(xdp_obj, NULL);
+		if (err)
+			fprintf(stderr, "Failed unpinning maps: %s\n",
+				strerror(-err));
 	}
 
 	return err != 0;
