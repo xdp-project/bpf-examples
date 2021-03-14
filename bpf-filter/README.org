@@ -1,0 +1,18 @@
+#+TITLE: eBPF Qdisc classifier example
+
+This example demonstrates how to write a simple eBPF Qdisc classifier that
+classifies flows depending on their TCP port. The example comes with two
+scripts, run-u32.sh and run-bpf.sh. Both scripts implement the same
+functionality to make it easy to compare them. The scripts both create two
+network namespaces called Left and Right, representing two different hosts, as
+seen in Figure 1.
+
+#+CAPTION: The figure depicts the network setup of the two namespaces setup by the u32 and eBPF scripts.
+#+NAME: fig:Figure 1
+[[./overview.png]]
+
+The Left namespace loads a Qdisc classifier that rate limits depending on the
+destination TCP port. It also starts iperf3 clients that connect to the Right
+namespace's iperf3 servers to demonstrate the rate-limiting. The Qdisc
+classifiers give TCP ports 8080 and 8081 a high rate limit, while TCP port 8082
+represents all other traffic capped at 20 Mbps.
