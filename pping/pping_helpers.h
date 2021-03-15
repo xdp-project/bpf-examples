@@ -77,7 +77,7 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 
 	if (tcph + 1 > data_end || len <= sizeof(struct tcphdr))
 		return -1;
-
+#pragma unroll //temporary solution until we can identify why the non-unrolled loop gets stuck in an infinite loop
 	for (i = 0; i < MAX_TCP_OPTIONS; i++) {
 		if (pos + 1 > opt_end || pos + 1 > data_end)
 			return -1;
@@ -107,8 +107,17 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 		}
 
 		// Some other TCP option - advance option-length bytes
-		if (opt_size < 0 || opt_size > 34) // Try to convince verifier that opt-size can't be something crazy - leads to program being too large instead...
-			return -1;
+		/*
+		 * The &= is to make sure that verifier knows opt_size must
+		 * be positive, as verifier may not remeber u8 constraint if
+		 * it fetches variable from stack, see ex
+		 * https://blog.path.net/ebpf-xdp-and-network-security/.
+		 * Use 0x3f instead of 0xff to avoid compiler optimizing
+		 * away the check, and no option should be able to have a
+		 * size of above 63 anyways (maximum TCP header size is 64
+		 * bytes, and no more than 64-20=44 of them can by options).
+		 */
+		opt_size &= 0x3f;
 		pos += opt_size;
 	}
 	return -1;

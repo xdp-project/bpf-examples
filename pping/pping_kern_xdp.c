@@ -32,10 +32,9 @@ int pping_ingress(struct xdp_md *ctx)
 	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
 		goto out;
 
-	/* // Delete flow, but allow final attempt at RTT calculation */
-	/* if (flow_closing) // For some reason verifier is very unhappy about this */
-	/* 	bpf_map_delete_elem(&flow_state, &p_id.flow); */
-
+	// Delete flow, but allow final attempt at RTT calculation
+	if (flow_closing)
+		bpf_map_delete_elem(&flow_state, &p_id.flow);
 
 	p_ts = bpf_map_lookup_elem(&ts_start, &p_id);
 	if (!p_ts)
