@@ -107,6 +107,8 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 		}
 
 		// Some other TCP option - advance option-length bytes
+		if (opt_size < 0 || opt_size > 34) // Try to convince verifier that opt-size can't be something crazy - leads to program being too large instead...
+			return -1;
 		pos += opt_size;
 	}
 	return -1;
