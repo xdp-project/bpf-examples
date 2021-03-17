@@ -1,0 +1,29 @@
+#!/bin/bash
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+# This is not an autoconf generated configure
+#
+
+# Output file which is input to Makefile
+CONFIG=config.mk
+
+# Assume tc is in $PATH
+TC=tc
+
+check_tc_libbpf()
+{
+    tc_version=$($TC -V)
+    if echo $tc_version | grep -q libbpf; then
+	libbpf_version=${tc_version##*libbpf }
+	echo "HAVE_TC_LIBBPF:=y" >> $CONFIG
+	echo "BPF_CFLAGS += -DHAVE_TC_LIBBPF" >> $CONFIG
+	echo "yes ($libbpf_version)"
+    else
+	echo "no"
+    fi
+}
+
+echo "# Generated config" > $CONFIG
+echo "Detecting available features on system"
+
+echo -n " - libbpf support in tc tool: "
+check_tc_libbpf
