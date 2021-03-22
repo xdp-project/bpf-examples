@@ -29,9 +29,11 @@ struct parsing_context {
 	void *data;           //Start of eth hdr
 	void *data_end;       //End of safe acessible area
 	struct hdr_cursor nh; //Position to parse next
-	__u32 pkt_len;        //Full packet length (headers+data)
-	bool is_egress;       //Is packet on egress or ingress?
+	__u32 pkt_len; //Full packet length (headers+data)
+	bool is_egress; //Is packet on egress or ingress?
 };
+
+static volatile const struct user_config config = {};
 
 // Timestamp map
 struct {
@@ -56,8 +58,8 @@ struct {
  */
 static void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
 {
-	__u16 ipv4_prefix[] = { 0x0, 0x0, 0x0, 0x0, 0x0, 0xffff };
-	__builtin_memcpy(ipv6, ipv4_prefix, sizeof(ipv4_prefix));
+	__builtin_memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
+	__builtin_memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
 	ipv6->in6_u.u6_addr32[3] = ipv4;
 }
 

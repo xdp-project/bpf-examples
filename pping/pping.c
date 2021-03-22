@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+static const char *__doc__ =
+	"Passive Ping - monitor flow RTT based on TCP timestamps";
+
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <linux/if_link.h>
@@ -10,7 +13,9 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <signal.h> // For detecting Ctrl-C
 #include <sys/resource.h> // For setting rlmit
 #include <sys/wait.h>
@@ -39,6 +44,9 @@
 #define FLOW_LIFETIME                                                     \
 	(300 * NS_PER_SECOND) // Clear out flows if they're inactive over 300 seconds
 
+#define DEFAULT_RATE_LIMIT                                                     \
+	(100 * NS_PER_MS) // Allow one timestamp entry per flow every 100 ms
+
 #define PERF_BUFFER "rtt_events"
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
 #define PERF_POLL_TIMEOUT_MS 100
@@ -65,6 +73,37 @@ struct map_cleanup_args {
 };
 
 static volatile int keep_running = 1;
+
+static const struct option long_options[] = {
+	{ "help",       no_argument,       NULL, 'h' },
+	{ "interface",  required_argument, NULL, 'i' },
+	{ "rate-limit", required_argument, NULL, 'r' },
+	{ 0, 0, NULL, 0 }
+};
+
+/*
+ * Copied from Jesper Dangaaard Brouer's traffic-pacing-edt example
+ */
+static void print_usage(char *argv[])
+{
+	int i;
+
+	printf("\nDOCUMENTATION:\n%s\n", __doc__);
+	printf("\n");
+	printf(" Usage: %s (options-see-below)\n", argv[0]);
+	printf(" Listing options:\n");
+	for (i = 0; long_options[i].name != 0; i++) {
+		printf(" --%-12s", long_options[i].name);
+		if (long_options[i].flag != NULL)
+			printf(" flag (internal value:%d)",
+				*long_options[i].flag);
+		else
+			printf(" short-option: -%c",
+				long_options[i].val);
+		printf("\n");
+	}
+	printf("\n");
+}
 
 void abort_program(int sig)
 {
@@ -123,6 +162,22 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 		return err;
 	}
 	return 0;
+}
+
+static int init_rodata(struct bpf_object *obj, void *src, size_t size)
+{
+	char map_name[16];
+	struct bpf_map *rodata_map = NULL;
+
+	strncpy(map_name, bpf_object__name(obj), 8);
+	map_name[8] = '\0'; // Ensure null-byte at truncation point
+	strcat(map_name, ".rodata");
+
+	rodata_map = bpf_object__find_map_by_name(obj, map_name);
+	if (!rodata_map || libbpf_get_error(rodata_map))
+		return -EINVAL;
+
+	return bpf_map__set_initial_value(rodata_map, src, size);
 }
 
 static int run_program(const char *path, char *const argv[])
@@ -319,23 +374,25 @@ int main(int argc, char *argv[])
 {
 	int err = 0;
 	int ifindex = 0;
+	int opt, longindex = 0;
+	char ifname[IF_NAMESIZE];
+	unsigned long rate_limit_ms = -1;
 	bool xdp_attached = false;
 	bool tc_attached = false;
 
 	struct bpf_object *xdp_obj = NULL;
 	struct bpf_object *tc_obj = NULL;
 
+	struct user_config config = { .rate_limit = DEFAULT_RATE_LIMIT };
+
 	pthread_t tid;
 	struct map_cleanup_args clean_args;
 
 	struct perf_buffer *pb = NULL;
-	struct perf_buffer_opts pb_opts;
-
-	// TODO - better argument parsing (more relevant as featureas are added)
-	if (argc < 2) {
-		printf("Usage: ./pping_user <dev>\n");
-		return EXIT_FAILURE;
-	}
+	struct perf_buffer_opts pb_opts = {
+		.sample_cb = handle_rtt_event,
+		.lost_cb = handle_missed_rtt_event,
+	};
 
 	// Detect if running as root
 	if (geteuid() != 0) {
@@ -348,16 +405,52 @@ int main(int argc, char *argv[])
 	if (err) {
 		fprintf(stderr, "Could not set rlimit to infinity: %s\n",
 			strerror(-err));
-		goto cleanup;
+		return EXIT_FAILURE;
 	}
 
-	// Get index of interface
-	ifindex = if_nametoindex(argv[1]);
+	while ((opt = getopt_long(argc, argv, "hi:r:", long_options,
+				  &longindex)) != -1) {
+		switch (opt) {
+		case 'i':
+			if (strlen(optarg) > IF_NAMESIZE) {
+				fprintf(stderr, "interface name too long\n");
+				return EXIT_FAILURE;
+			}
+
+			strncpy(ifname, optarg, IF_NAMESIZE);
+			ifindex = if_nametoindex(ifname);
+			if (ifindex == 0) {
+				err = -errno;
+				fprintf(stderr,
+					"Could not get index of interface %s: %s\n",
+					ifname, strerror(-err));
+				return EXIT_FAILURE;
+			}
+
+			break;
+		case 'r':
+			rate_limit_ms = strtoul(optarg, NULL, 10);
+			if (rate_limit_ms == ULONG_MAX) {
+				fprintf(stderr,
+					"rate-limit \"%s\" ms is invalid\n",
+					optarg);
+				return EXIT_FAILURE;
+			}
+			config.rate_limit = rate_limit_ms * NS_PER_MS;
+			break;
+		case 'h':
+			print_usage(argv);
+			return 0;
+		default:
+			print_usage(argv);
+			return EXIT_FAILURE;
+		}
+	}
+
 	if (ifindex == 0) {
-		err = -errno;
-		fprintf(stderr, "Could not get index of interface %s: %s\n",
-			argv[1], strerror(-err));
-		goto cleanup;
+		fprintf(stderr,
+			"An interface (-i or --interface) must be provided\n");
+		return EXIT_FAILURE;
 	}
 
 	// Load and attach the XDP program
@@ -367,6 +460,13 @@ int main(int argc, char *argv[])
 			PPING_XDP_OBJ, strerror(-err));
 		goto cleanup;
 	}
+
+	/* err = init_rodata(xdp_obj, &config, sizeof(config)); */
+	/* if (err) { */
+	/* 	fprintf(stderr, "Failed pushing user-configration to %s: %s\n", */
+	/* 		PPING_XDP_OBJ, strerror(-err)); */
+	/* 	goto cleanup; */
+	/* } */
 
 	err = bpf_object__load(xdp_obj);
 	if (err) {
@@ -378,7 +478,7 @@ int main(int argc, char *argv[])
 	err = xdp_attach(xdp_obj, XDP_PROG_SEC, ifindex, XDP_FLAGS, false);
 	if (err) {
 		fprintf(stderr, "Failed attaching XDP program to %s: %s\n",
-			argv[1], strerror(-err));
+			ifname, strerror(-err));
 		goto cleanup;
 	}
 	xdp_attached = true;
@@ -387,6 +487,13 @@ int main(int argc, char *argv[])
 	err = bpf_obj_open(&tc_obj, PPING_TCBPF_OBJ, PINNED_DIR);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
+			PPING_TCBPF_OBJ, strerror(-err));
+		goto cleanup;
+	}
+
+	err = init_rodata(tc_obj, &config, sizeof(config));
+	if (err) {
+		fprintf(stderr, "Failed pushing user-configration to %s: %s\n",
 			PPING_TCBPF_OBJ, strerror(-err));
 		goto cleanup;
 	}
@@ -405,11 +512,11 @@ int main(int argc, char *argv[])
 		goto cleanup;
 	}
 
-	err = tc_bpf_attach(PINNED_DIR, TCBPF_PROG_SEC, argv[1]);
+	err = tc_bpf_attach(PINNED_DIR, TCBPF_PROG_SEC, ifname);
 	if (err) {
 		fprintf(stderr,
 			"Failed attaching tc program on interface %s: %s\n",
-			argv[1], strerror(-err));
+			ifname, strerror(-err));
 		goto cleanup;
 	}
 	tc_attached = true;
@@ -444,9 +551,6 @@ int main(int argc, char *argv[])
 	}
 
 	// Set up perf buffer
-	pb_opts.sample_cb = handle_rtt_event;
-	pb_opts.lost_cb = handle_missed_rtt_event;
-
 	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(xdp_obj,
 							      PERF_BUFFER),
 			      PERF_BUFFER_PAGES, &pb_opts);
@@ -484,7 +588,7 @@ cleanup:
 	}
 
 	if (tc_attached) {
-		err = tc_bpf_clear(argv[1]);
+		err = tc_bpf_clear(ifname);
 		if (err)
 			fprintf(stderr,
 				"Failed removing tc-bpf program from interface %s: %s\n",

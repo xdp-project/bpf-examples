@@ -80,7 +80,7 @@ int pping_egress(struct __sk_buff *skb)
 	 */
 	p_ts = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
 	if (p_ts < f_state->last_timestamp ||
-	    p_ts - f_state->last_timestamp < RATE_LIMIT)
+	    p_ts - f_state->last_timestamp < config.rate_limit)
 		goto out;
 
 	/*

@@ -8,6 +8,10 @@
 #define XDP_PROG_SEC "xdp"
 #define TCBPF_PROG_SEC "classifier"
 
+struct user_config {
+	__u64 rate_limit;
+};
+
 /*
  * Struct that can hold the source or destination address for a flow (l3+l4).
  * Works for both IPv4 and IPv6, as IPv4 addresses can be mapped to IPv6 ones
