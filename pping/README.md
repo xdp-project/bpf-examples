@@ -17,10 +17,10 @@ outgoing packets, and then look for matches in the incoming packets. If a match
 is found, the RTT is simply calculated as the time difference between the
 current time and the timestamp.
 
-For Kathie's pping implementation, as well as this one, TCP timestamps are used
-as the identifiers. For outgoing packets, the TSval (which is a timestamp in and
-off itself) is timestamped. Incoming packets are then parsed for the TSecr,
-which are the echoed TSval values from the receiver. The TCP timestamps are not
+This tool, just as Kathie's original pping implementation, uses TCP timestamps
+as identifiers. For outgoing packets, the TSval (which is a timestamp in and off
+itself) is timestamped. Incoming packets are then parsed for the TSecr, which
+are the echoed TSval values from the receiver. The TCP timestamps are not
 necessarily unique for every packet (they have a limited update frequency,
 appears to be 1000 Hz for modern Linux systems), so only the first instance of
 an identifier is timestamped, and matched against the first incoming packet with
@@ -38,13 +38,13 @@ matched differs from the one in Kathie's pping, and is further described in
   programs by setting a "global variable" (stored in the programs .rodata
   section).
 - `pping_kern_tc.c`: The BPF program that's loaded on tc egress egress. Parses
-  incoming packets for identifiers. If and identifier is found it checks and
+  incoming packets for identifiers. If an identifier is found it checks and
   updates the `flow_state` map. If the sampling strategy allows it, a timestamp
   for the packet is created in the `ts_start` map.
-- `pping_kern_xdp.c`: The BPF program that is loaded XDP ingress. Parses
-  incoming packets for identifiers. If a identifier is found, it looks up the
+- `pping_kern_xdp.c`: The BPF program that is loaded on XDP ingress. Parses
+  incoming packets for identifiers. If an identifier is found, it looks up the
   `ts_start` map for a matching identifier on the reverse flow (to match
-  source/dest on egress). If a match is found, it calculates and RTT from the
+  source/dest on egress). If a match is found, it calculates the RTT from the
   stored timestamp and then deletes the entry. The calculated RTT (together with
   the flow-tuple) is pushed to the perf-buffer `rtt_events`.
 - `bpf_egress_loader.sh`: A shell script that's used by `pping.c` to setup a
@@ -68,23 +68,23 @@ matched differs from the one in Kathie's pping, and is further described in
   last seen identifier for the flow and when the last timestamp entry for the
   flow was created. Entries are created by `pping_kern_tc.c`, and can be updated
   or deleted by both `pping_kern_tc.c` and `pping_kern_xpd.c`. Leftover entries
-  are eventually removed by `pping.c`.
-  `pping_kern_tc.c` and `pping_kern_xdp.c`
+  are eventually removed by `pping.c`. Pinned at `/sys/fs/bpf/pping`.
 - `ts_start`: A hash-map storing a timestamp for a specific packet identifier
   (should probably be renamed to ex. `packet_timestamps`). Entries are created
   by `pping_kern_tc.c` and removed by `pping_kern_xdp.c` if a match is
-  found. Leftover entries are eventually removed by `pping.c`.
+  found. Leftover entries are eventually removed by `pping.c`. Pinned at
+  `/sys/fs/bpf/pping`.
 - `rtt_events`: A perf-buffer used by `pping_kern_xpd.c` to push calculated RTTs
   to `pping.c`, which continuously polls the map the print out the RTTs.
 
 ## Similar projects
 Passively measuring the RTT for TCP traffic is not a novel concept, and there
-are a number of other tools that can achieve similar results. A good overview of
-how passive RTT calculation using TCP timestamps (as in this project) works is
-provided in [this paper](https://doi.org/10.1145/2523426.2539132) from 2013.
+exists a number of other tools that can do so. A good overview of how passive
+RTT calculation using TCP timestamps (as in this project) works is provided in
+[this paper](https://doi.org/10.1145/2523426.2539132) from 2013.
 
 - [pping](https://github.com/pollere/pping): This project is largely a
-  re-implementation of Kathie's pping, but by using BPF and XDP together with
+  re-implementation of Kathie's pping, but by using BPF and XDP as well as
   implementing some filtering logic the hope is to be able to create a always-on
   tool that can scale well even to large amounts of massive flows.
 - [ppviz](https://github.com/pollere/ppviz): Web-based visualization tool for
