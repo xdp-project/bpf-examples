@@ -16,13 +16,11 @@
 - [ ] QUIC (based on spinbit)
 
 ## General pping
-- [ ] Add sampling so that RTT is not calculated for every packet
+- [x] Add sampling so that RTT is not calculated for every packet
       (with unique value) for large flows
-  - This serves two purposes, limiting the output from pping and
-    reducing the rate at which the timestamp map grows (making it less
-    likely to become full)
-  - Will likely be based on a per-flow rate limit
-- [ ] Keep some per-flow state
+  - [ ] Allow short bursts to bypass sampling in order to handle 
+        delayed ACKs
+- [x] Keep some per-flow state
   - Will likely be needed for the sampling
   - [ ] Could potentially include keeping track of average RTT, which
         may be useful for some decisions (ex. how often to sample,
@@ -38,14 +36,6 @@
   - Keeping entries around for a long time allows the map to grow
     unnecessarily large, which slows down the cleaning and may block
     new entries
-- [ ] Add support for automatically deleting entries if they are
-      unique
-  - TCP timestamp need to be kept for a while so only first packet
-    with unique value is timestamped. For identifiers that are unique
-    per packet, they can be removed directly after RTT is calculated
-  - Once sampling is introduced, keeping entry around will not be
-    sufficient to guarantee only timestamping first packet. May at
-    that point remove every entry once RTT is calculated.
 - [ ] Use libxdp to load XDP program
 - [ ] Add option for machine-readable output (as original pping)
   - It may be a good idea to keep the same format as original pping,
