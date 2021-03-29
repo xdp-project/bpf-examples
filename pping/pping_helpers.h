@@ -75,7 +75,8 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 	int len = tcph->doff << 2;
 	void *opt_end = (void *)tcph + len;
 	__u8 *pos = (__u8 *)(tcph + 1); //Current pos in TCP options
-	__u8 i, opt, opt_size;
+	__u8 i, opt;
+	volatile __u8 opt_size; // Seems to ensure it's always read of from stack as u8
 
 	if (tcph + 1 > data_end || len <= sizeof(struct tcphdr))
 		return -1;
@@ -100,8 +101,7 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 
 		// Option-kind is TCP timestap (yey!)
 		if (opt == 8 && opt_size == 10) {
-			if (pos + opt_size > opt_end ||
-			    pos + opt_size > data_end)
+			if (pos + 10 > opt_end || pos + 10 > data_end)
 				return -1;
 			*tsval = *(__u32 *)(pos + 2);
 			*tsecr = *(__u32 *)(pos + 6);
@@ -109,17 +109,6 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 		}
 
 		// Some other TCP option - advance option-length bytes
-		/*
-		 * The &= is to make sure that verifier knows opt_size must
-		 * be positive, as verifier may not remeber u8 constraint if
-		 * it fetches variable from stack, see ex
-		 * https://blog.path.net/ebpf-xdp-and-network-security/.
-		 * Use 0x3f instead of 0xff to avoid compiler optimizing
-		 * away the check, and no option should be able to have a
-		 * size of above 63 anyways (maximum TCP header size is 64
-		 * bytes, and no more than 64-20=44 of them can by options).
-		 */
-		opt_size &= 0x3f;
 		pos += opt_size;
 	}
 	return -1;
