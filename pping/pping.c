@@ -166,18 +166,14 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 
 static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 {
-	char map_name[16];
-	struct bpf_map *rodata_map = NULL;
+	struct bpf_map *map = NULL;
+	bpf_object__for_each_map(map, obj) {
+		if (strstr(bpf_map__name(map), ".rodata"))
+			return bpf_map__set_initial_value(map, src, size);
+	}
 
-	strncpy(map_name, bpf_object__name(obj), 8);
-	map_name[8] = '\0'; // Ensure null-byte at truncation point
-	strcat(map_name, ".rodata");
-
-	rodata_map = bpf_object__find_map_by_name(obj, map_name);
-	if (!rodata_map || libbpf_get_error(rodata_map))
-		return -EINVAL;
-
-	return bpf_map__set_initial_value(rodata_map, src, size);
+	// No .rodata map found
+	return -EINVAL;
 }
 
 static int run_program(const char *path, char *const argv[])
@@ -460,13 +456,6 @@ int main(int argc, char *argv[])
 			PPING_XDP_OBJ, strerror(-err));
 		goto cleanup;
 	}
-
-	/* err = init_rodata(xdp_obj, &config, sizeof(config)); */
-	/* if (err) { */
-	/* 	fprintf(stderr, "Failed pushing user-configration to %s: %s\n", */
-	/* 		PPING_XDP_OBJ, strerror(-err)); */
-	/* 	goto cleanup; */
-	/* } */
 
 	err = bpf_object__load(xdp_obj);
 	if (err) {
