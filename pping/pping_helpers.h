@@ -98,6 +98,8 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 		if (pos + 2 > opt_end || pos + 2 > data_end)
 			return -1;
 		opt_size = *(pos + 1);
+		if (opt_size < 2) // Stop parsing options if opt_size has an invalid value
+			return -1;
 
 		// Option-kind is TCP timestap (yey!)
 		if (opt == 8 && opt_size == 10) {
