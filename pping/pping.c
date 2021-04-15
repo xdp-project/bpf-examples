@@ -23,31 +23,18 @@ static const char *__doc__ =
 #include <time.h>
 #include <pthread.h>
 
-#include "pping.h" //key and value structs for the ts_start map
+#include "pping.h" //common structs for user-space and BPF parts
 
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
 
 #define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
-#define PINNED_DIR "/sys/fs/bpf/pping"
-#define PPING_XDP_OBJ "pping_kern_xdp.o"
-#define PPING_TCBPF_OBJ "pping_kern_tc.o"
 
-#define XDP_FLAGS XDP_FLAGS_UPDATE_IF_NOEXIST
-
-#define TS_MAP "ts_start"
-#define FLOW_MAP "flow_state"
-#define MAP_CLEANUP_INTERVAL                                                   \
-	(1 * NS_PER_SECOND) // Clean timestamp map once per second
 #define TIMESTAMP_LIFETIME                                                     \
 	(10 * NS_PER_SECOND) // Clear out packet timestamps if they're over 10 seconds
-#define FLOW_LIFETIME                                                     \
+#define FLOW_LIFETIME                                                          \
 	(300 * NS_PER_SECOND) // Clear out flows if they're inactive over 300 seconds
 
-#define DEFAULT_RATE_LIMIT                                                     \
-	(100 * NS_PER_MS) // Allow one timestamp entry per flow every 100 ms
-
-#define PERF_BUFFER "rtt_events"
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
 #define PERF_POLL_TIMEOUT_MS 100
 
@@ -68,16 +55,36 @@ static const char *__doc__ =
 
 // Structure to contain arguments for clean_map (for passing to pthread_create)
 struct map_cleanup_args {
+	__u64 cleanup_interval;
 	int packet_map_fd;
 	int flow_map_fd;
+};
+
+// Store configuration values in struct to easily pass around
+struct pping_config {
+	struct bpf_config bpf_config;
+	__u64 cleanup_interval;
+	int xdp_flags;
+	int ifindex;
+	char ifname[IF_NAMESIZE];
+	bool force;
+	char *object_path;
+	char *ingress_sec;
+	char *egress_sec;
+	char *pin_dir;
+	char *packet_map;
+	char *flow_map;
+	char *rtt_map;
 };
 
 static volatile int keep_running = 1;
 
 static const struct option long_options[] = {
-	{ "help",       no_argument,       NULL, 'h' },
-	{ "interface",  required_argument, NULL, 'i' },
-	{ "rate-limit", required_argument, NULL, 'r' },
+	{ "help",             no_argument,       NULL, 'h' },
+	{ "interface",        required_argument, NULL, 'i' }, // Name of interface to run on
+	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
+	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
+	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
 	{ 0, 0, NULL, 0 }
 };
 
@@ -96,13 +103,96 @@ static void print_usage(char *argv[])
 		printf(" --%-12s", long_options[i].name);
 		if (long_options[i].flag != NULL)
 			printf(" flag (internal value:%d)",
-				*long_options[i].flag);
+			       *long_options[i].flag);
 		else
-			printf(" short-option: -%c",
-				long_options[i].val);
+			printf(" short-option: -%c", long_options[i].val);
 		printf("\n");
 	}
 	printf("\n");
+}
+
+static double parse_positive_double_argument(const char *str,
+					     const char *parname)
+{
+	char *endptr;
+	double val;
+	val = strtod(str, &endptr);
+	if (strlen(str) != endptr - str) {
+		fprintf(stderr, "%s %s is not a valid number\n", parname, str);
+		return -EINVAL;
+	}
+	if (val < 0) {
+		fprintf(stderr, "%s must be positive\n", parname);
+		return -EINVAL;
+	}
+
+	return val;
+}
+
+static int parse_arguments(int argc, char *argv[], struct pping_config *config)
+{
+	int err, opt;
+	double rate_limit_ms, cleanup_interval_s;
+
+	config->ifindex = 0;
+
+	while ((opt = getopt_long(argc, argv, "hfi:r:c:", long_options,
+				  NULL)) != -1) {
+		switch (opt) {
+		case 'i':
+			if (strlen(optarg) > IF_NAMESIZE) {
+				fprintf(stderr, "interface name too long\n");
+				return -EINVAL;
+			}
+			strncpy(config->ifname, optarg, IF_NAMESIZE);
+
+			config->ifindex = if_nametoindex(config->ifname);
+			if (config->ifindex == 0) {
+				err = -errno;
+				fprintf(stderr,
+					"Could not get index of interface %s: %s\n",
+					config->ifname, strerror(err));
+				return err;
+			}
+			break;
+		case 'r':
+			rate_limit_ms = parse_positive_double_argument(
+				optarg, "rate-limit");
+			if (rate_limit_ms < 0)
+				return -EINVAL;
+
+			config->bpf_config.rate_limit =
+				rate_limit_ms * NS_PER_MS;
+			break;
+		case 'c':
+			cleanup_interval_s = parse_positive_double_argument(
+				optarg, "cleanup-interval");
+			if (cleanup_interval_s < 0)
+				return -EINVAL;
+
+			config->cleanup_interval =
+				cleanup_interval_s * NS_PER_SECOND;
+			break;
+		case 'f':
+			config->force = true;
+			break;
+		case 'h':
+			printf("HELP:\n");
+			print_usage(argv);
+			exit(0);
+		default:
+			fprintf(stderr, "Unknown option %s\n", argv[optind]);
+			return -EINVAL;
+		}
+	}
+
+	if (config->ifindex == 0) {
+		fprintf(stderr,
+			"An interface (-i or --interface) must be provided\n");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 void abort_program(int sig)
@@ -121,12 +211,56 @@ static int set_rlimit(long int lim)
 }
 
 static int bpf_obj_open(struct bpf_object **obj, const char *obj_path,
-			char *map_path)
+			const char *map_path)
 {
 	DECLARE_LIBBPF_OPTS(bpf_object_open_opts, opts,
 			    .pin_root_path = map_path);
 	*obj = bpf_object__open_file(obj_path, map_path ? &opts : NULL);
 	return libbpf_get_error(*obj);
+}
+
+static int
+bpf_obj_run_prog_pindir_func(struct bpf_object *obj, const char *prog_title,
+			     const char *pin_dir,
+			     int (*func)(struct bpf_program *, const char *))
+{
+	int len;
+	struct bpf_program *prog;
+	char path[MAX_PATH_LEN];
+
+	len = snprintf(path, MAX_PATH_LEN, "%s/%s", pin_dir, prog_title);
+	if (len < 0)
+		return len;
+	if (len > MAX_PATH_LEN)
+		return -ENAMETOOLONG;
+
+	prog = bpf_object__find_program_by_title(obj, prog_title);
+	if (!prog || libbpf_get_error(prog))
+		return prog ? libbpf_get_error(prog) : -EINVAL;
+
+	return func(prog, path);
+}
+
+/*
+ * Similar to bpf_object__pin_programs, but only attemps to pin a
+ * single program prog_title at path pin_dir/prog_title
+ */
+static int bpf_obj_pin_program(struct bpf_object *obj, const char *prog_title,
+			       const char *pin_dir)
+{
+	return bpf_obj_run_prog_pindir_func(obj, prog_title, pin_dir,
+					    bpf_program__pin);
+}
+
+/*
+ * Similar to bpf_object__unpin_programs, but only attempts to unpin a
+ * single program prog_title at path pin_dir/prog_title.
+ */
+static int bpf_obj_unpin_program(struct bpf_object *obj, const char *prog_title,
+				 const char *pin_dir)
+{
+	return bpf_obj_run_prog_pindir_func(obj, prog_title, pin_dir,
+					    bpf_program__unpin);
 }
 
 static int xdp_detach(int ifindex, __u32 xdp_flags)
@@ -139,7 +273,6 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 {
 	struct bpf_program *prog;
 	int prog_fd;
-	int err;
 
 	if (sec)
 		prog = bpf_object__find_program_by_title(obj, sec);
@@ -147,21 +280,13 @@ static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
 		prog = bpf_program__next(NULL, obj);
 
 	prog_fd = bpf_program__fd(prog);
-	if (prog_fd < 0) {
-		fprintf(stderr, "Could not find program to attach\n");
+	if (prog_fd < 0)
 		return prog_fd;
-	}
 
 	if (force) // detach current (if any) xdp-program first
 		xdp_detach(ifindex, xdp_flags);
 
-	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
-	if (err < 0) {
-		fprintf(stderr, "Failed loading xdp-program on interface %d\n",
-			ifindex);
-		return err;
-	}
-	return 0;
+	return bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
 }
 
 static int init_rodata(struct bpf_object *obj, void *src, size_t size)
@@ -176,7 +301,7 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 	return -EINVAL;
 }
 
-static int run_program(const char *path, char *const argv[])
+static int run_external_program(const char *path, char *const argv[])
 {
 	int status;
 	int ret = -1;
@@ -196,22 +321,24 @@ static int run_program(const char *path, char *const argv[])
 	}
 }
 
-static int tc_bpf_attach(char *pin_dir, char *section, char *interface)
+static int tc_bpf_attach(const char *pin_dir, const char *section,
+			 char *interface)
 {
 	char prog_path[MAX_PATH_LEN];
-	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface, "--pinned", prog_path, NULL };
+	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev",   interface,
+			       "--pinned",	    prog_path, NULL };
 
-	if(snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, section) < 0)
+	if (snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, section) < 0)
 		return -EINVAL;
 
-	return run_program(TCBPF_LOADER_SCRIPT, argv);
+	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
 }
 
 static int tc_bpf_clear(char *interface)
 {
 	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface,
 			       "--remove", NULL };
-	return run_program(TCBPF_LOADER_SCRIPT, argv);
+	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
 }
 
 /*
@@ -300,27 +427,18 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 	       duration % NS_PER_SECOND);
 #endif
 cleanup:
-	if (key)
-		free(key);
-	if (prev_key)
-		free(prev_key);
-	if (value)
-		free(value);
+	free(key);
+	free(prev_key);
+	free(value);
 	return removed;
 }
 
-/*
- * Periodically cleans out entries from both the packet timestamp map and the
- * flow state map. Maybe better to split up the cleaning of the maps into two
- * separate threads instead, to better utilize multi-threading and allow for
- * maps to be cleaned up at different intervals?
- */
 static void *periodic_map_cleanup(void *args)
 {
 	struct map_cleanup_args *argp = args;
 	struct timespec interval;
-	interval.tv_sec = MAP_CLEANUP_INTERVAL / NS_PER_SECOND;
-	interval.tv_nsec = MAP_CLEANUP_INTERVAL % NS_PER_SECOND;
+	interval.tv_sec = argp->cleanup_interval / NS_PER_SECOND;
+	interval.tv_nsec = argp->cleanup_interval % NS_PER_SECOND;
 
 	while (keep_running) {
 		clean_map(argp->packet_map_fd, sizeof(struct packet_id),
@@ -366,23 +484,125 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "Lost %llu RTT events on CPU %d\n", lost_cnt, cpu);
 }
 
+static int load_attach_bpfprogs(struct bpf_object **obj,
+				struct pping_config *config, bool *tc_attached,
+				bool *xdp_attached)
+{
+	// Open and load ELF file
+	int err = bpf_obj_open(obj, config->object_path, config->pin_dir);
+	if (err) {
+		fprintf(stderr, "Failed opening object file %s: %s\n",
+			config->object_path, strerror(-err));
+		return err;
+	}
+
+	err = init_rodata(*obj, &config->bpf_config,
+			  sizeof(config->bpf_config));
+	if (err) {
+		fprintf(stderr, "Failed pushing user-configration to %s: %s\n",
+			config->object_path, strerror(-err));
+		return err;
+	}
+
+	err = bpf_object__load(*obj);
+	if (err) {
+		fprintf(stderr, "Failed loading bpf program in %s: %s\n",
+			config->object_path, strerror(-err));
+		return err;
+	}
+
+	// Attach tc program
+	err = bpf_obj_pin_program(*obj, config->egress_sec, config->pin_dir);
+	if (err) {
+		fprintf(stderr, "Failed pinning tc program to %s/%s: %s\n",
+			config->pin_dir, config->egress_sec, strerror(-err));
+		return err;
+	}
+
+	err = tc_bpf_attach(config->pin_dir, config->egress_sec,
+			    config->ifname);
+	if (err) {
+		fprintf(stderr,
+			"Failed attaching tc program on interface %s: %s\n",
+			config->ifname, strerror(-err));
+		return err;
+	}
+	*tc_attached = true;
+
+	// Attach XDP program
+	err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
+			 config->xdp_flags, config->force);
+	if (err) {
+		fprintf(stderr, "Failed attaching XDP program to %s%s: %s\n",
+			config->ifname,
+			config->force ? "" : ", ensure no other XDP program is already running on interface",
+			strerror(-err));
+		return err;
+	}
+	*xdp_attached = true;
+
+	return 0;
+}
+
+static int setup_periodical_map_cleaning(struct bpf_object *obj,
+					 struct pping_config *config)
+{
+	pthread_t tid;
+	struct map_cleanup_args clean_args = {
+		.cleanup_interval = config->cleanup_interval
+	};
+	int err;
+
+	clean_args.packet_map_fd =
+		bpf_object__find_map_fd_by_name(obj, config->packet_map);
+	if (clean_args.packet_map_fd < 0) {
+		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
+			config->packet_map,
+			strerror(-clean_args.packet_map_fd));
+		return clean_args.packet_map_fd;
+	}
+
+	clean_args.flow_map_fd =
+		bpf_object__find_map_fd_by_name(obj, config->flow_map);
+	if (clean_args.flow_map_fd < 0) {
+		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
+			config->flow_map, strerror(-clean_args.flow_map_fd));
+		return clean_args.packet_map_fd;
+	}
+
+	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
+	if (err) {
+		fprintf(stderr,
+			"Failed starting thread to perform periodic map cleanup: %s\n",
+			strerror(-err));
+		return err;
+	}
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	int err = 0;
-	int ifindex = 0;
-	int opt, longindex = 0;
-	char ifname[IF_NAMESIZE];
-	unsigned long rate_limit_ms = -1;
-	bool xdp_attached = false;
+
 	bool tc_attached = false;
+	bool xdp_attached = false;
 
-	struct bpf_object *xdp_obj = NULL;
-	struct bpf_object *tc_obj = NULL;
+	struct bpf_object *obj = NULL;
 
-	struct user_config config = { .rate_limit = DEFAULT_RATE_LIMIT };
-
-	pthread_t tid;
-	struct map_cleanup_args clean_args;
+	struct pping_config config = {
+		.bpf_config = { .rate_limit = 100 * NS_PER_MS },
+		.cleanup_interval = 1 * NS_PER_SECOND,
+		.object_path = "pping_kern.o",
+		.ingress_sec = INGRESS_PROG_SEC,
+		.egress_sec = EGRESS_PROG_SEC,
+		.pin_dir = "/sys/fs/bpf/pping",
+		.packet_map = "packet_ts",
+		.flow_map = "flow_state",
+		.rtt_map = "rtt_events",
+		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
+		.force = false,
+	};
 
 	struct perf_buffer *pb = NULL;
 	struct perf_buffer_opts pb_opts = {
@@ -404,150 +624,38 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	while ((opt = getopt_long(argc, argv, "hi:r:", long_options,
-				  &longindex)) != -1) {
-		switch (opt) {
-		case 'i':
-			if (strlen(optarg) > IF_NAMESIZE) {
-				fprintf(stderr, "interface name too long\n");
-				return EXIT_FAILURE;
-			}
-
-			strncpy(ifname, optarg, IF_NAMESIZE);
-			ifindex = if_nametoindex(ifname);
-			if (ifindex == 0) {
-				err = -errno;
-				fprintf(stderr,
-					"Could not get index of interface %s: %s\n",
-					ifname, strerror(-err));
-				return EXIT_FAILURE;
-			}
-
-			break;
-		case 'r':
-			rate_limit_ms = strtoul(optarg, NULL, 10);
-			if (rate_limit_ms == ULONG_MAX) {
-				fprintf(stderr,
-					"rate-limit \"%s\" ms is invalid\n",
-					optarg);
-				return EXIT_FAILURE;
-			}
-			config.rate_limit = rate_limit_ms * NS_PER_MS;
-			break;
-		case 'h':
-			print_usage(argv);
-			return 0;
-		default:
-			print_usage(argv);
-			return EXIT_FAILURE;
-		}
-	}
-
-	if (ifindex == 0) {
-		fprintf(stderr,
-			"An interface (-i or --interface) must be provided\n");
+	err = parse_arguments(argc, argv, &config);
+	if (err) {
+		fprintf(stderr, "Failed parsing arguments:  %s\n",
+			strerror(-err));
+		print_usage(argv);
 		return EXIT_FAILURE;
 	}
 
-	// Load and attach the XDP program
-	err = bpf_obj_open(&xdp_obj, PPING_XDP_OBJ, PINNED_DIR);
+	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
 	if (err) {
-		fprintf(stderr, "Failed opening object file %s: %s\n",
-			PPING_XDP_OBJ, strerror(-err));
+		fprintf(stderr,
+			"Failed loading and attaching BPF programs in %s\n",
+			config.object_path);
 		goto cleanup;
 	}
 
-	err = bpf_object__load(xdp_obj);
+	err = setup_periodical_map_cleaning(obj, &config);
 	if (err) {
-		fprintf(stderr, "Failed loading XDP program: %s\n",
+		fprintf(stderr, "Failed setting up map cleaning: %s\n",
 			strerror(-err));
-		goto cleanup;
-	}
-
-	err = xdp_attach(xdp_obj, XDP_PROG_SEC, ifindex, XDP_FLAGS, false);
-	if (err) {
-		fprintf(stderr, "Failed attaching XDP program to %s: %s\n",
-			ifname, strerror(-err));
-		goto cleanup;
-	}
-	xdp_attached = true;
-
-	// Load, pin and attach tc program on egress
-	err = bpf_obj_open(&tc_obj, PPING_TCBPF_OBJ, PINNED_DIR);
-	if (err) {
-		fprintf(stderr, "Failed opening object file %s: %s\n",
-			PPING_TCBPF_OBJ, strerror(-err));
-		goto cleanup;
-	}
-
-	err = init_rodata(tc_obj, &config, sizeof(config));
-	if (err) {
-		fprintf(stderr, "Failed pushing user-configration to %s: %s\n",
-			PPING_TCBPF_OBJ, strerror(-err));
-		goto cleanup;
-	}
-
-	err = bpf_object__load(tc_obj);
-	if (err) {
-		fprintf(stderr, "Failed loading tc program: %s\n",
-			strerror(-err));
-		goto cleanup;
-	}
-
-	err = bpf_object__pin_programs(tc_obj, PINNED_DIR);
-	if (err) {
-		fprintf(stderr, "Failed pinning tc program to %s: %s\n",
-			PINNED_DIR, strerror(-err));
-		goto cleanup;
-	}
-
-	err = tc_bpf_attach(PINNED_DIR, TCBPF_PROG_SEC, ifname);
-	if (err) {
-		fprintf(stderr,
-			"Failed attaching tc program on interface %s: %s\n",
-			ifname, strerror(-err));
-		goto cleanup;
-	}
-	tc_attached = true;
-
-	// Set up the periodical map cleaning
-	clean_args.packet_map_fd =
-		bpf_object__find_map_fd_by_name(xdp_obj, TS_MAP);
-	if (clean_args.packet_map_fd < 0) {
-		fprintf(stderr,
-			"Could not get file descriptor of map  %s in object %s: %s\n",
-			TS_MAP, PPING_XDP_OBJ,
-			strerror(-clean_args.packet_map_fd));
-		goto cleanup;
-	}
-
-	clean_args.flow_map_fd =
-		bpf_object__find_map_fd_by_name(tc_obj, FLOW_MAP);
-	if (clean_args.flow_map_fd < 0) {
-		fprintf(stderr,
-			"Could not get file descriptor of map  %s in object %s: %s\n",
-			FLOW_MAP, PPING_TCBPF_OBJ,
-			strerror(-clean_args.flow_map_fd));
-		goto cleanup;
-	}
-
-	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
-	if (err) {
-		fprintf(stderr,
-			"Failed starting thread to perform periodic map cleanup: %s\n",
-			strerror(err));
 		goto cleanup;
 	}
 
 	// Set up perf buffer
-	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(xdp_obj,
-							      PERF_BUFFER),
+	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
+							      config.rtt_map),
 			      PERF_BUFFER_PAGES, &pb_opts);
 	err = libbpf_get_error(pb);
 	if (err) {
 		pb = NULL;
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
-			PERF_BUFFER, strerror(err));
+			config.rtt_map, strerror(err));
 		goto cleanup;
 	}
 
@@ -569,31 +677,30 @@ cleanup:
 	perf_buffer__free(pb);
 
 	if (xdp_attached) {
-		err = xdp_detach(ifindex, XDP_FLAGS);
+		err = xdp_detach(config.ifindex, config.xdp_flags);
 		if (err)
 			fprintf(stderr,
-				"Failed deatching program from ifindex %d: %s\n",
-				ifindex, strerror(-err));
+				"Failed deatching program from ifindex %s: %s\n",
+				config.ifname, strerror(-err));
 	}
 
 	if (tc_attached) {
-		err = tc_bpf_clear(ifname);
+		err = tc_bpf_clear(config.ifname);
 		if (err)
 			fprintf(stderr,
 				"Failed removing tc-bpf program from interface %s: %s\n",
-				argv[1], strerror(-err));
+				config.ifname, strerror(-err));
 	}
 
-	if (tc_obj) {
-		err = bpf_object__unpin_programs(tc_obj, PINNED_DIR);
+	if (obj && !libbpf_get_error(obj)) {
+		err = bpf_obj_unpin_program(obj, config.egress_sec,
+					    config.pin_dir);
 		if (err)
 			fprintf(stderr,
 				"Failed unpinning tc program from %s: %s\n",
-				PINNED_DIR, strerror(-err));
-	}
+				config.pin_dir, strerror(-err));
 
-	if (xdp_obj) {
-		err = bpf_object__unpin_maps(xdp_obj, NULL);
+		err = bpf_object__unpin_maps(obj, NULL);
 		if (err)
 			fprintf(stderr, "Failed unpinning maps: %s\n",
 				strerror(-err));

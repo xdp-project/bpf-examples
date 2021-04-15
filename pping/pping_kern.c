@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef PPING_HELPERS_H
-#define PPING_HELPERS_H
-
 #include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
 #include <xdp/parsing_helpers.h>
 #include <linux/in.h>
 #include <linux/in6.h>
@@ -10,8 +8,8 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/tcp.h>
-
 #include <stdbool.h>
+
 #include "pping.h"
 
 #define AF_INET 2
@@ -26,25 +24,26 @@
  * header encloses.
  */
 struct parsing_context {
-	void *data;           //Start of eth hdr
-	void *data_end;       //End of safe acessible area
+	void *data; //Start of eth hdr
+	void *data_end; //End of safe acessible area
 	struct hdr_cursor nh; //Position to parse next
 	__u32 pkt_len; //Full packet length (headers+data)
 	bool is_egress; //Is packet on egress or ingress?
 };
 
-static volatile const struct user_config config = {};
+char _license[] SEC("license") = "GPL";
+// Global config struct - set from userspace
+static volatile const struct bpf_config config = {};
 
-// Timestamp map
+// Map definitions
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct packet_id);
 	__type(value, __u64);
 	__uint(max_entries, 16384);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} ts_start SEC(".maps");
+} packet_ts SEC(".maps");
 
-// Flow state map
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct network_tuple);
@@ -52,6 +51,14 @@ struct {
 	__uint(max_entries, 16384);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } flow_state SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u32));
+} rtt_events SEC(".maps");
+
+// Help functions
 
 /*
  * Maps an IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
@@ -76,7 +83,8 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 	void *opt_end = (void *)tcph + len;
 	__u8 *pos = (__u8 *)(tcph + 1); //Current pos in TCP options
 	__u8 i, opt;
-	volatile __u8 opt_size; // Seems to ensure it's always read of from stack as u8
+	volatile __u8
+		opt_size; // Seems to ensure it's always read of from stack as u8
 
 	if (tcph + 1 > data_end || len <= sizeof(struct tcphdr))
 		return -1;
@@ -218,4 +226,132 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 	return 0;
 }
 
-#endif
+// Programs
+
+// TC-BFP for parsing packet identifier from egress traffic and add to map
+SEC(EGRESS_PROG_SEC)
+int pping_egress(struct __sk_buff *skb)
+{
+	struct packet_id p_id = { 0 };
+	__u64 p_ts;
+	struct parsing_context pctx = {
+		.data = (void *)(long)skb->data,
+		.data_end = (void *)(long)skb->data_end,
+		.pkt_len = skb->len,
+		.nh = { .pos = pctx.data },
+		.is_egress = true,
+	};
+	bool flow_closing = false;
+	struct flow_state *f_state;
+	struct flow_state new_state = { 0 };
+
+	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
+		goto out;
+
+	// Delete flow and create no timestamp entry if flow is closing
+	if (flow_closing) {
+		bpf_map_delete_elem(&flow_state, &p_id.flow);
+		goto out;
+	}
+
+	// Check flow state
+	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+	if (!f_state) { // No previous state - attempt to create it
+		bpf_map_update_elem(&flow_state, &p_id.flow, &new_state,
+				    BPF_NOEXIST);
+		f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+		if (!f_state)
+			goto out;
+	}
+
+	// Check if identfier is new
+	/* The gap between checking and updating last_id may cause concurrency
+	 * issues where multiple packets may simultaneously think they are the
+	 * first with a new identifier. As long as all of the identifiers are
+	 * the same though, only one should be able to create a timestamp entry.
+
+	 * A bigger issue is that older identifiers (for example due to
+         * out-of-order packets) may pass this check and update the current
+	 * identifier to an old one. This means that both the packet with the
+	 * old identifier itself as well the next packet with the current
+	 * identifier may be considered packets with new identifiers (even if
+	 * both have been seen before). For TCP timestamps this could be
+	 * prevented by changing the check to '>=' instead, but it may not be
+	 * suitable for other protocols, such as QUIC and its spinbit.
+	 *
+	 * For now, just hope that the rate limit saves us from creating an
+	 * incorrect timestamp. That may however also fail, either due to the
+	 * to it happening in a time it's not limited by rate sampling, or
+	 * because of rate check failing due to concurrency issues.
+	 */
+	if (f_state->last_id == p_id.identifier)
+		goto out;
+	f_state->last_id = p_id.identifier;
+
+	// Check rate-limit
+	/*
+	 * The window between checking and updating last_timestamp may cause
+	 * concurrency issues, where multiple packets simultaneously pass the
+	 * rate limit. However, as long as they have the same identifier, only
+	 * a single timestamp entry should successfully be created.
+	 */
+	p_ts = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
+	if (p_ts < f_state->last_timestamp ||
+	    p_ts - f_state->last_timestamp < config.rate_limit)
+		goto out;
+
+	/*
+	 * Updates attempt at creating timestamp, even if creation of timestamp
+	 * fails (due to map being full). This should make the competition for
+	 * the next available map slot somewhat fairer between heavy and sparse
+	 * flows.
+	 */
+	f_state->last_timestamp = p_ts;
+	bpf_map_update_elem(&packet_ts, &p_id, &p_ts, BPF_NOEXIST);
+
+out:
+	return BPF_OK;
+}
+
+// XDP program for parsing identifier in ingress traffic and check for match in map
+SEC(INGRESS_PROG_SEC)
+int pping_ingress(struct xdp_md *ctx)
+{
+	struct packet_id p_id = { 0 };
+	__u64 *p_ts;
+	struct rtt_event event = { 0 };
+	struct parsing_context pctx = {
+		.data = (void *)(long)ctx->data,
+		.data_end = (void *)(long)ctx->data_end,
+		.pkt_len = pctx.data_end - pctx.data,
+		.nh = { .pos = pctx.data },
+		.is_egress = false,
+	};
+	bool flow_closing = false;
+
+	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
+		goto out;
+
+	// Delete flow, but allow final attempt at RTT calculation
+	if (flow_closing)
+		bpf_map_delete_elem(&flow_state, &p_id.flow);
+
+	p_ts = bpf_map_lookup_elem(&packet_ts, &p_id);
+	if (!p_ts)
+		goto out;
+
+	event.rtt = bpf_ktime_get_ns() - *p_ts;
+	/*
+	 * Attempt to delete timestamp entry as soon as RTT is calculated.
+	 * But could have potential concurrency issue where multiple packets
+	 * manage to match against the identifier before it can be deleted.
+	 */
+	bpf_map_delete_elem(&packet_ts, &p_id);
+
+	__builtin_memcpy(&event.flow, &p_id.flow, sizeof(struct network_tuple));
+	bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event,
+			      sizeof(event));
+
+out:
+	return XDP_PASS;
+}

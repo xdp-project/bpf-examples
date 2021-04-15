@@ -5,10 +5,10 @@
 #include <linux/types.h>
 #include <linux/in6.h>
 
-#define XDP_PROG_SEC "xdp"
-#define TCBPF_PROG_SEC "classifier"
+#define INGRESS_PROG_SEC "xdp"
+#define EGRESS_PROG_SEC "classifier"
 
-struct user_config {
+struct bpf_config {
 	__u64 rate_limit;
 };
 
