@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
-#include <xdp/parsing_helpers.h>
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/if_ether.h>
@@ -10,6 +9,13 @@
 #include <linux/tcp.h>
 #include <stdbool.h>
 
+// overwrite xdp/parsing_helpers.h value to avoid hitting verifier limit
+#ifdef IPV6_EXT_MAX_CHAIN
+#undef IPV6_EXT_MAX_CHAIN
+#endif
+#define IPV6_EXT_MAX_CHAIN 3
+
+#include <xdp/parsing_helpers.h>
 #include "pping.h"
 
 #define AF_INET 2
