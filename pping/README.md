@@ -32,49 +32,45 @@ matched differs from the one in Kathie's pping, and is further described in
 !["Design of eBPF pping](./eBPF_pping_design.png)
 
 ### Files:
-- `pping.c`: Userspace program that loads and attaches the BPF programs, pulls
+- **pping.c:** Userspace program that loads and attaches the BPF programs, pulls
   the perf-buffer `rtt_events` to print out RTT messages and periodically cleans
   up the hash-maps from old entries. Also passes user options to the BPF
   programs by setting a "global variable" (stored in the programs .rodata
   section).
-- `pping_kern_tc.c`: The BPF program that's loaded on tc egress egress. Parses
-  incoming packets for identifiers. If an identifier is found it checks and
-  updates the `flow_state` map. If the sampling strategy allows it, a timestamp
-  for the packet is created in the `ts_start` map.
-- `pping_kern_xdp.c`: The BPF program that is loaded on XDP ingress. Parses
-  incoming packets for identifiers. If an identifier is found, it looks up the
-  `ts_start` map for a matching identifier on the reverse flow (to match
-  source/dest on egress). If a match is found, it calculates the RTT from the
-  stored timestamp and then deletes the entry. The calculated RTT (together with
-  the flow-tuple) is pushed to the perf-buffer `rtt_events`.
-- `bpf_egress_loader.sh`: A shell script that's used by `pping.c` to setup a
-  clsact qdisc and attach the `pping_kern_tc.c` program to egress on
+- **pping_kern.c:** Contains the BPF programs that are loaded on tc (egress) and
+  XDP (ingress), as well as several common functions, a global constant `config`
+  (set from userspace) and map definitions. The tc program `pping_egress()`
+  parses outgoing packets for identifiers. If an identifier is found and the
+  sampling strategy allows it, a timestamp for the packet is created in
+  `packet_ts`. The XDP program `pping_ingress()` parses incomming packets for an
+  identifier. If found, it looks up the `packet_ts` map for a match on the
+  reverse flow (to match source/dest on egress). If there is a match, it
+  calculates the RTT from the stored timestamp and deletes the entry. The
+  calculated RTT (together with the flow-tuple) is pushed to the perf-buffer
+  `rtt_events`.
+- **bpf_egress_loader.sh:** A shell script that's used by `pping.c` to setup a
+  clsact qdisc and attach the `pping_egress()` program to egress using
   tc. **Note**: Unless your iproute2 comes with libbpf support, tc will use
   iproute's own loading mechanism when loading and attaching object files
   directly through the tc command line. To ensure that libbpf is always used to
-  load `tc_kern_tc.c`, `pping.c` actually loads `tc_kern_tc.c` and pins it to
+  load `pping_egress()`, `pping.c` actually loads the program and pins it to
   `/sys/fs/bpf/pping/classifier`, and tc only attaches the pinned program.
-- `functions.sh`and `parameters.sh`: Imported by `bpf_egress_loader.sh`.
-- `pping.h`: Common header file included by `pping.c`, `pping_kern_tc.c` and
-  `pping_kern_xdp.c`. Contains some common structs.
-- `pping_helpers.h`: Common header file included by the two BPF programs
-  (`pping_kern*`) (should probably be renamed to
-  ex. `pping_kern_common.h`). Contains the BPF map definitions for `ts_start`
-  and `flow_state`, the "global variable" `config` and functions to parse the
-  packets for identifiers.
+- **functions.sh and parameters.sh:** Imported by `bpf_egress_loader.sh`.
+- **pping.h:** Common header file included by `pping.c` and
+  `pping_kern.c`. Contains some common structs used by both (are part of the
+  maps).
 
 ### BPF Maps:
-- `flow_state`: A hash-map storing some basic state for each flow, such as the
+- **flow_state:** A hash-map storing some basic state for each flow, such as the
   last seen identifier for the flow and when the last timestamp entry for the
-  flow was created. Entries are created by `pping_kern_tc.c`, and can be updated
-  or deleted by both `pping_kern_tc.c` and `pping_kern_xpd.c`. Leftover entries
+  flow was created. Entries are created by `pping_egress()`, and can be updated
+  or deleted by both `pping_egress()` and `pping_ingress()`. Leftover entries
   are eventually removed by `pping.c`. Pinned at `/sys/fs/bpf/pping`.
-- `ts_start`: A hash-map storing a timestamp for a specific packet identifier
-  (should probably be renamed to ex. `packet_timestamps`). Entries are created
-  by `pping_kern_tc.c` and removed by `pping_kern_xdp.c` if a match is
-  found. Leftover entries are eventually removed by `pping.c`. Pinned at
-  `/sys/fs/bpf/pping`.
-- `rtt_events`: A perf-buffer used by `pping_kern_xpd.c` to push calculated RTTs
+- **packet_ts:** A hash-map storing a timestamp for a specific packet
+  identifier. Entries are created by `pping_egress()` and removed by
+  `pping_ingress()` if a match is found. Leftover entries are eventually
+  removed by `pping.c`. Pinned at `/sys/fs/bpf/pping`.
+- **rtt_events:** A perf-buffer used by `pping_ingress()` to push calculated RTTs
   to `pping.c`, which continuously polls the map the print out the RTTs.
 
 ## Similar projects

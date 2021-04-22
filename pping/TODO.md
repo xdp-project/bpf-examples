@@ -31,6 +31,7 @@
         bi-directional
     - Original pping checks if flow is bi-directional before adding
       timestamps, but this could miss shorter flows
+- [ ] Dynamically grow the maps if they are starting to get full
 - [ ] Improve map cleaning: Use a dynamic time to live for map entries
       based on flow's RTT, instead of static 10s limit
   - Keeping entries around for a long time allows the map to grow
