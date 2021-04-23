@@ -47,7 +47,6 @@ struct {
 	__type(key, struct packet_id);
 	__type(value, __u64);
 	__uint(max_entries, 16384);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } packet_ts SEC(".maps");
 
 struct {
@@ -55,7 +54,6 @@ struct {
 	__type(key, struct network_tuple);
 	__type(value, struct flow_state);
 	__uint(max_entries, 16384);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } flow_state SEC(".maps");
 
 struct {

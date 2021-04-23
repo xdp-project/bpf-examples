@@ -210,15 +210,6 @@ static int set_rlimit(long int lim)
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
 }
 
-static int bpf_obj_open(struct bpf_object **obj, const char *obj_path,
-			const char *map_path)
-{
-	DECLARE_LIBBPF_OPTS(bpf_object_open_opts, opts,
-			    .pin_root_path = map_path);
-	*obj = bpf_object__open_file(obj_path, map_path ? &opts : NULL);
-	return libbpf_get_error(*obj);
-}
-
 static int
 bpf_obj_run_prog_pindir_func(struct bpf_object *obj, const char *prog_title,
 			     const char *pin_dir,
@@ -488,8 +479,11 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 				struct pping_config *config, bool *tc_attached,
 				bool *xdp_attached)
 {
+	int err;
+
 	// Open and load ELF file
-	int err = bpf_obj_open(obj, config->object_path, config->pin_dir);
+	*obj = bpf_object__open(config->object_path);
+	err = libbpf_get_error(*obj);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
 			config->object_path, strerror(-err));
@@ -699,11 +693,6 @@ cleanup:
 			fprintf(stderr,
 				"Failed unpinning tc program from %s: %s\n",
 				config.pin_dir, strerror(-err));
-
-		err = bpf_object__unpin_maps(obj, NULL);
-		if (err)
-			fprintf(stderr, "Failed unpinning maps: %s\n",
-				strerror(-err));
 	}
 
 	return err != 0;
