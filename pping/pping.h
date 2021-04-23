@@ -5,8 +5,12 @@
 #include <linux/types.h>
 #include <linux/in6.h>
 
-#define XDP_PROG_SEC "xdp"
-#define TCBPF_PROG_SEC "pping_egress"
+#define INGRESS_PROG_SEC "xdp"
+#define EGRESS_PROG_SEC "classifier"
+
+struct bpf_config {
+	__u64 rate_limit;
+};
 
 /*
  * Struct that can hold the source or destination address for a flow (l3+l4).
@@ -34,15 +38,15 @@ struct network_tuple {
 	__u8 reserved;
 };
 
+struct flow_state {
+	__u64 last_timestamp;
+	__u32 last_id;
+	__u32 reserved;
+};
+
 struct packet_id {
 	struct network_tuple flow;
 	__u32 identifier; //tsval for TCP packets
-};
-
-struct packet_timestamp {
-	__u64 timestamp;
-	__u8 used;
-	__u8 reserved[7];
 };
 
 struct rtt_event {
