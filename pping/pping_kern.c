@@ -147,11 +147,7 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
 		return -1;
 
 	// Check if connection is closing
-	if (tcph->fin || tcph->rst) {
-		*flow_closing = true;
-		/* bpf_printk("Detected connection closing on %d\n", */
-		/* 	   ctx->is_egress); //Upsets verifier? */
-	}
+	*flow_closing = tcph->rst || (!ctx->is_egress && tcph->fin);
 
 	// Do not timestamp pure ACKs
 	if (ctx->is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len &&
@@ -324,6 +320,7 @@ int pping_ingress(struct xdp_md *ctx)
 	struct packet_id p_id = { 0 };
 	__u64 *p_ts;
 	struct rtt_event event = { 0 };
+	struct flow_state *f_state;
 	struct parsing_context pctx = {
 		.data = (void *)(long)ctx->data,
 		.data_end = (void *)(long)ctx->data_end,
@@ -332,19 +329,18 @@ int pping_ingress(struct xdp_md *ctx)
 		.is_egress = false,
 	};
 	bool flow_closing = false;
+	__u64 now;
 
 	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
 		goto out;
 
-	// Delete flow, but allow final attempt at RTT calculation
-	if (flow_closing)
-		bpf_map_delete_elem(&flow_state, &p_id.flow);
-
+	now = bpf_ktime_get_ns();
 	p_ts = bpf_map_lookup_elem(&packet_ts, &p_id);
-	if (!p_ts)
-		goto out;
+	if (!p_ts || now < *p_ts)
+		goto validflow_out;
 
-	event.rtt = bpf_ktime_get_ns() - *p_ts;
+	event.rtt = now - *p_ts;
+	event.timestamp = now;
 	/*
 	 * Attempt to delete timestamp entry as soon as RTT is calculated.
 	 * But could have potential concurrency issue where multiple packets
@@ -352,9 +348,24 @@ int pping_ingress(struct xdp_md *ctx)
 	 */
 	bpf_map_delete_elem(&packet_ts, &p_id);
 
+	// Update flow's min-RTT, may have concurrency issues
+	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+	if (!f_state)
+		goto validflow_out;
+
+	if (f_state->min_rtt == 0 || event.rtt < f_state->min_rtt)
+		f_state->min_rtt = event.rtt;
+
+	event.min_rtt = f_state->min_rtt;
+
 	__builtin_memcpy(&event.flow, &p_id.flow, sizeof(struct network_tuple));
 	bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event,
 			      sizeof(event));
+
+validflow_out:
+	// Wait with deleting flow until having pushed final RTT message
+	if (flow_closing)
+		bpf_map_delete_elem(&flow_state, &p_id.flow);
 
 out:
 	return XDP_PASS;

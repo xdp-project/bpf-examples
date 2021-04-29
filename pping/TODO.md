@@ -25,7 +25,7 @@
   - [ ] Could potentially include keeping track of average RTT, which
         may be useful for some decisions (ex. how often to sample,
         when entry can be removed etc)
-  - [ ] Could potentially include keeping track of minimum RTT (as
+  - [x] Could potentially include keeping track of minimum RTT (as
         done by the original pping), ex. to track bufferbloat
   - [ ] Could potentially include keeping track of if flow is
         bi-directional
@@ -42,7 +42,6 @@
   - It may be a good idea to keep the same format as original pping,
     so that tools such as [ppviz](https://github.com/pollere/ppviz)
     works for both pping implementations.
-- [ ] Add timestamps to output (as original pping)
 - [ ] Add support for other hooks
   - Ex TC-BFP on ingress instead of XDP?
 
@@ -59,3 +58,4 @@
 - [x] Add IPv6 support
 - [x] Refactor to support easy addition of other protocols
 - [x] Load tc-bpf program with libbpf (only attach it with tc)
+- [x] Add timestamps to output (as original pping)

@@ -40,6 +40,9 @@ static const char *__doc__ =
 
 #define MAX_PATH_LEN 1024
 
+#define MON_TO_REAL_UPDATE_FREQ                                                \
+	(1 * NS_PER_SECOND) // Update offset between CLOCK_MONOTONIC and CLOCK_REALTIME once per second
+
 /* 
  * BPF implementation of pping using libbpf
  * Uses TC-BPF for egress and XDP for ingress
@@ -336,10 +339,10 @@ static int tc_bpf_clear(char *interface)
  * Returns time of CLOCK_MONOTONIC as nanoseconds in a single __u64.
  * On failure, the value 0 is returned (and errno will be set).
  */
-static __u64 get_time_ns(void)
+static __u64 get_time_ns(clockid_t clockid)
 {
 	struct timespec t;
-	if (clock_gettime(CLOCK_MONOTONIC, &t) != 0)
+	if (clock_gettime(clockid, &t) != 0)
 		return 0;
 
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
@@ -374,7 +377,7 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 	int removed = 0;
 	void *key, *prev_key, *value;
 	bool delete_prev = false;
-	__u64 now_nsec = get_time_ns();
+	__u64 now_nsec = get_time_ns(CLOCK_MONOTONIC);
 
 #ifdef DEBUG
 	int entries = 0;
@@ -412,7 +415,7 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 		removed++;
 	}
 #ifdef DEBUG
-	duration = get_time_ns() - now_nsec;
+	duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
 	printf("%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
 	       map_fd, entries, removed, duration / NS_PER_SECOND,
 	       duration % NS_PER_SECOND);
@@ -441,6 +444,28 @@ static void *periodic_map_cleanup(void *args)
 	pthread_exit(NULL);
 }
 
+static __u64 convert_monotonic_to_realtime(__u64 monotonic_time)
+{
+	__u64 now_mon, now_rt;
+	static __u64 offset = 0;
+	static __u64 offset_updated = 0;
+
+	now_mon = get_time_ns(CLOCK_MONOTONIC);
+	if (offset == 0 ||
+	    (now_mon > offset_updated &&
+	     now_mon - offset_updated > MON_TO_REAL_UPDATE_FREQ)) {
+		now_mon = get_time_ns(CLOCK_MONOTONIC);
+		now_rt = get_time_ns(CLOCK_REALTIME);
+		if (now_rt < now_mon)
+			return 0;
+
+		offset = now_rt - now_mon;
+		offset_updated = now_mon;
+	}
+
+	return monotonic_time + offset;
+}
+
 /*
  * Wrapper around inet_ntop designed to handle the "bug" that mapped IPv4
  * addresses are formated as IPv6 addresses for AF_INET6
@@ -461,13 +486,18 @@ static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 	const struct rtt_event *e = data;
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
+	char timestr[9];
+	__u64 ts = convert_monotonic_to_realtime(e->timestamp);
+	time_t ts_s = ts / NS_PER_SECOND;
 
 	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
 	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+	strftime(timestr, sizeof(timestr), "%H:%M:%S", localtime(&ts_s));
 
-	printf("%llu.%06llu ms %s:%d+%s:%d\n", e->rtt / NS_PER_MS,
-	       e->rtt % NS_PER_MS, saddr, ntohs(e->flow.saddr.port), daddr,
-	       ntohs(e->flow.daddr.port));
+	printf("%s.%09llu %llu.%06llu ms %llu.%06llu ms %s:%d+%s:%d\n", timestr,
+	       ts % NS_PER_SECOND, e->rtt / NS_PER_MS, e->rtt % NS_PER_MS,
+	       e->min_rtt / NS_PER_MS, e->min_rtt % NS_PER_MS, saddr,
+	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port));
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
