@@ -38,10 +38,6 @@
     unnecessarily large, which slows down the cleaning and may block
     new entries
 - [ ] Use libxdp to load XDP program
-- [ ] Add option for machine-readable output (as original pping)
-  - It may be a good idea to keep the same format as original pping,
-    so that tools such as [ppviz](https://github.com/pollere/ppviz)
-    works for both pping implementations.
 - [ ] Add support for other hooks
   - Ex TC-BFP on ingress instead of XDP?
 
@@ -58,4 +54,9 @@
 - [x] Add IPv6 support
 - [x] Refactor to support easy addition of other protocols
 - [x] Load tc-bpf program with libbpf (only attach it with tc)
+- [x] Switch to libbpf TC-BPF API for attaching the TC-BPF program
+- [x] Add option for machine-readable output (as original pping)
+  - It may be a good idea to keep the same format as original pping,
+    so that tools such as [ppviz](https://github.com/pollere/ppviz)
+    works for both pping implementations.
 - [x] Add timestamps to output (as original pping)

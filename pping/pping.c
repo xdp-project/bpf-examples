@@ -78,6 +78,7 @@ struct pping_config {
 	int ifindex;
 	char ifname[IF_NAMESIZE];
 	bool json_format;
+	bool machine_format;
 	bool force;
 };
 
@@ -91,6 +92,7 @@ static const struct option long_options[] = {
 	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
 	{ "json",             no_argument,       NULL, 'j' }, // Output in JSON format
+	{ "machine-friendly", no_argument,       NULL, 'm' }, // Ouput in Kathie's "machine friendly" format
 	{ 0, 0, NULL, 0 }
 };
 
@@ -142,7 +144,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 	config->ifindex = 0;
 
-	while ((opt = getopt_long(argc, argv, "hfji:r:c:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfjmi:r:c:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -181,6 +183,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 'j':
 			config->json_format = true;
+			break;
+		case 'm':
+			config->machine_format = true;
 			break;
 		case 'f':
 			config->force = true;
@@ -525,6 +530,23 @@ static void print_rtt_event_standard(void *ctx, int cpu, void *data,
 	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port));
 }
 
+static void print_rtt_event_mf(void *ctx, int cpu, void *data, __u32 data_size)
+{
+	const struct rtt_event *e = data;
+	char saddr[INET6_ADDRSTRLEN];
+	char daddr[INET6_ADDRSTRLEN];
+	__u64 time = convert_monotonic_to_realtime(e->timestamp);
+
+	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
+	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+
+	printf("%llu.%09llu %llu.%09llu %llu.%09llu %s:%d+%s:%d\n",
+	       time / NS_PER_SECOND, time % NS_PER_SECOND,
+	       e->rtt / NS_PER_SECOND, e->rtt % NS_PER_SECOND,
+	       e->min_rtt / NS_PER_SECOND, e->min_rtt, saddr,
+	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port));
+}
+
 static void print_rtt_event_json(void *ctx, int cpu, void *data,
 				 __u32 data_size)
 {
@@ -687,6 +709,7 @@ int main(int argc, char *argv[])
 		.rtt_map = "rtt_events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
 		.json_format = false,
+		.machine_format = false,
 		.force = false,
 	};
 
@@ -718,8 +741,12 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	if (config.json_format && config.machine_format)
+		fprintf(stderr, "Cannot output in both JSON and \"machine-friendly\" format, will use JSON\n");
 	if (config.json_format)
 		pb_opts.sample_cb = print_rtt_event_json;
+	else if (config.machine_format)
+		pb_opts.sample_cb = print_rtt_event_mf;
 
 	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
 	if (err) {
