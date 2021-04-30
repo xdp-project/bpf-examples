@@ -67,10 +67,6 @@ struct map_cleanup_args {
 struct pping_config {
 	struct bpf_config bpf_config;
 	__u64 cleanup_interval;
-	int xdp_flags;
-	int ifindex;
-	char ifname[IF_NAMESIZE];
-	bool force;
 	char *object_path;
 	char *ingress_sec;
 	char *egress_sec;
@@ -78,9 +74,15 @@ struct pping_config {
 	char *packet_map;
 	char *flow_map;
 	char *rtt_map;
+	int xdp_flags;
+	int ifindex;
+	char ifname[IF_NAMESIZE];
+	bool json_format;
+	bool force;
 };
 
 static volatile int keep_running = 1;
+static bool json_started = false;
 
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
@@ -88,6 +90,7 @@ static const struct option long_options[] = {
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
 	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
+	{ "json",             no_argument,       NULL, 'j' }, // Output in JSON format
 	{ 0, 0, NULL, 0 }
 };
 
@@ -139,7 +142,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 	config->ifindex = 0;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:c:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfji:r:c:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -175,6 +178,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 			config->cleanup_interval =
 				cleanup_interval_s * NS_PER_SECOND;
+			break;
+		case 'j':
+			config->json_format = true;
 			break;
 		case 'f':
 			config->force = true;
@@ -416,9 +422,10 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 	}
 #ifdef DEBUG
 	duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
-	printf("%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
-	       map_fd, entries, removed, duration / NS_PER_SECOND,
-	       duration % NS_PER_SECOND);
+	fprintf(stderr,
+		"%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
+		map_fd, entries, removed, duration / NS_PER_SECOND,
+		duration % NS_PER_SECOND);
 #endif
 cleanup:
 	free(key);
@@ -481,7 +488,25 @@ static int format_ip_address(int af, const struct in6_addr *addr, char *buf,
 	return -EINVAL;
 }
 
-static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
+static char *proto_to_str(__u16 proto)
+{
+	static char buf[8];
+
+	switch (proto) {
+	case IPPROTO_TCP:
+		return "TCP";
+	case IPPROTO_ICMP:
+		return "ICMP";
+	case IPPROTO_ICMPV6:
+		return "ICMPv6";
+	default:
+		snprintf(buf, sizeof(buf), "%d", proto);
+		return buf;
+	}
+}
+
+static void print_rtt_event_standard(void *ctx, int cpu, void *data,
+				     __u32 data_size)
 {
 	const struct rtt_event *e = data;
 	char saddr[INET6_ADDRSTRLEN];
@@ -498,6 +523,42 @@ static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
 	       ts % NS_PER_SECOND, e->rtt / NS_PER_MS, e->rtt % NS_PER_MS,
 	       e->min_rtt / NS_PER_MS, e->min_rtt % NS_PER_MS, saddr,
 	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port));
+}
+
+static void print_rtt_event_json(void *ctx, int cpu, void *data,
+				 __u32 data_size)
+{
+	const struct rtt_event *e = data;
+	char saddr[INET6_ADDRSTRLEN];
+	char daddr[INET6_ADDRSTRLEN];
+	__u64 time = convert_monotonic_to_realtime(e->timestamp);
+
+	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
+	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+
+	if (json_started) {
+		printf(",");
+	} else {
+		printf("[");
+		json_started = true;
+	}
+
+	printf("\n{\"timestamp\":%llu.%09llu, \"rtt\":%llu.%09llu, "
+	       "\"min_rtt\":%llu.%09llu, \"src_ip\":\"%s\", \"src_port\":%d, "
+	       "\"dest_ip\":\"%s\", \"dest_port\":%d, \"protocol\":\"%s\"}",
+	       time / NS_PER_SECOND, time % NS_PER_SECOND,
+	       e->rtt / NS_PER_SECOND, e->rtt % NS_PER_SECOND,
+	       e->min_rtt / NS_PER_SECOND, e->min_rtt % NS_PER_SECOND, saddr,
+	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port),
+	       proto_to_str(e->flow.proto));
+}
+
+static void end_json_output(void)
+{
+	if (json_started)
+		printf("\n]\n");
+	else
+		printf("[]\n");
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
@@ -625,12 +686,13 @@ int main(int argc, char *argv[])
 		.flow_map = "flow_state",
 		.rtt_map = "rtt_events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
+		.json_format = false,
 		.force = false,
 	};
 
 	struct perf_buffer *pb = NULL;
 	struct perf_buffer_opts pb_opts = {
-		.sample_cb = handle_rtt_event,
+		.sample_cb = print_rtt_event_standard,
 		.lost_cb = handle_missed_rtt_event,
 	};
 
@@ -655,6 +717,9 @@ int main(int argc, char *argv[])
 		print_usage(argv);
 		return EXIT_FAILURE;
 	}
+
+	if (config.json_format)
+		pb_opts.sample_cb = print_rtt_event_json;
 
 	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
 	if (err) {
@@ -699,6 +764,9 @@ int main(int argc, char *argv[])
 
 cleanup:
 	perf_buffer__free(pb);
+
+	if (config.json_format)
+		end_json_output();
 
 	if (xdp_attached) {
 		err = xdp_detach(config.ifindex, config.xdp_flags);

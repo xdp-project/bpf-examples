@@ -197,16 +197,16 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 	// Parse IPv4/6 header
 	if (proto == bpf_htons(ETH_P_IP)) {
 		p_id->flow.ipv = AF_INET;
-		proto = parse_iphdr(&ctx->nh, ctx->data_end, &iph);
+		p_id->flow.proto = parse_iphdr(&ctx->nh, ctx->data_end, &iph);
 	} else if (proto == bpf_htons(ETH_P_IPV6)) {
 		p_id->flow.ipv = AF_INET6;
-		proto = parse_ip6hdr(&ctx->nh, ctx->data_end, &ip6h);
+		p_id->flow.proto = parse_ip6hdr(&ctx->nh, ctx->data_end, &ip6h);
 	} else {
 		return -1;
 	}
 
 	// Add new protocols here
-	if (proto == IPPROTO_TCP) {
+	if (p_id->flow.proto == IPPROTO_TCP) {
 		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port,
 					   flow_closing, &p_id->identifier);
 		if (err)
