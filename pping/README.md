@@ -151,12 +151,18 @@ being reported for the same identifier, but if they are processed concurrently
 these RTTs should be very similar, so would mainly result in over-reporting
 rather than reporting incorrect RTTs.
 
-#### Updating flow min-RTT
-Whenever the XDP/ingress program calculates an RTT, it will check if this is the
-lowest RTT seen so far for the flow. If multiple RTTs are calculated
-concurrently, then several could pass this check concurrently and there may be a
-lost update. It should only be possible for multiple RTTs to be calculated
-concurrently in case either the [timestamp rate-limit was
+#### Updating flow statistics
+Both the tc/egress and XDP/ingress programs will try to update some flow
+statistics each time they successfully parse a packet with an
+identifier. Specifically, they'll update the number of packets and bytes
+sent/received. This is not done in an atomic fashion, so there could potentially
+be some lost updates resulting an underestimate.
+
+Furthermore, whenever the XDP/ingress program calculates an RTT, it will check
+if this is the lowest RTT seen so far for the flow. If multiple RTTs are
+calculated concurrently, then several could pass this check concurrently and
+there may be a lost update. It should only be possible for multiple RTTs to be
+calculated concurrently in case either the [timestamp rate-limit was
 bypassed](#Rate-limiting new timestamps) or [multiple packets managed to match
 against the same timestamp](#Matching against stored timestamps).
 

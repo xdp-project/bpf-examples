@@ -574,12 +574,15 @@ static void print_rtt_event_json(void *ctx, int cpu, void *data,
 
 	printf("\n{\"timestamp\":%llu.%09llu, \"rtt\":%llu.%09llu, "
 	       "\"min_rtt\":%llu.%09llu, \"src_ip\":\"%s\", \"src_port\":%d, "
-	       "\"dest_ip\":\"%s\", \"dest_port\":%d, \"protocol\":\"%s\"}",
+	       "\"dest_ip\":\"%s\", \"dest_port\":%d, \"protocol\":\"%s\", "
+	       "\"sent_pkts\":%llu, \"sent_bytes\":%llu, \"rec_pkts\":%llu, "
+	       "\"rec_bytes\":%llu }",
 	       time / NS_PER_SECOND, time % NS_PER_SECOND,
 	       e->rtt / NS_PER_SECOND, e->rtt % NS_PER_SECOND,
 	       e->min_rtt / NS_PER_SECOND, e->min_rtt % NS_PER_SECOND, saddr,
 	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port),
-	       proto_to_str(e->flow.proto));
+	       proto_to_str(e->flow.proto), e->sent_pkts, e->sent_bytes,
+	       e->rec_pkts, e->rec_bytes);
 }
 
 static void end_json_output(void)

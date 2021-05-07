@@ -226,6 +226,17 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 	return 0;
 }
 
+/*
+ * Returns the number of unparsed bytes left in the packet (bytes after nh.pos)
+ */
+static __u32 remaining_pkt_payload(struct parsing_context *ctx)
+{
+	// pkt_len - (pos - data) fails because compiler transforms it to pkt_len - pos + data (pkt_len - pos not ok because value - pointer)
+	// data + pkt_len - pos fails on (data+pkt_len) - pos due to math between pkt_pointer and unbounded register
+	__u32 parsed_bytes = ctx->nh.pos - ctx->data;
+	return parsed_bytes < ctx->pkt_len ? ctx->pkt_len - parsed_bytes : 0;
+}
+
 // Programs
 
 // TC-BFP for parsing packet identifier from egress traffic and add to map
@@ -263,6 +274,9 @@ int pping_egress(struct __sk_buff *skb)
 		if (!f_state)
 			goto out;
 	}
+
+	f_state->sent_pkts++;
+	f_state->sent_bytes += remaining_pkt_payload(&pctx);
 
 	// Check if identfier is new
 	if (f_state->last_id == p_id.identifier)
@@ -309,6 +323,13 @@ int pping_ingress(struct xdp_md *ctx)
 	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
 		goto out;
 
+	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+	if (!f_state)
+		goto validflow_out;
+
+	f_state->rec_pkts++;
+	f_state->rec_bytes += remaining_pkt_payload(&pctx);
+
 	now = bpf_ktime_get_ns();
 	p_ts = bpf_map_lookup_elem(&packet_ts, &p_id);
 	if (!p_ts || now < *p_ts)
@@ -320,15 +341,14 @@ int pping_ingress(struct xdp_md *ctx)
 	// Delete timestamp entry as soon as RTT is calculated
 	bpf_map_delete_elem(&packet_ts, &p_id);
 
-	// Update flow's min-RTT
-	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
-	if (!f_state)
-		goto validflow_out;
-
 	if (f_state->min_rtt == 0 || event.rtt < f_state->min_rtt)
 		f_state->min_rtt = event.rtt;
 
 	event.min_rtt = f_state->min_rtt;
+	event.sent_pkts = f_state->sent_pkts;
+	event.sent_bytes = f_state->sent_bytes;
+	event.rec_pkts = f_state->rec_pkts;
+	event.rec_bytes = f_state->rec_bytes;
 
 	// Push event to perf-buffer
 	__builtin_memcpy(&event.flow, &p_id.flow, sizeof(struct network_tuple));

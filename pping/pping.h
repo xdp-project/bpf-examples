@@ -41,6 +41,10 @@ struct network_tuple {
 struct flow_state {
 	__u64 min_rtt;
 	__u64 last_timestamp;
+	__u64 sent_pkts;
+	__u64 sent_bytes;
+	__u64 rec_pkts;
+	__u64 rec_bytes;
 	__u32 last_id;
 	__u32 reserved;
 };
@@ -53,6 +57,10 @@ struct packet_id {
 struct rtt_event {
 	__u64 rtt;
 	__u64 min_rtt;
+	__u64 sent_pkts;
+	__u64 sent_bytes;
+	__u64 rec_pkts;
+	__u64 rec_bytes;
 	__u64 timestamp;
 	struct network_tuple flow;
 	__u32 reserved;
