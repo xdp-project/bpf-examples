@@ -737,6 +737,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	}
 
 	// Attach tc program
+	// Temporarily pin program while attaching it with tc-command
 	err = bpf_obj_pin_program(*obj, config->egress_sec, config->pin_dir);
 	if (err) {
 		fprintf(stderr, "Failed pinning tc program to %s/%s: %s\n",
@@ -753,6 +754,13 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		return err;
 	}
 	*tc_attached = true;
+
+	err = bpf_obj_unpin_program(*obj, config->egress_sec, config->pin_dir);
+	if (err) {
+		fprintf(stderr, "Failed unpinning tc program from %s: %s\n",
+			config->pin_dir, strerror(-err));
+		return err;
+	}
 
 	// Attach XDP program
 	err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
@@ -926,14 +934,9 @@ cleanup:
 				config.ifname, strerror(-err));
 	}
 
-	if (obj && !libbpf_get_error(obj)) {
-		err = bpf_obj_unpin_program(obj, config.egress_sec,
-					    config.pin_dir);
-		if (err)
-			fprintf(stderr,
-				"Failed unpinning tc program from %s: %s\n",
-				config.pin_dir, strerror(-err));
-	}
+	// Try removing pinned tc-program in case it's not been cleaned up properly
+	if (obj && !libbpf_get_error(obj))
+		bpf_obj_unpin_program(obj, config.egress_sec, config.pin_dir);
 
 	if (config.json_format && json_ctx) {
 		jsonw_end_array(json_ctx);
