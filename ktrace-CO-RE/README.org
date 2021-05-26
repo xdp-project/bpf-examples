@@ -1,0 +1,7 @@
+#+Title: Example using CO-RE to access ktrace
+
+This is an example that show how CO-RE came be utilised...
+to learn CO-RE and BTF better.
+
+
+
