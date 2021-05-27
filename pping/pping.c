@@ -488,8 +488,8 @@ static __u64 convert_monotonic_to_realtime(__u64 monotonic_time)
  * Wrapper around inet_ntop designed to handle the "bug" that mapped IPv4
  * addresses are formated as IPv6 addresses for AF_INET6
  */
-static int format_ip_address(int af, const struct in6_addr *addr, char *buf,
-			     size_t size)
+static int format_ip_address(char *buf, size_t size, int af,
+			     const struct in6_addr *addr)
 {
 	if (af == AF_INET)
 		return inet_ntop(af, &addr->s6_addr[12],
@@ -526,8 +526,8 @@ static void print_rtt_event_standard(void *ctx, int cpu, void *data,
 	__u64 ts = convert_monotonic_to_realtime(e->timestamp);
 	time_t ts_s = ts / NS_PER_SECOND;
 
-	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
-	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+	format_ip_address(saddr, sizeof(saddr), e->flow.ipv, &e->flow.saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), e->flow.ipv, &e->flow.daddr.ip);
 	strftime(timestr, sizeof(timestr), "%H:%M:%S", localtime(&ts_s));
 
 	printf("%s.%09llu %llu.%06llu ms %llu.%06llu ms %s:%d+%s:%d\n", timestr,
@@ -544,8 +544,8 @@ static void print_rtt_event_ppviz(void *ctx, int cpu, void *data,
 	char daddr[INET6_ADDRSTRLEN];
 	__u64 time = convert_monotonic_to_realtime(e->timestamp);
 
-	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
-	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+	format_ip_address(saddr, sizeof(saddr), e->flow.ipv, &e->flow.saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), e->flow.ipv, &e->flow.daddr.ip);
 
 	printf("%llu.%09llu %llu.%09llu %llu.%09llu %s:%d+%s:%d\n",
 	       time / NS_PER_SECOND, time % NS_PER_SECOND,
@@ -562,8 +562,8 @@ static void print_rtt_event_json(void *ctx, int cpu, void *data,
 	char daddr[INET6_ADDRSTRLEN];
 	__u64 time = convert_monotonic_to_realtime(e->timestamp);
 
-	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
-	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+	format_ip_address(saddr, sizeof(saddr), e->flow.ipv, &e->flow.saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), e->flow.ipv, &e->flow.daddr.ip);
 
 	if (json_started) {
 		printf(",");
