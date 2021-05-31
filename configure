@@ -176,6 +176,8 @@ EOF
 	echo ""
 	echo " On Fedora install:"
 	echo "   dnf install glibc-devel.i686"
+	echo " On Debian install:"
+	echo "   apt install libc6-dev-i386"
 	echo ""
 	exit 1
     fi
