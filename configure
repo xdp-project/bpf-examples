@@ -13,46 +13,22 @@ trap 'status=$?; rm -rf $TMPDIR; rm -f $CONFIG; exit $status' EXIT HUP INT QUIT 
 
 check_toolchain()
 {
-    local emacs_version
-
     : ${PKG_CONFIG:=pkg-config}
     : ${CC=gcc}
     : ${CLANG=clang}
     : ${LLC=llc}
-    : ${M4=m4}
-    : ${EMACS=emacs}
 
-    for TOOL in $PKG_CONFIG $CC $CLANG $LLC $M4; do
+    for TOOL in $PKG_CONFIG $CC $CLANG $LLC; do
         if [ ! $(command -v ${TOOL} 2>/dev/null) ]; then
             echo "*** ERROR: Cannot find tool ${TOOL}" ;
             exit 1;
         fi;
     done
 
-    if ! command -v $EMACS >/dev/null 2>&1; then
-        EMACS=""
-    else
-        emacs_version=$($EMACS --version 2>/dev/null | head -n 1)
-        if echo $emacs_version | grep -Eq 'GNU Emacs 2[67]'; then
-            echo "using emacs: $emacs_version"
-        else
-            echo "not using emacs: $emacs_version"
-            EMACS=""
-        fi
-    fi
-
-    if [ -z "$EMACS" ] && [ "${FORCE_EMACS:-0}" -eq "1" ]; then
-        echo "FORCE_EMACS is set, but no usable emacs found on system"
-        rm -f "$CONFIG"
-        exit 1
-    fi
-
     echo "PKG_CONFIG:=${PKG_CONFIG}" >>$CONFIG
     echo "CC:=${CC}" >>$CONFIG
     echo "CLANG:=${CLANG}" >>$CONFIG
     echo "LLC:=${LLC}" >>$CONFIG
-    echo "M4:=${M4}" >>$CONFIG
-    echo "EMACS:=${EMACS}" >>$CONFIG
 }
 
 check_elf()
@@ -207,7 +183,6 @@ ifeq (\$(VERBOSE), 0)
     QUIET_LLC      = @echo '    LLC      '\$@;
     QUIET_LINK     = @echo '    LINK     '\$@;
     QUIET_INSTALL  = @echo '    INSTALL  '\$@;
-    QUIET_M4       = @echo '    M4       '\$@;
     QUIET_GEN      = @echo '    GEN      '\$@;
 endif
 EOF
