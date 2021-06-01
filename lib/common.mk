@@ -39,7 +39,7 @@ KERN_USER_H ?= $(wildcard common_kern_user.h)
 CFLAGS += -I$(INCLUDE_DIR) -I$(HEADER_DIR) -I$(LIB_DIR)/util $(EXTRA_CFLAGS)
 BPF_CFLAGS += -I$(INCLUDE_DIR) -I$(HEADER_DIR) $(EXTRA_CFLAGS)
 
-BPF_HEADERS := $(wildcard $(HEADER_DIR)/bpf/*.h) $(wildcard $(INCLUDE_DIR)/xdp/*.h)
+BPF_HEADERS := $(wildcard $(HEADER_DIR)/*/*.h) $(wildcard $(INCLUDE_DIR)/*/*.h)
 
 all: $(USER_TARGETS) $(BPF_OBJ) $(EXTRA_TARGETS)
 
