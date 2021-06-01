@@ -7,4 +7,5 @@ LIB_DIR = ../lib
 
 include $(LIB_DIR)/common.mk
 
-BPF_CFLAGS += -D__TARGET_ARCH_$(ARCH)
+# The __TARGET_ARCH_xxx is defined in lib/common.mk
+# BPF_CFLAGS += -D__TARGET_ARCH_$(ARCH)

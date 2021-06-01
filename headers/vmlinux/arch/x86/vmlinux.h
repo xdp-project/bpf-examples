@@ -1,6 +1,12 @@
 #ifndef __VMLINUX_ARCH_X86_H__
 #define __VMLINUX_ARCH_X86_H__
 
+#ifdef __BPF_TRACING_H__
+/* Expected include <bpf/bpf_tracing.h> */
+#ifndef bpf_target_defined
+#warning "Tracing need __TARGET_ARCH_x86 defined"
+#endif
+#endif /*  __BPF_TRACING_H__ */
 
 struct pt_regs {
 	long unsigned int r15;
