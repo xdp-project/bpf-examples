@@ -20,6 +20,9 @@ BPF_OBJ_INSTALL ?= $(BPF_OBJ)
 LIB_DIR ?= ../lib
 LDLIBS ?= $(USER_LIBS)
 
+# get list of objects in util
+include $(LIB_DIR)/util/util.mk
+
 include $(LIB_DIR)/defines.mk
 
 # Extend if including Makefile already added some

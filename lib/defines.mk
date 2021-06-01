@@ -32,5 +32,5 @@ CFLAGS += $(DEFINES)
 BPF_CFLAGS += $(DEFINES)
 
 CONFIGMK := $(LIB_DIR)/../config.mk
-LIBMK := Makefile $(CONFIGMK) $(LIB_DIR)/defines.mk $(LIB_DIR)/common.mk
+LIBMK := Makefile $(CONFIGMK) $(LIB_DIR)/defines.mk $(LIB_DIR)/common.mk $(LIB_DIR)/util/util.mk
 
