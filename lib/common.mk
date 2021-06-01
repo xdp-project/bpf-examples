@@ -33,6 +33,13 @@ ifeq ($(SYSTEM_LIBBPF),n)
 	LIBBPF_SOURCES := $(wildcard $(LIBBPF_DIR)/src/*.[ch])
 endif
 
+# The BPF tracing header (/usr/include/bpf/bpf_tracing.h) need to know
+# CPU architecture due to PT_REGS_PARM resolution of ASM call convention
+#
+ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' | sed 's/ppc64le/powerpc/' | sed 's/mips.*/mips/')
+
+BPF_CFLAGS += -D__TARGET_ARCH_$(ARCH)
+
 # BPF-prog kern and userspace shares struct via header file:
 KERN_USER_H ?= $(wildcard common_kern_user.h)
 
