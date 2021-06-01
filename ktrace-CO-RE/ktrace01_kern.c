@@ -9,34 +9,6 @@
 
 #include <bpf/bpf_core_read.h>
 
-/* Fall back to what the compiler says */
-#ifndef bpf_target_defined
-#if defined(__x86_64__)
-       #define bpf_target_x86
-#elif defined(__s390__)
-       #define bpf_target_s390
-#elif defined(__arm__)
-       #define bpf_target_arm
--#elif defined(__aarch64__)
-       #define bpf_target_arm64
-#elif defined(__mips__)
-       #define bpf_target_mips
-#elif defined(__powerpc__)
-       #define bpf_target_powerpc
-#elif defined(__sparc__)
-       #define bpf_target_sparc
-#endif
-#endif
-
-#if !defined(bpf_target_x86)
-#warning "no--bpf_target_x86"
-#endif
-
-/* */
-//#ifndef __KERNEL__
-//#define __KERNEL__
-//#endif
-// #define __VMLINUX_H__
 #include <bpf/bpf_tracing.h> /* BPF_KPROBE */
 
 #ifndef bpf_target_defined
