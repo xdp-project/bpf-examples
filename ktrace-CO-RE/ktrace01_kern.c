@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
 //#include "vmlinux.h"
 
-#include "kernel_headers.h"
+//#include "kernel_headers.h"
+#include "vmlinux_local.h"
 
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
 #include <bpf/bpf_core_read.h>
 
--/* Fall back to what the compiler says */
+/* Fall back to what the compiler says */
 #ifndef bpf_target_defined
 #if defined(__x86_64__)
        #define bpf_target_x86
