@@ -18,11 +18,8 @@
 
 #include "vmlinux/vmlinux_types.h"
 #include "vmlinux/vmlinux_common.h"
-
 #include "vmlinux/vmlinux_arch.h"
-
 #include "vmlinux/vmlinux_net.h"
-
 
 #ifndef BPF_NO_PRESERVE_ACCESS_INDEX
 #pragma clang attribute pop
