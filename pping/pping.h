@@ -123,4 +123,10 @@ struct flow_event {
 	__u8 reserved;
 };
 
+union pping_event {
+	__u64 event_type;
+	struct rtt_event rtt_event;
+	struct flow_event flow_event;
+};
+
 #endif

@@ -478,23 +478,22 @@ static void *periodic_map_cleanup(void *args)
 
 static __u64 convert_monotonic_to_realtime(__u64 monotonic_time)
 {
-	__u64 now_mon, now_rt;
 	static __u64 offset = 0;
 	static __u64 offset_updated = 0;
+	__u64 now_mon = get_time_ns(CLOCK_MONOTONIC);
+	__u64 now_rt;
 
-	now_mon = get_time_ns(CLOCK_MONOTONIC);
 	if (offset == 0 ||
 	    (now_mon > offset_updated &&
 	     now_mon - offset_updated > MON_TO_REAL_UPDATE_FREQ)) {
 		now_mon = get_time_ns(CLOCK_MONOTONIC);
 		now_rt = get_time_ns(CLOCK_REALTIME);
+
 		if (now_rt < now_mon)
 			return 0;
-
 		offset = now_rt - now_mon;
 		offset_updated = now_mon;
 	}
-
 	return monotonic_time + offset;
 }
 
@@ -580,76 +579,113 @@ static const char *eventsource_to_str(enum flow_event_source es)
 	}
 }
 
+static void print_flow_ppvizformat(FILE *stream, const struct network_tuple *flow)
+{
+	char saddr[INET6_ADDRSTRLEN];
+	char daddr[INET6_ADDRSTRLEN];
+
+	format_ip_address(saddr, sizeof(saddr), flow->ipv, &flow->saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), flow->ipv, &flow->daddr.ip);
+	fprintf(stream, "%s:%d+%s:%d", saddr, ntohs(flow->saddr.port), daddr,
+		ntohs(flow->daddr.port));
+}
+
+static void print_ns_datetime(FILE *stream, __u64 monotonic_ns)
+{
+	char timestr[9];
+	__u64 ts = convert_monotonic_to_realtime(monotonic_ns);
+	time_t ts_s = ts / NS_PER_SECOND;
+
+	strftime(timestr, sizeof(timestr), "%H:%M:%S", localtime(&ts_s));
+	fprintf(stream, "%s.%09llu", timestr, ts % NS_PER_SECOND);
+}
+
 static void print_event_standard(void *ctx, int cpu, void *data,
 				 __u32 data_size)
 {
-	const struct flow_event *fe = data;
-	const struct rtt_event *re = data;
-	char saddr[INET6_ADDRSTRLEN];
-	char daddr[INET6_ADDRSTRLEN];
-	char timestr[9];
-	__u64 ts = convert_monotonic_to_realtime(fe->timestamp);
-	time_t ts_s = ts / NS_PER_SECOND;
+	const union pping_event *e = data;
 
-	format_ip_address(saddr, sizeof(saddr), fe->flow.ipv,
-			  &fe->flow.saddr.ip);
-	format_ip_address(daddr, sizeof(daddr), fe->flow.ipv,
-			  &fe->flow.daddr.ip);
-	strftime(timestr, sizeof(timestr), "%H:%M:%S", localtime(&ts_s));
-
-	if (fe->event_type == EVENT_TYPE_RTT)
-		printf("%s.%09llu %llu.%06llu ms %llu.%06llu ms %s:%d+%s:%d\n",
-		       timestr, ts % NS_PER_SECOND, re->rtt / NS_PER_MS,
-		       re->rtt % NS_PER_MS, re->min_rtt / NS_PER_MS,
-		       re->min_rtt % NS_PER_MS, saddr,
-		       ntohs(re->flow.saddr.port), daddr,
-		       ntohs(re->flow.daddr.port));
-	else if (fe->event_type == EVENT_TYPE_FLOW)
-		printf("%s.%09llu %s:%d+%s:%d flow %s due to %s from %s\n",
-		       timestr, ts & NS_PER_SECOND, saddr,
-		       ntohs(fe->flow.saddr.port), daddr,
-		       ntohs(fe->flow.daddr.port),
-		       flowevent_to_str(fe->event_info.event),
-		       eventreason_to_str(fe->event_info.reason),
-		       eventsource_to_str(fe->source));
+	if (e->event_type == EVENT_TYPE_RTT) {
+		print_ns_datetime(stdout, e->rtt_event.timestamp);
+		printf(" %llu.%06llu ms %llu.%06llu ms ",
+		       e->rtt_event.rtt / NS_PER_MS,
+		       e->rtt_event.rtt % NS_PER_MS,
+		       e->rtt_event.min_rtt / NS_PER_MS,
+		       e->rtt_event.min_rtt % NS_PER_MS);
+		print_flow_ppvizformat(stdout, &e->rtt_event.flow);
+		printf("\n");
+	} else if (e->event_type == EVENT_TYPE_FLOW) {
+		print_ns_datetime(stdout, e->flow_event.timestamp);
+		printf(" ");
+		print_flow_ppvizformat(stdout, &e->flow_event.flow);
+		printf(" %s due to %s from %s\n",
+		       flowevent_to_str(e->flow_event.event_info.event),
+		       eventreason_to_str(e->flow_event.event_info.reason),
+		       eventsource_to_str(e->flow_event.source));
+	}
 }
 
 static void print_event_ppviz(void *ctx, int cpu, void *data, __u32 data_size)
 {
 	const struct rtt_event *e = data;
-	char saddr[INET6_ADDRSTRLEN];
-	char daddr[INET6_ADDRSTRLEN];
 	__u64 time = convert_monotonic_to_realtime(e->timestamp);
 
 	if (e->event_type != EVENT_TYPE_RTT)
 		return;
 
-	format_ip_address(saddr, sizeof(saddr), e->flow.ipv, &e->flow.saddr.ip);
-	format_ip_address(daddr, sizeof(daddr), e->flow.ipv, &e->flow.daddr.ip);
+	printf("%llu.%09llu %llu.%09llu %llu.%09llu ", time / NS_PER_SECOND,
+	       time % NS_PER_SECOND, e->rtt / NS_PER_SECOND,
+	       e->rtt % NS_PER_SECOND, e->min_rtt / NS_PER_SECOND, e->min_rtt);
+	print_flow_ppvizformat(stdout, &e->flow);
+	printf("\n");
+}
 
-	printf("%llu.%09llu %llu.%09llu %llu.%09llu %s:%d+%s:%d\n",
-	       time / NS_PER_SECOND, time % NS_PER_SECOND,
-	       e->rtt / NS_PER_SECOND, e->rtt % NS_PER_SECOND,
-	       e->min_rtt / NS_PER_SECOND, e->min_rtt, saddr,
-	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port));
+static void print_common_fields_json(json_writer_t *ctx,
+				     const union pping_event *e)
+{
+	const struct network_tuple *flow = &e->rtt_event.flow;
+	char saddr[INET6_ADDRSTRLEN];
+	char daddr[INET6_ADDRSTRLEN];
+
+	format_ip_address(saddr, sizeof(saddr), flow->ipv, &flow->saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), flow->ipv, &flow->daddr.ip);
+
+	jsonw_u64_field(ctx, "timestamp",
+			convert_monotonic_to_realtime(e->rtt_event.timestamp));
+	jsonw_string_field(ctx, "src_ip", saddr);
+	jsonw_hu_field(ctx, "src_port", ntohs(flow->saddr.port));
+	jsonw_string_field(ctx, "dest_ip", daddr);
+	jsonw_hu_field(ctx, "dest_port", ntohs(flow->daddr.port));
+	jsonw_string_field(ctx, "protocol", proto_to_str(flow->proto));
+}
+
+static void print_rttevent_fields_json(json_writer_t *ctx,
+				       const struct rtt_event *re)
+{
+	jsonw_u64_field(ctx, "rtt", re->rtt);
+	jsonw_u64_field(ctx, "min_rtt", re->min_rtt);
+	jsonw_u64_field(ctx, "sent_packets", re->sent_pkts);
+	jsonw_u64_field(ctx, "sent_bytes", re->sent_bytes);
+	jsonw_u64_field(ctx, "rec_packets", re->rec_pkts);
+	jsonw_u64_field(ctx, "rec_bytes", re->rec_bytes);
+}
+
+static void print_flowevent_fields_json(json_writer_t *ctx,
+					const struct flow_event *fe)
+{
+	jsonw_string_field(ctx, "flow_event",
+			   flowevent_to_str(fe->event_info.event));
+	jsonw_string_field(ctx, "reason",
+			   eventreason_to_str(fe->event_info.reason));
+	jsonw_string_field(ctx, "triggered_by", eventsource_to_str(fe->source));
 }
 
 static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
 {
-	const struct flow_event *fe = data;
-	const struct rtt_event *re = data;
-	char saddr[INET6_ADDRSTRLEN];
-	char daddr[INET6_ADDRSTRLEN];
-	__u64 time = convert_monotonic_to_realtime(fe->timestamp);
+	const union pping_event *e = data;
 
-	if (fe->event_type != EVENT_TYPE_RTT &&
-	    fe->event_type != EVENT_TYPE_FLOW)
+	if (e->event_type != EVENT_TYPE_RTT && e->event_type != EVENT_TYPE_FLOW)
 		return;
-
-	format_ip_address(saddr, sizeof(saddr), fe->flow.ipv,
-			  &fe->flow.saddr.ip);
-	format_ip_address(daddr, sizeof(daddr), fe->flow.ipv,
-			  &fe->flow.daddr.ip);
 
 	if (!json_ctx) {
 		json_ctx = jsonw_new(stdout);
@@ -657,30 +693,11 @@ static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
 	}
 
 	jsonw_start_object(json_ctx);
-	jsonw_u64_field(json_ctx, "timestamp", time);
-	jsonw_string_field(json_ctx, "src_ip", saddr);
-	jsonw_hu_field(json_ctx, "src_port", ntohs(fe->flow.saddr.port));
-	jsonw_string_field(json_ctx, "dest_ip", daddr);
-	jsonw_hu_field(json_ctx, "dest_port", ntohs(fe->flow.daddr.port));
-	jsonw_string_field(json_ctx, "protocol", proto_to_str(fe->flow.proto));
-
-	if (fe->event_type == EVENT_TYPE_RTT) {
-		jsonw_u64_field(json_ctx, "rtt", re->rtt);
-		jsonw_u64_field(json_ctx, "min_rtt", re->min_rtt);
-		jsonw_u64_field(json_ctx, "sent_packets", re->sent_pkts);
-		jsonw_u64_field(json_ctx, "sent_bytes", re->sent_bytes);
-		jsonw_u64_field(json_ctx, "rec_packets", re->rec_pkts);
-		jsonw_u64_field(json_ctx, "rec_bytes", re->rec_bytes);
-
-	} else if (fe->event_type == EVENT_TYPE_FLOW) {
-		jsonw_string_field(json_ctx, "flow_event",
-				   flowevent_to_str(fe->event_info.event));
-		jsonw_string_field(json_ctx, "reason",
-				   eventreason_to_str(fe->event_info.reason));
-		jsonw_string_field(json_ctx, "triggered_by",
-				   eventsource_to_str(fe->source));
-	}
-
+	print_common_fields_json(json_ctx, e);
+	if (e->event_type == EVENT_TYPE_RTT)
+		print_rttevent_fields_json(json_ctx, &e->rtt_event);
+	else // flow-event
+		print_flowevent_fields_json(json_ctx, &e->flow_event);
 	jsonw_end_object(json_ctx);
 }
 
