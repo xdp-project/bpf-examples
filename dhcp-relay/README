@@ -1,0 +1,25 @@
+Usage
+-----
+dhcp_user_xdp takes network interface and dhcp relay server IP
+as inputs and stores it in a map. Filters the incoming DHCP requests and inserts
+option 82 in the DHCP request packets and overwrites the destination IP to that
+of DHCP relay server IP.
+
+Build instructions:
+cd bpf-examples/dhcp-relay
+make
+
+Loading bpf program:
+sudo ./dhcp_user_xdp -i <netif> -d <dhcp relay IP>
+where,
+netif: Ingress network interface name
+
+unloading program:
+sudo ./dhcp_user_xdp -i <netif> -u 
+
+To run in SKB mode:
+add option "-m skb" for both load and uload commands
+
+Verify using tcpdump:
+sudo tcpdump -s 0 -i <netif> port 67 and port 68 -vvv
+
