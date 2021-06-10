@@ -20,6 +20,9 @@ BPF_OBJ_INSTALL ?= $(BPF_OBJ)
 LIB_DIR ?= ../lib
 LDLIBS ?= $(USER_LIBS)
 
+# get list of objects in util
+include $(LIB_DIR)/util/util.mk
+
 include $(LIB_DIR)/defines.mk
 
 # Extend if including Makefile already added some
@@ -39,7 +42,7 @@ KERN_USER_H ?= $(wildcard common_kern_user.h)
 CFLAGS += -I$(INCLUDE_DIR) -I$(HEADER_DIR) -I$(LIB_DIR)/util $(EXTRA_CFLAGS)
 BPF_CFLAGS += -I$(INCLUDE_DIR) -I$(HEADER_DIR) $(EXTRA_CFLAGS)
 
-BPF_HEADERS := $(wildcard $(HEADER_DIR)/bpf/*.h) $(wildcard $(INCLUDE_DIR)/xdp/*.h)
+BPF_HEADERS := $(wildcard $(HEADER_DIR)/*/*.h) $(wildcard $(INCLUDE_DIR)/*/*.h)
 
 all: $(USER_TARGETS) $(BPF_OBJ) $(EXTRA_TARGETS)
 

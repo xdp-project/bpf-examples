@@ -1,0 +1,16 @@
+* Demonstration of close() hang on bpf_link fd close
+
+This is a minimal example to demonstrate an issue where =close()='ing an fd for a
+bpf_link kernel structure will hang indefinitely if the system is fully loaded.
+This only happens on a kernel compiled with =CONFIG_PREEMPT=y=, but on such a
+kernel the issue is quite easy to trigger: Simply load up the system (with work
+inside the kernel; sending it a lot of network traffic works pretty well), and
+run the bpf-link-hang program as root. The program will hang until load is
+lowered...
+
+The hang happens in =synchronize_rcu_tasks()=, which can be seen with this
+bpftrace invocation:
+
+#+begin_src sh
+bpftrace -e 'kprobe:synchronize_rcu_tasks { @start = nsecs; printf("enter\n"); } kretprobe:synchronize_rcu_tasks { printf("exit after %d ms\n", (nsecs - @start) / 1000000); }'
+#+end_src

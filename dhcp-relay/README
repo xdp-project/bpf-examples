@@ -1,0 +1,16 @@
+Usage
+-----
+
+Build instructions:
+cd bpf-examples/dhcp-relay
+sudo make
+
+Loading bpf program:
+sudo ./dhcp_user_xdp <netif> <dhcp relay IP>
+
+unloading program:
+sudo ./dhcp_user_xdp <netif> <dhcp relay IP> 1
+
+Verify using tcpdump:
+sudo tcpdump -s 0 -i <netif> port 67 and port 68 -vvv
+

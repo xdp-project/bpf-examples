@@ -6,7 +6,7 @@
 # License: GPLv2
 #
 # Modified by Simon Sundberg <simon.sundberg@kau.se> to add support
-# of optional section (--sec) option
+# of optional section (--sec) option or attaching a pinned program
 #
 
 function usage() {
@@ -20,12 +20,13 @@ function usage() {
     echo "  -l | --list    : (\$LIST)       List setup after setup"
     echo "  --file | --obj : (\$BPF_OBJ)    BPF-object file to load"
     echo "  --sec          : (\$SEC)        Section of BPF-object to load"
+    echo "  --pinned       : (\$PIN_PROG)   Path to pinned program to attach"
     echo ""
 }
 
 # Using external program "getopt" to get --long-options
 OPTIONS=$(getopt -o vshd:l \
-    --long verbose,dry-run,remove,stats,list,help,dev:,file:,obj:,sec: -- "$@")
+    --long verbose,dry-run,remove,stats,list,help,dev:,file:,obj:,sec:,pinned: -- "$@")
 if (( $? != 0 )); then
     usage
     err 2 "Error calling getopt"
@@ -50,6 +51,11 @@ while true; do
 	  info "Section to load: $SEC" >&2
           shift 2
           ;;
+	--pinned )
+	  export PIN_PROG=$2
+	  info "Pinned program path: $PIN_PROG" >&2
+	  shift 2
+	  ;;
         -v | --verbose)
           export VERBOSE=yes
           # info "Verbose mode: VERBOSE=$VERBOSE" >&2
