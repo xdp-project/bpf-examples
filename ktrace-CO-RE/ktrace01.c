@@ -7,8 +7,35 @@
 
 #include <stdio.h>
 
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #define pr_err(fmt, ...) \
 	fprintf(stderr, "%s:%d - " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
+
+#define DEBUGFS "/sys/kernel/debug/tracing/"
+
+void read_trace_pipe(void)
+{
+	int trace_fd;
+
+	trace_fd = open(DEBUGFS "trace_pipe", O_RDONLY, 0);
+	if (trace_fd < 0)
+		return;
+
+	while (1) {
+		static char buf[4096];
+		ssize_t sz;
+
+		sz = read(trace_fd, buf, sizeof(buf) - 1);
+		if (sz > 0) {
+			buf[sz] = 0;
+			puts(buf);
+		}
+	}
+}
+
 
 int main(int argc, char **argv)
 {
@@ -20,11 +47,11 @@ int main(int argc, char **argv)
 	// char *pin_file;
 	char buf[100];
 	int err;
-	int c;
+//	int c;
 
 	snprintf(filename, sizeof(filename), "%s_kern.o", argv[0]);
 
-        obj = bpf_object__open_file(filename, NULL);
+	obj = bpf_object__open_file(filename, NULL);
 	err = libbpf_get_error(obj);
 	if (err) {
 		libbpf_strerror(err, buf, sizeof(buf));
@@ -56,8 +83,10 @@ int main(int argc, char **argv)
 
 	printf("Loaded BPF file %s\n", filename);
 	printf( "Press any key + enter to unload program again [Y/y]:");
-	c = getchar();
-	putchar(c);
+	//c = getchar();
+	//putchar(c);
+
+	read_trace_pipe();
 
 	// snprintf(pin_file, sizeof(pin_file), "/sys/fs/bpf/%s", argv[0]);
 	/*
