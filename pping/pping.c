@@ -29,8 +29,6 @@ static const char *__doc__ =
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
 
-#define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
-
 #define TIMESTAMP_LIFETIME                                                     \
 	(10 * NS_PER_SECOND) // Clear out packet timestamps if they're over 10 seconds
 #define FLOW_LIFETIME                                                          \
@@ -71,7 +69,6 @@ struct pping_config {
 	char *object_path;
 	char *ingress_sec;
 	char *egress_sec;
-	char *pin_dir;
 	char *packet_map;
 	char *flow_map;
 	char *event_map;
@@ -232,53 +229,6 @@ static int set_rlimit(long int lim)
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
 }
 
-static int
-bpf_obj_run_prog_pindir_func(struct bpf_object *obj, const char *prog_title,
-			     const char *pin_dir,
-			     int (*func)(struct bpf_program *, const char *))
-{
-	int len;
-	struct bpf_program *prog;
-	char path[MAX_PATH_LEN];
-
-	if (!obj || libbpf_get_error(obj))
-		return obj ? libbpf_get_error(obj) : -EINVAL;
-
-	len = snprintf(path, MAX_PATH_LEN, "%s/%s", pin_dir, prog_title);
-	if (len < 0)
-		return len;
-	if (len > MAX_PATH_LEN)
-		return -ENAMETOOLONG;
-
-	prog = bpf_object__find_program_by_title(obj, prog_title);
-	if (!prog || libbpf_get_error(prog))
-		return prog ? libbpf_get_error(prog) : -EINVAL;
-
-	return func(prog, path);
-}
-
-/*
- * Similar to bpf_object__pin_programs, but only attemps to pin a
- * single program prog_title at path pin_dir/prog_title
- */
-static int bpf_obj_pin_program(struct bpf_object *obj, const char *prog_title,
-			       const char *pin_dir)
-{
-	return bpf_obj_run_prog_pindir_func(obj, prog_title, pin_dir,
-					    bpf_program__pin);
-}
-
-/*
- * Similar to bpf_object__unpin_programs, but only attempts to unpin a
- * single program prog_title at path pin_dir/prog_title.
- */
-static int bpf_obj_unpin_program(struct bpf_object *obj, const char *prog_title,
-				 const char *pin_dir)
-{
-	return bpf_obj_run_prog_pindir_func(obj, prog_title, pin_dir,
-					    bpf_program__unpin);
-}
-
 static int xdp_detach(int ifindex, __u32 xdp_flags)
 {
 	return bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
@@ -317,73 +267,43 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 	return -EINVAL;
 }
 
-static int run_external_program(const char *path, char *const argv[])
+static int tc_attach(struct bpf_object *obj, int ifindex,
+		     enum bpf_tc_attach_point attach_point,
+		     const char *prog_title, struct bpf_tc_opts *opts)
 {
-	int status;
-	int ret = -1;
+	int err;
+	int prog_fd;
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+			    .attach_point = attach_point);
 
-	pid_t pid = fork();
-
-	if (pid < 0)
-		return -errno;
-	if (pid == 0) {
-		execv(path, argv);
-		return -errno;
-	} else { //pid > 0
-		waitpid(pid, &status, 0);
-		if (WIFEXITED(status))
-			ret = WEXITSTATUS(status);
-		return ret;
-	}
-}
-
-static int __tc_attach(char *interface, const char *sec, const char *pin_dir)
-
-{
-	char prog_path[MAX_PATH_LEN];
-	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev",   interface,
-			       "--pinned",	    prog_path, NULL };
-
-	if (snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, sec) < 0)
-		return -EINVAL;
-
-	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
-}
-
-static int tc_attach(struct bpf_object *obj, char *interface,
-		     const char *prog_title, const char *pin_dir)
-{
-	int err, unpin_err;
-
-	// Temporarily pin program while attaching it with tc-command
-	err = bpf_obj_pin_program(obj, prog_title, pin_dir);
-	if (err)
+	err = bpf_tc_hook_create(&hook);
+	if (err && err != -EEXIST)
 		return err;
 
-	err = __tc_attach(interface, prog_title, pin_dir);
+	prog_fd = bpf_program__fd(
+		bpf_object__find_program_by_title(obj, prog_title));
+	if (prog_fd < 0)
+		return prog_fd;
 
-	/* we need to unpin regardless of whether attach succeeded, and
-         * we can't really do anything about it if unpinning fails, so just warn
-         * and continue if it does fail.
-         */
-	unpin_err = bpf_obj_unpin_program(obj, prog_title, pin_dir);
-	if (unpin_err)
-		fprintf(stderr,
-			"Warning: Failed unpinning tc program from %s/%s: %s\n",
-			pin_dir, prog_title, strerror(-unpin_err));
-
-	return err;
+	opts->prog_fd = prog_fd;
+	opts->prog_id = 0;
+	return bpf_tc_attach(&hook, opts);
 }
 
-static int tc_detach(char *interface)
+static int tc_detach(int ifindex, enum bpf_tc_attach_point attach_point,
+		     struct bpf_tc_opts *opts)
 {
-	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface,
-			       "--remove", NULL };
-	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+			    .attach_point = attach_point);
+	opts->prog_fd = 0;
+	opts->prog_id = 0;
+	opts->flags = 0;
+
+	return bpf_tc_detach(&hook, opts);
 }
 
 /*
- * Returns time of CLOCK_MONOTONIC as nanoseconds in a single __u64.
+ * Returns time as nanoseconds in a single __u64.
  * On failure, the value 0 is returned (and errno will be set).
  */
 static __u64 get_time_ns(clockid_t clockid)
@@ -735,7 +655,8 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 }
 
 static int load_attach_bpfprogs(struct bpf_object **obj,
-				struct pping_config *config)
+				struct pping_config *config,
+				struct bpf_tc_opts *tc_opts)
 {
 	int err, detach_err;
 
@@ -764,8 +685,8 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	}
 
 	// Attach tc prog
-	err = tc_attach(*obj, config->ifname, config->egress_sec,
-			config->pin_dir);
+	err = tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
+			config->egress_sec, tc_opts);
 	if (err) {
 		fprintf(stderr,
 			"Failed attaching tc program on interface %s: %s\n",
@@ -787,7 +708,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	return 0;
 
 err_xdp:
-	detach_err = tc_detach(config->ifname);
+	detach_err = tc_detach(config->ifindex, BPF_TC_EGRESS, tc_opts);
 	if (detach_err)
 		fprintf(stderr, "Failed detaching tc program from %s: %s\n",
 			config->ifname, strerror(-detach_err));
@@ -847,13 +768,13 @@ int main(int argc, char *argv[])
 		.object_path = "pping_kern.o",
 		.ingress_sec = INGRESS_PROG_SEC,
 		.egress_sec = EGRESS_PROG_SEC,
-		.pin_dir = "/sys/fs/bpf/pping",
 		.packet_map = "packet_ts",
 		.flow_map = "flow_state",
 		.event_map = "events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
 	};
 
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts); // Need to keep track of where tc prog was attached
 	print_event_func = print_event_standard;
 
 	// Detect if running as root
@@ -886,7 +807,7 @@ int main(int argc, char *argv[])
 		print_event_func = print_event_ppviz;
 	}
 
-	err = load_attach_bpfprogs(&obj, &config);
+	err = load_attach_bpfprogs(&obj, &config, &tc_opts);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
@@ -935,7 +856,7 @@ int main(int argc, char *argv[])
 	perf_buffer__free(pb);
 
 cleanup_attached_progs:
-	detach_err = tc_detach(config.ifname);
+	detach_err = tc_detach(config.ifindex, BPF_TC_EGRESS, &tc_opts);
 	if (detach_err)
 		fprintf(stderr,
 			"Failed removing tc program from interface %s: %s\n",
