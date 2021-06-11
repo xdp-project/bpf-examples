@@ -14,6 +14,23 @@
 
 char _license[] SEC("license") = "GPL";
 
+/* define our own struct definition if our vmlinux.h is outdated */
+struct trace_event_raw_bpf_trace_printk___x {};
+
+/* https://nakryiko.com/posts/bpf-tips-printk/ */
+#undef  bpf_printk  // See /usr/include/bpf/bpf_helpers.h
+#define bpf_printk(fmt, ...)					\
+ ({								\
+	static char ____fmt[] = fmt "\0";				\
+	if (0 /* bpf_core_type_exists( struct trace_event_raw_bpf_trace_printk___x)*/) { \
+		bpf_trace_printk(____fmt, sizeof(____fmt) - 1, ##__VA_ARGS__); \
+	} else {							\
+		____fmt[sizeof(____fmt) - 2] = '\n';			\
+		bpf_trace_printk(____fmt, sizeof(____fmt), ##__VA_ARGS__); \
+	}								\
+ })
+/* Gotcha: bpf_core_type_exists() needs __builtin_preserve_type_info */
+
 struct my_struct {
 	int v;
 	__u64 m2;
@@ -33,6 +50,8 @@ int BPF_KPROBE(udp_send_skb, struct sk_buff *skb)
 	G.v = 42;
 
 	a.v = bpf_get_prandom_u32() * x;
+
+	bpf_printk("skb->hash = 0x%x", x);
 
 	if (a.v == 43)
 		return 0;
