@@ -161,7 +161,8 @@ static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 	s += len;
 
 	switch (len) {
-	case 280:          __it_mob(d, s, 64);
+	case 288:          __it_mob(d, s, 64);
+	case 280: jmp_280: __it_mob(d, s, 64);
 	case 272: jmp_272: __it_mob(d, s, 64);
 	case 264: jmp_264: __it_mob(d, s, 64);
 	case 256: jmp_256: __it_mob(d, s, 64);
@@ -198,6 +199,7 @@ static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 	case   8: jmp_8:   __it_mob(d, s, 64);
 		break;
 
+	case 286: __it_mob(d, s, 16); __it_mob(d, s, 32); goto jmp_280;
 	case 278: __it_mob(d, s, 16); __it_mob(d, s, 32); goto jmp_272;
 	case 270: __it_mob(d, s, 16); __it_mob(d, s, 32); goto jmp_264;
 	case 262: __it_mob(d, s, 16); __it_mob(d, s, 32); goto jmp_256;
@@ -235,6 +237,7 @@ static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 	case   6: __it_mob(d, s, 16); __it_mob(d, s, 32);
 		break;
 
+	case 284: __it_mob(d, s, 32); goto jmp_280;
 	case 276: __it_mob(d, s, 32); goto jmp_272;
 	case 268: __it_mob(d, s, 32); goto jmp_264;
 	case 260: __it_mob(d, s, 32); goto jmp_256;
@@ -272,6 +275,7 @@ static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 	case   4: __it_mob(d, s, 32);
 		break;
 
+	case 282: __it_mob(d, s, 16); goto jmp_280;
 	case 274: __it_mob(d, s, 16); goto jmp_272;
 	case 266: __it_mob(d, s, 16); goto jmp_264;
 	case 258: __it_mob(d, s, 16); goto jmp_256;
