@@ -184,6 +184,9 @@ static __always_inline int parse_ip6hdr(struct hdr_cursor *nh,
 	if (ip6h + 1 > data_end)
 		return -1;
 
+	if (ip6h->version != 6)
+		return -1;
+
 	nh->pos = ip6h + 1;
 	*ip6hdr = ip6h;
 
@@ -198,6 +201,9 @@ static __always_inline int parse_iphdr(struct hdr_cursor *nh,
 	int hdrsize;
 
 	if (iph + 1 > data_end)
+		return -1;
+
+	if (iph->version != 4)
 		return -1;
 
 	hdrsize = iph->ihl * 4;
