@@ -1,0 +1,47 @@
+* DSCP-preserving TC filters
+
+This example shows how to use BPF to preserve DSCP values across an
+encapsulating interface such as Wireguard. It relies on the encapsulation layer
+preserving the skb->hash value across the encapsulation, which is commonly the
+case on kernel encapsulation protocols (including Wireguard).
+
+The example contains two filters: one that parses the packet header and reads
+the DSCP value out of the packet, then stores that value in a map keyed on the
+skb->hash value (which is calculated if it isn't already set). And the second TC
+filter reads back the skb->hash value, looks it up in the map, and if found
+rewrites the packet DSCP based on that value.
+
+The idea is that the first filter is run on the internal (encapsulating)
+interface, and the second is run on the physical interface that transmits the
+encapsulated packet. To install the filters, run the userspace component like:
+
+=sudo ./preserve-dscp <ifname pre> <ifname post>=
+
+To unload the filters again, run:
+=sudo ./preserve-dscp <ifname pre> <ifname post> --unload=
+
+Note that unloading will remove the clsact qdisc from the interfaces entirely,
+so don't run this if you want to preserve that; instead manually remove the
+filters using =tc=.
+
+** Caveats
+There are a couple of caveats to this approach:
+
+- As mentioned above, this only works for encapsulation protocols that preserve
+  the SKB hash in the first place.
+
+- The userspace program will try to detect if the =pre= interface has an
+  Ethernet header by checking if the interface has a type of =ARPHRD_NONE=, and
+  if so will assume the packet starts with the IP header. If this heuristic
+  turns out to be wrong, the filter will fail.
+
+- There is no sanity checking on the outer filter that the packets actually
+  come from the interface that we ran the =pre= filter on in the first place;
+  there is no general way to check this from BPF, but the =write_dscp= filter can
+  be amended to do some other sanity checks on the packet before modifying it
+  (such as checking port numbers).
+
+- Since this relies on =skb->hash=, it is flow-based; if individual packets in
+  the same flow have different marks, which ones will be preserved is racy.
+
+
