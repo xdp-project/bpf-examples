@@ -207,7 +207,11 @@ Test setup should probably consist of at least 3 machines (physical or virtual):
 - Middlebox dedicated to pping which traffic passes through
 
   - In addition to pping it's probably a good idea to also run normal ping to
-    verify the accuracy of pping (especially if we add support for ICMP echo).
+    verify the accuracy of pping.
+
+  - This is mainly relevant if we first implement ICMP echo support to pping, so
+    that the RTT reported by ping can be compared to the RTT reported by pping
+    for the same packets that ping generated.
 
 - Data sink (for the traffic generator), not on the same machine as pping to
   avoid performance interference.
@@ -229,7 +233,9 @@ apparently be challenging. Suggestions for packet generators:
 
 - [TRex](https://trex-tgn.cisco.com/)
 
-- ...?
+- [MoonGen][MoonGen-github] - [paper][MoonGen-paper]
+
+- [pktgen][pktgen-doc] - [paper][pktgen-paper]
 
 
 [ICANN-recommend]: https://www.icann.org/en/system/files/files/rssac-040-07aug18-en.pdf
@@ -241,3 +247,164 @@ apparently be challenging. Suggestions for packet generators:
 [tame-devil]: https://www.cs.colostate.edu/~cs656/papers-to-read/p00-coull.pdf "Alt. link: https://doi.org/10.7916/D8BC47W0"
 [net-anonym-attack]: https://www.researchgate.net/publication/202120661_The_Role_of_Network_Trace_Anonymization_under_Attack "Alt. link http://doi.acm.org/10.1145/1672308.1672310"
 [survey-net-anonym]: https://doi.org/10.1145/3182660
+[pktgen-doc]: https://www.kernel.org/doc/Documentation/networking/pktgen.txt
+[pktgen-paper]: http://kth.diva-portal.org/smash/get/diva2:919045/FULLTEXT01.pdf
+[MoonGen-github]: https://github.com/emmericp/MoonGen
+[MoonGen-paper]: https://www.net.in.tum.de/fileadmin/bibtex/publications/papers/MoonGen_IMC2015.pdf
+
+### Initial setup (2021-06-21)
+Javid has granted me access to 3 VMs I can use to do the performance test(s).
+
+Current VM specifications:
+| OS | Ubuntu server 20.04.02 |
+| Kernel | 5.4.0-74-generic |
+| CPU | 4 x Intel(R) Xeon(R) CPU E5-2630 v3 @ 2.40GHz |
+| RAM | 4 GB |
+| Storage | ~20 GB |
+| Network | 2 x VMXNET3 Ethernet Controller |
+
+**Problem**: The VMXNET3 drivers do not have XDP support (so runs in XDP generic
+mode). Also have no idea how the underlying infrastructure/hardware is set up
+like. If they all run on the same machine or not, and to what degree they may or
+may not share resources with other VMs.
+
+I have tried to set up the machines in the following way:
+![VM-setup](./perf_test_setup.png)
+
+As I have no idea what I'm doing, here's the possibly stupid way I did it.
+On VM-1:
+```shell
+ip route add 172.16.24.31/32 via 172.16.24.20 dev ens192
+```
+
+On VM-2:
+```shell
+ip route add 172.16.24.11/32 dev ens160
+ip route add 172.16.24.31/32 dev ens192
+sysctl -w net.ipv4.ip_forward=1
+```
+
+On VM-3:
+```shell
+ip route add 172.16.24.11/32 via 172.16.24.21 dev ens192
+```
+
+Simon-VM-1 and Simon-VM-3 are intended to be used as traffic generators/sinks,
+and Simon-VM-2 acts as a middlebox between this traffic, where both Kathie's pping
+and my eBPF pping have been installed.
+
+#### Some simple iperf3 tests
+**NOTE:** CPU-performance has simply been measured with mpstat and then
+eyeballed. Results have no statistical significance at all and should be taken
+with a grain of salt. With 100% CPU utilization I mean 100% of a single core, so
+all cores being fully utilized corresponds to 400%.
+
+##### Without pping
+Running iperf3 with a single TCP flow, sending traffic directly from VM-1 to
+VM-3 (sending from 172.16.24.10 to 172.16.24.30), I hit about 30 Gbit/s
+(typically varies between 25-33). CPU load at both sender and receiver is
+typically around 100% (all distributed on a single core). Using 10 parallel
+flows instead doesn't change much, but seems to allow for a slightly more
+distributed load at the receiver (using one core at 85-90%, and a couple of
+other cores to a small degree).
+
+When sending a single TCP flow through VM-2 (sending from 172.16.24.11 to
+172.16.24.31), the throughput goes down to about 14 Gbit/s (varies between
+roughly 12-16) and some retransmissions start occurring. In VM-2 CPU utalization
+is around 90-100%, where mainly a single core is used. The receiver also uses
+about 100% CPU, but distributed across two cores, and the sender seems to vary
+between roughly 30-45% CPU usage (using a single core). When instead using 10
+parallel flows, the throughput drops to about 10 Gbit/s. The CPU utilization for
+VM-2 drops drastically to just 8-20% (distributed across 2-4 of the cores),
+whereas for the sender it seems to increase to around 45% for a single core, and
+for the receiver at around 95%, with one core around 85% utilized and the rest
+spread out on other cores.
+
+##### With pping
+**NOTE:** Starting very simple, I've only been running a single instance of
+pping on VM-2 at the ens192 interface (the one connected to VM-3). That means
+that eBPF pping should mainly report RTTs for data sent from VM-1 (and acked by
+VM-3), but Katie's pping will also report RTTs when data is sent in the other
+direction (VM-3 to VM-1) for two reasons.
+
+Kathie's pping will attempt to both timestamp and match each packet, regardless
+of it's ingress or egress. So it will be able to create timestamps for data
+packets sent from VM-3 as they're received on ens192 at VM-2, and match them
+against the ACK sent from VM-1 as it is forwarded and transmitted by ens192 on
+VM-2, getting the RTT(+local processing) between VM-2 and VM-1, which can be
+considered valid behavior. However, eBPF pping will only timestamp transmitted
+packets, and only attempt to match received packets. It will therefore only
+report RTTs for data transmitted on the monitored interface. To get the RTTs
+between VM-2 and VM-1 in this case, eBPF pping would have to be attached ens160
+as well (whereas Kathie's pping would essentially report each RTT twice if
+attached to both interfaces, with the internal forwarding delay on ens192 and
+without on ens160).
+
+Kathie's pping will also timestamp pure ACKs (and then match against them). For
+applications that constantly tries to transmit data (like iperf), this works
+reasonably well, but may create erroneous RTTs that includes time between the
+application attempting to transmit data. If the application for example only
+attempts to transmit a message every 60 seconds, then this 60-second gap may be
+included in the calculated RTT when timestamping pure ACKs.
+
+The effect of this is that Kathie's pping will report RTTs in both directions,
+even if data is only transmitted in a single direction. My eBPF pping on the
+other hand will only report RTTs in the direction data is transmitted, AND the
+data also has to be transmitted from the view of the monitored interface.
+
+Guess all this about how Kathie's pping and my eBPF pping differs should be
+included in some form of documentation for pping rather than as a note here...
+**End of multi-paragraph note**
+
+When running Kathie's pping tool with a single TCP flow, the throughput seems to
+go down slightly to around 12-13 Gbit/s. The CPU utilization for VM-2 increases
+to about 200-220% across mainly two cores, so basically pping uses 100% of an
+additional core. Even if decreasing the throughput to 8 Gbit/s (by telling
+iperf3 to transmit at that rate), the core that seems to run pping (mainly
+userspace load) seems to be pegged at 100%. When using 10 parallel streams,
+throughput is still around 10 Gbit/s, and CPU utilization at VM-2 drops slightly
+to about 180% and the load seems to be a bit more distributed across the
+cores. The core that seems to run pping is still pegged at 100%, but the
+forwarding (software-interrupts) is a bit more spread out, often partly using
+2-3 cores.
+
+When running my eBPF pping with a single TCP flow, no clear decrease in
+throughput is observed (still at around 14 Gbit/s with some variations). CPU
+load seems also seems to be fairly similar to when not running pping at all,
+possibly slightly higher. However my eBPF pping by default outputs much less
+information at its default sample rate of only one RTT every 100ms. If the rate
+sampling is disabled (to get a more fair comparison to Kathie's pping), load
+seems to go up slightly, with there now also being a userspace load of about
+2-3%.
+
+When instead using 10 parallel TCP streams, throughput and CPU load is once
+again quite similar to when not running pping at all (which means about 10
+Gbit/s throughput and CPU load decreasing to just about 12-20%). However, when
+switching off rate sampling again performance gets much worse, with CPU
+utilization at around 100-120%, with one core at around 60-70% and the rest more
+evenly distributed. Around 10-15% CPU is now spent in userspace processing,
+which interestingly enough seems to be distributed across the cores. I guess
+this is simply due to task switching as mpstat only gives one value per second,
+and the userspace pping process should only use two threads (one for printing
+out the RTT messages, and one for cleaning the map). The timestamp map now fills
+with around 3000 entries, which is somewhat worrying considering it's only for
+10 flows (many timestamps likely never matched due to retransmissions, delayed
+ACKs etc, and have to be deleted by userspace).
+
+Running the traffic the other direction (sending data from VM-3 to VM-1) is also
+very problematic for eBPF pping. While my eBPF pping doesn't end up reporting
+any RTTs (other than the one from the initial SYN handshake), it cripples the
+throughput, decreasing it to around 5 Gbit/s. This seems to mainly be an effect
+of XDP disabling GRO, as even when only loading a minimal XDP program the
+performance is similar.
+
+```c
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+
+SEC("xdp")
+int dummy_prog(struct xdp_md *ctx)
+{
+	return XDP_PASS;
+}
+```
