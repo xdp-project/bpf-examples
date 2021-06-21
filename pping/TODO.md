@@ -6,6 +6,8 @@
     - Timestamping pure ACKs may lead to erroneous RTTs (ex. delay
       between application attempting to send data being recognized as
       an RTT)
+  - [x] Skip non-ACKs for ingress
+    - The echoed TSecr is not valid if the ACK-flag is not set
   - [ ] Add fallback to SEQ/ACK in case of no timestamp?
     - Some machines may not use TCP timestamps (either not supported
       at all, or disabled as in ex. Windows 10)
