@@ -152,6 +152,10 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
 	    !tcph->syn)
 		return -1;
 
+	// Do not match on non-ACKs (TSecr not valid)
+	if (!ctx->is_egress && !tcph->ack)
+		return -1;
+
 	// Check if connection is opening/closing
 	if (tcph->syn) {
 		fei->event = FLOW_EVENT_OPENING;
