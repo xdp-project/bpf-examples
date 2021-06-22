@@ -241,6 +241,9 @@ bpf_obj_run_prog_pindir_func(struct bpf_object *obj, const char *prog_title,
 	struct bpf_program *prog;
 	char path[MAX_PATH_LEN];
 
+	if (!obj || libbpf_get_error(obj))
+		return obj ? libbpf_get_error(obj) : -EINVAL;
+
 	len = snprintf(path, MAX_PATH_LEN, "%s/%s", pin_dir, prog_title);
 	if (len < 0)
 		return len;
@@ -334,20 +337,45 @@ static int run_external_program(const char *path, char *const argv[])
 	}
 }
 
-static int tc_bpf_attach(const char *pin_dir, const char *section,
-			 char *interface)
+static int __tc_attach(char *interface, const char *sec, const char *pin_dir)
+
 {
 	char prog_path[MAX_PATH_LEN];
 	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev",   interface,
 			       "--pinned",	    prog_path, NULL };
 
-	if (snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, section) < 0)
+	if (snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, sec) < 0)
 		return -EINVAL;
 
 	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
 }
 
-static int tc_bpf_clear(char *interface)
+static int tc_attach(struct bpf_object *obj, char *interface,
+		     const char *prog_title, const char *pin_dir)
+{
+	int err, unpin_err;
+
+	// Temporarily pin program while attaching it with tc-command
+	err = bpf_obj_pin_program(obj, prog_title, pin_dir);
+	if (err)
+		return err;
+
+	err = __tc_attach(interface, prog_title, pin_dir);
+
+	/* we need to unpin regardless of whether attach succeeded, and
+         * we can't really do anything about it if unpinning fails, so just warn
+         * and continue if it does fail.
+         */
+	unpin_err = bpf_obj_unpin_program(obj, prog_title, pin_dir);
+	if (unpin_err)
+		fprintf(stderr,
+			"Warning: Failed unpinning tc program from %s/%s: %s\n",
+			pin_dir, prog_title, strerror(-unpin_err));
+
+	return err;
+}
+
+static int tc_detach(char *interface)
 {
 	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface,
 			       "--remove", NULL };
@@ -707,10 +735,9 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 }
 
 static int load_attach_bpfprogs(struct bpf_object **obj,
-				struct pping_config *config, bool *tc_attached,
-				bool *xdp_attached)
+				struct pping_config *config)
 {
-	int err;
+	int err, detach_err;
 
 	// Open and load ELF file
 	*obj = bpf_object__open(config->object_path);
@@ -736,45 +763,35 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		return err;
 	}
 
-	// Attach tc program
-	// Temporarily pin program while attaching it with tc-command
-	err = bpf_obj_pin_program(*obj, config->egress_sec, config->pin_dir);
-	if (err) {
-		fprintf(stderr, "Failed pinning tc program to %s/%s: %s\n",
-			config->pin_dir, config->egress_sec, strerror(-err));
-		return err;
-	}
-
-	err = tc_bpf_attach(config->pin_dir, config->egress_sec,
-			    config->ifname);
+	// Attach tc prog
+	err = tc_attach(*obj, config->ifname, config->egress_sec,
+			config->pin_dir);
 	if (err) {
 		fprintf(stderr,
 			"Failed attaching tc program on interface %s: %s\n",
 			config->ifname, strerror(-err));
 		return err;
 	}
-	*tc_attached = true;
 
-	err = bpf_obj_unpin_program(*obj, config->egress_sec, config->pin_dir);
-	if (err) {
-		fprintf(stderr, "Failed unpinning tc program from %s: %s\n",
-			config->pin_dir, strerror(-err));
-		return err;
-	}
-
-	// Attach XDP program
+	// Attach xdp prog
 	err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
 			 config->xdp_flags, config->force);
 	if (err) {
 		fprintf(stderr, "Failed attaching XDP program to %s%s: %s\n",
 			config->ifname,
-			config->force ? "" : ", ensure no other XDP program is already running on interface",
+			config->force ? "" : ", ensure no XDP program is already running on interface",
 			strerror(-err));
-		return err;
+		goto err_xdp;
 	}
-	*xdp_attached = true;
 
 	return 0;
+
+err_xdp:
+	detach_err = tc_detach(config->ifname);
+	if (detach_err)
+		fprintf(stderr, "Failed detaching tc program from %s: %s\n",
+			config->ifname, strerror(-detach_err));
+	return err;
 }
 
 static int setup_periodical_map_cleaning(struct bpf_object *obj,
@@ -816,12 +833,13 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 
 int main(int argc, char *argv[])
 {
-	int err = 0;
-
-	bool tc_attached = false;
-	bool xdp_attached = false;
-
+	int err = 0, detach_err;
 	struct bpf_object *obj = NULL;
+	struct perf_buffer *pb = NULL;
+	struct perf_buffer_opts pb_opts = {
+		.sample_cb = print_event_standard,
+		.lost_cb = handle_missed_rtt_event,
+	};
 
 	struct pping_config config = {
 		.bpf_config = { .rate_limit = 100 * NS_PER_MS },
@@ -834,12 +852,6 @@ int main(int argc, char *argv[])
 		.flow_map = "flow_state",
 		.event_map = "events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
-	};
-
-	struct perf_buffer *pb = NULL;
-	struct perf_buffer_opts pb_opts = {
-		.sample_cb = print_event_standard,
-		.lost_cb = handle_missed_rtt_event,
 	};
 
 	print_event_func = print_event_standard;
@@ -874,19 +886,19 @@ int main(int argc, char *argv[])
 		print_event_func = print_event_ppviz;
 	}
 
-	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
+	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
 			config.object_path);
-		goto cleanup;
+		return EXIT_FAILURE;
 	}
 
 	err = setup_periodical_map_cleaning(obj, &config);
 	if (err) {
 		fprintf(stderr, "Failed setting up map cleaning: %s\n",
 			strerror(-err));
-		goto cleanup;
+		goto cleanup_attached_progs;
 	}
 
 	// Set up perf buffer
@@ -895,10 +907,9 @@ int main(int argc, char *argv[])
 			      PERF_BUFFER_PAGES, &pb_opts);
 	err = libbpf_get_error(pb);
 	if (err) {
-		pb = NULL;
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
 			config.event_map, strerror(err));
-		goto cleanup;
+		goto cleanup_attached_progs;
 	}
 
 	// Allow program to perform cleanup on Ctrl-C
@@ -915,33 +926,26 @@ int main(int argc, char *argv[])
 		}
 	}
 
-cleanup:
-	perf_buffer__free(pb);
-
-	if (xdp_attached) {
-		err = xdp_detach(config.ifindex, config.xdp_flags);
-		if (err)
-			fprintf(stderr,
-				"Failed deatching program from ifindex %s: %s\n",
-				config.ifname, strerror(-err));
-	}
-
-	if (tc_attached) {
-		err = tc_bpf_clear(config.ifname);
-		if (err)
-			fprintf(stderr,
-				"Failed removing tc-bpf program from interface %s: %s\n",
-				config.ifname, strerror(-err));
-	}
-
-	// Try removing pinned tc-program in case it's not been cleaned up properly
-	if (obj && !libbpf_get_error(obj))
-		bpf_obj_unpin_program(obj, config.egress_sec, config.pin_dir);
-
+	// Cleanup
 	if (config.json_format && json_ctx) {
 		jsonw_end_array(json_ctx);
 		jsonw_destroy(&json_ctx);
 	}
 
-	return err != 0;
+	perf_buffer__free(pb);
+
+cleanup_attached_progs:
+	detach_err = tc_detach(config.ifname);
+	if (detach_err)
+		fprintf(stderr,
+			"Failed removing tc program from interface %s: %s\n",
+			config.ifname, strerror(-detach_err));
+
+	detach_err = xdp_detach(config.ifindex, config.xdp_flags);
+	if (detach_err)
+		fprintf(stderr,
+			"Failed removing xdp program from interface %s: %s\n",
+			config.ifname, strerror(-detach_err));
+
+	return (err != 0 && keep_running) || detach_err != 0;
 }
