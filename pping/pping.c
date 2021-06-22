@@ -85,6 +85,7 @@ struct pping_config {
 
 static volatile int keep_running = 1;
 static json_writer_t *json_ctx = NULL;
+static void (*print_event_func)(void *, int, void *, __u32) = NULL;
 
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
@@ -366,7 +367,7 @@ static __u64 get_time_ns(clockid_t clockid)
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
-static bool packet_ts_timeout(void *val_ptr, __u64 now)
+static bool packet_ts_timeout(void *key_ptr, void *val_ptr, __u64 now)
 {
 	__u64 ts = *(__u64 *)val_ptr;
 	if (now > ts && now - ts > TIMESTAMP_LIFETIME)
@@ -374,11 +375,21 @@ static bool packet_ts_timeout(void *val_ptr, __u64 now)
 	return false;
 }
 
-static bool flow_timeout(void *val_ptr, __u64 now)
+static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 {
+	struct flow_event fe;
 	__u64 ts = ((struct flow_state *)val_ptr)->last_timestamp;
+
 	if (now > ts && now - ts > FLOW_LIFETIME) {
-		//TODO - create and "push" flow-closing event
+		if (print_event_func) {
+			fe.event_type = EVENT_TYPE_FLOW;
+			fe.timestamp = now;
+			memcpy(&fe.flow, key_ptr, sizeof(struct network_tuple));
+			fe.event_info.event = FLOW_EVENT_CLOSING;
+			fe.event_info.reason = EVENT_REASON_FLOW_TIMEOUT;
+			fe.source = EVENT_SOURCE_USERSPACE;
+			print_event_func(NULL, 0, &fe, sizeof(fe));
+		}
 		return true;
 	}
 	return false;
@@ -392,7 +403,7 @@ static bool flow_timeout(void *val_ptr, __u64 now)
  */
 //TODO - maybe add some pointer to arguments for del_decision_func?
 static int clean_map(int map_fd, size_t key_size, size_t value_size,
-		     bool (*del_decision_func)(void *, __u64))
+		     bool (*del_decision_func)(void *, void *, __u64))
 {
 	int removed = 0;
 	void *key, *prev_key, *value;
@@ -424,7 +435,7 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 		}
 
 		if (bpf_map_lookup_elem(map_fd, key, value) == 0)
-			delete_prev = del_decision_func(value, now_nsec);
+			delete_prev = del_decision_func(key, value, now_nsec);
 #ifdef DEBUG
 		entries++;
 #endif
@@ -522,8 +533,8 @@ static const char *proto_to_str(__u16 proto)
 static const char *flowevent_to_str(enum flow_event_type fe)
 {
 	switch (fe) {
-	case FLOW_EVENT_UNSPECIFIED:
-		return "unspecified event";
+	case FLOW_EVENT_NONE:
+		return "none";
 	case FLOW_EVENT_OPENING:
 		return "opening";
 	case FLOW_EVENT_CLOSING:
@@ -555,6 +566,20 @@ static const char *eventreason_to_str(enum flow_event_reason er)
 	}
 }
 
+static const char *eventsource_to_str(enum flow_event_source es)
+{
+	switch (es) {
+	case EVENT_SOURCE_EGRESS:
+		return "src";
+	case EVENT_SOURCE_INGRESS:
+		return "dest";
+	case EVENT_SOURCE_USERSPACE:
+		return "userspace-cleanup";
+	default:
+		return "unknown";
+	}
+}
+
 static void print_event_standard(void *ctx, int cpu, void *data,
 				 __u32 data_size)
 {
@@ -576,15 +601,17 @@ static void print_event_standard(void *ctx, int cpu, void *data,
 		printf("%s.%09llu %llu.%06llu ms %llu.%06llu ms %s:%d+%s:%d\n",
 		       timestr, ts % NS_PER_SECOND, re->rtt / NS_PER_MS,
 		       re->rtt % NS_PER_MS, re->min_rtt / NS_PER_MS,
-		       re->min_rtt % NS_PER_MS, saddr, ntohs(re->flow.saddr.port),
-		       daddr, ntohs(re->flow.daddr.port));
+		       re->min_rtt % NS_PER_MS, saddr,
+		       ntohs(re->flow.saddr.port), daddr,
+		       ntohs(re->flow.daddr.port));
 	else if (fe->event_type == EVENT_TYPE_FLOW)
 		printf("%s.%09llu %s:%d+%s:%d flow %s due to %s from %s\n",
 		       timestr, ts & NS_PER_SECOND, saddr,
 		       ntohs(fe->flow.saddr.port), daddr,
-		       ntohs(fe->flow.daddr.port), flowevent_to_str(fe->event),
-		       eventreason_to_str(fe->reason),
-		       fe->from_egress ? "src" : "dest");
+		       ntohs(fe->flow.daddr.port),
+		       flowevent_to_str(fe->event_info.event),
+		       eventreason_to_str(fe->event_info.reason),
+		       eventsource_to_str(fe->source));
 }
 
 static void print_event_ppviz(void *ctx, int cpu, void *data, __u32 data_size)
@@ -647,11 +674,11 @@ static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
 
 	} else if (fe->event_type == EVENT_TYPE_FLOW) {
 		jsonw_string_field(json_ctx, "flow_event",
-				   flowevent_to_str(fe->event));
+				   flowevent_to_str(fe->event_info.event));
 		jsonw_string_field(json_ctx, "reason",
-				   eventreason_to_str(fe->reason));
-		jsonw_string_field(json_ctx, "from",
-				   fe->from_egress ? "src" : "dest");
+				   eventreason_to_str(fe->event_info.reason));
+		jsonw_string_field(json_ctx, "triggered_by",
+				   eventsource_to_str(fe->source));
 	}
 
 	jsonw_end_object(json_ctx);
@@ -790,6 +817,8 @@ int main(int argc, char *argv[])
 		.lost_cb = handle_missed_rtt_event,
 	};
 
+	print_event_func = print_event_standard;
+
 	// Detect if running as root
 	if (geteuid() != 0) {
 		printf("This program must be run as root.\n");
@@ -812,10 +841,13 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	if (config.json_format)
+	if (config.json_format) {
 		pb_opts.sample_cb = print_event_json;
-	else if (config.ppviz_format)
+		print_event_func = print_event_json;
+	} else if (config.ppviz_format) {
 		pb_opts.sample_cb = print_event_ppviz;
+		print_event_func = print_event_ppviz;
+	}
 
 	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
 	if (err) {

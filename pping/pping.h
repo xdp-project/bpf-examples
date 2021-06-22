@@ -14,12 +14,12 @@
 #define EVENT_TYPE_RTT 2
 
 enum __attribute__((__packed__)) flow_event_type {
-	FLOW_EVENT_UNSPECIFIED,
+	FLOW_EVENT_NONE,
 	FLOW_EVENT_OPENING,
 	FLOW_EVENT_CLOSING
 };
 
-enum __attribute__ ((__packed__)) flow_event_reason {
+enum __attribute__((__packed__)) flow_event_reason {
 	EVENT_REASON_SYN,
 	EVENT_REASON_SYN_ACK,
 	EVENT_REASON_FIRST_OBS_PCKT,
@@ -27,6 +27,12 @@ enum __attribute__ ((__packed__)) flow_event_reason {
 	EVENT_REASON_FIN_ACK,
 	EVENT_REASON_RST,
 	EVENT_REASON_FLOW_TIMEOUT
+};
+
+enum __attribute__((__packed__)) flow_event_source {
+	EVENT_SOURCE_EGRESS,
+	EVENT_SOURCE_INGRESS,
+	EVENT_SOURCE_USERSPACE
 };
 
 struct bpf_config {
@@ -97,6 +103,11 @@ struct rtt_event {
 	__u32 reserved;
 };
 
+struct flow_event_info {
+	enum flow_event_type event;
+	enum flow_event_reason reason;
+};
+
 /*
  * A flow event message that can be passed from the bpf-programs to user-space.
  * The initial event_type memeber is used to allow multiplexing between
@@ -107,9 +118,8 @@ struct flow_event {
 	__u64 event_type;
 	__u64 timestamp;
 	struct network_tuple flow;
-	enum flow_event_type event;
-	enum flow_event_reason reason;
-	bool from_egress;
+	struct flow_event_info event_info;
+	enum flow_event_source source;
 	__u8 reserved;
 };
 

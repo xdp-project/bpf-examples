@@ -130,14 +130,15 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 
 /*
  * Attempts to fetch an identifier for TCP packets, based on the TCP timestamp
- * option. If sucessful, identifier will be set to TSval if is_ingress, TSecr
- * otherwise, the port-members of saddr and daddr will be set the the TCP source
- * and dest, respectively, and 0 will be returned. On failure, -1 will be
- * returned. Additionally, if the connection is closing (FIN or RST flag), sets
- * flow_closing to true.
+ * option.
+ * If successful, identifier will be set to TSval if is_ingress, or TSecr
+ * otherwise, the port-members of saddr and daddr will be set to the TCP source
+ * and dest, respectively, fei will be filled appropriately (based on
+ * SYN/FIN/RST) and 0 will be returned.
+ * On failure, -1 will be returned.
  */
 static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
-				__be16 *dport, struct flow_event *fe,
+				__be16 *dport, struct flow_event_info *fei,
 				__u32 *identifier)
 {
 	__u32 tsval, tsecr;
@@ -146,29 +147,26 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
 	if (parse_tcphdr(&ctx->nh, ctx->data_end, &tcph) < 0)
 		return -1;
 
-	// Check if connection is opening
-	if (tcph->syn) {
-		fe->event = FLOW_EVENT_OPENING;
-		fe->reason = tcph->ack ? EVENT_REASON_SYN_ACK : EVENT_REASON_SYN;
-	}
-	// Check if connection is closing
-	if (tcph->rst) {
-		//bpf_printk("RST from %d\n", ctx->is_egress);
-		fe->event = FLOW_EVENT_CLOSING;
-		fe->reason = EVENT_REASON_RST;
-	}
-	else if (!ctx->is_egress && tcph->fin) {
-		//bpf_printk("Fin from %d\n", ctx->is_egress);
-		fe->event = FLOW_EVENT_CLOSING;
-		fe->reason = tcph->ack ? EVENT_REASON_FIN_ACK : EVENT_REASON_FIN;
-	}
-	if (tcph->rst || (!ctx->is_egress && tcph->fin)) {
-	}
-
 	// Do not timestamp pure ACKs
 	if (ctx->is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len &&
 	    !tcph->syn)
 		return -1;
+
+	// Check if connection is opening/closing
+	if (tcph->syn) {
+		fei->event = FLOW_EVENT_OPENING;
+		fei->reason =
+			tcph->ack ? EVENT_REASON_SYN_ACK : EVENT_REASON_SYN;
+	} else if (tcph->rst) {
+		fei->event = FLOW_EVENT_CLOSING;
+		fei->reason = EVENT_REASON_RST;
+	} else if (!ctx->is_egress && tcph->fin) {
+		fei->event = FLOW_EVENT_CLOSING;
+		fei->reason =
+			tcph->ack ? EVENT_REASON_FIN_ACK : EVENT_REASON_FIN;
+	} else {
+		fei->event = FLOW_EVENT_NONE;
+	}
 
 	if (parse_tcp_ts(tcph, ctx->data_end, &tsval, &tsecr) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead
@@ -182,7 +180,7 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
 /*
  * Attempts to parse the packet limited by the data and data_end pointers,
  * to retrieve a protocol dependent packet identifier. If sucessful, the
- * pointed to p_id will be filled with parsed information from the packet
+ * pointed to p_id and fei will be filled with parsed information from the
  * packet, and 0 will be returned. On failure, -1 will be returned.
  * If is_egress saddr and daddr will match source and destination of packet,
  * respectively, and identifier will be set to the identifer for an outgoing
@@ -192,7 +190,7 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
  */
 static int parse_packet_identifier(struct parsing_context *ctx,
 				   struct packet_id *p_id,
-				   struct flow_event *fe)
+				   struct flow_event_info *fei)
 {
 	int proto, err;
 	struct ethhdr *eth;
@@ -225,7 +223,7 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 	// Add new protocols here
 	if (p_id->flow.proto == IPPROTO_TCP) {
 		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port,
-					   fe, &p_id->identifier);
+					   fei, &p_id->identifier);
 		if (err)
 			return -1;
 	} else {
@@ -255,17 +253,17 @@ static __u32 remaining_pkt_payload(struct parsing_context *ctx)
 }
 
 /*
- * Fills in event_type, timestamp, flow, from_egress and reserved.
- * The members event and reason are assumed to have been set already (by
- * parse_packet_identifier).
+ * Fills in event_type, timestamp, flow, source and reserved.
+ * Does not fill in the flow_info.
  */
 static void fill_flow_event(struct flow_event *fe, __u64 timestamp,
-			    struct network_tuple *flow, bool is_egress)
+			    struct network_tuple *flow,
+			    enum flow_event_source source)
 {
 	fe->event_type = EVENT_TYPE_FLOW;
 	fe->timestamp = timestamp;
 	__builtin_memcpy(&fe->flow, flow, sizeof(struct network_tuple));
-	fe->from_egress = is_egress;
+	fe->source = source;
 	fe->reserved = 0; // Make sure it's initilized
 }
 
@@ -276,7 +274,7 @@ SEC(EGRESS_PROG_SEC)
 int pping_egress(struct __sk_buff *skb)
 {
 	struct packet_id p_id = { 0 };
-	struct flow_event fe = { .event = FLOW_EVENT_UNSPECIFIED };
+	struct flow_event fe;
 	__u64 now;
 	struct parsing_context pctx = {
 		.data = (void *)(long)skb->data,
@@ -288,17 +286,18 @@ int pping_egress(struct __sk_buff *skb)
 	struct flow_state *f_state;
 	struct flow_state new_state = { 0 };
 
-	if (parse_packet_identifier(&pctx, &p_id, &fe) < 0)
+	if (parse_packet_identifier(&pctx, &p_id, &fe.event_info) < 0)
 		goto out;
 
 	now = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
 	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
 
 	// Flow closing - try to delete flow state and push closing-event
-	if (fe.event == FLOW_EVENT_CLOSING) {
+	if (fe.event_info.event == FLOW_EVENT_CLOSING) {
 		if (!f_state) {
 			bpf_map_delete_elem(&flow_state, &p_id.flow);
-			fill_flow_event(&fe, now, &p_id.flow, true);
+			fill_flow_event(&fe, now, &p_id.flow,
+					EVENT_SOURCE_EGRESS);
 			bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU,
 					      &fe, sizeof(fe));
 		}
@@ -314,11 +313,11 @@ int pping_egress(struct __sk_buff *skb)
 		if (!f_state) // Creation failed
 			goto out;
 
-		if (fe.event != FLOW_EVENT_OPENING) {
-			fe.event = FLOW_EVENT_OPENING;
-			fe.reason = EVENT_REASON_FIRST_OBS_PCKT;
+		if (fe.event_info.event != FLOW_EVENT_OPENING) {
+			fe.event_info.event = FLOW_EVENT_OPENING;
+			fe.event_info.reason = EVENT_REASON_FIRST_OBS_PCKT;
 		}
-		fill_flow_event(&fe, now, &p_id.flow, true);
+		fill_flow_event(&fe, now, &p_id.flow, EVENT_SOURCE_EGRESS);
 		bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU, &fe,
 				      sizeof(fe));
 	}
@@ -355,7 +354,7 @@ int pping_ingress(struct xdp_md *ctx)
 {
 	struct packet_id p_id = { 0 };
 	__u64 *p_ts;
-	struct flow_event fe = { .event = FLOW_EVENT_UNSPECIFIED };
+	struct flow_event fe;
 	struct rtt_event re = { 0 };
 	struct flow_state *f_state;
 	struct parsing_context pctx = {
@@ -367,7 +366,7 @@ int pping_ingress(struct xdp_md *ctx)
 	};
 	__u64 now;
 
-	if (parse_packet_identifier(&pctx, &p_id, &fe) < 0)
+	if (parse_packet_identifier(&pctx, &p_id, &fe.event_info) < 0)
 		goto out;
 
 	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
@@ -404,9 +403,9 @@ int pping_ingress(struct xdp_md *ctx)
 
 validflow_out:
 	// Wait with deleting flow until having pushed final RTT message
-	if (fe.event == FLOW_EVENT_CLOSING && f_state) {
+	if (fe.event_info.event == FLOW_EVENT_CLOSING && f_state) {
 		bpf_map_delete_elem(&flow_state, &p_id.flow);
-		fill_flow_event(&fe, now, &p_id.flow, false);
+		fill_flow_event(&fe, now, &p_id.flow, EVENT_SOURCE_INGRESS);
 		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe,
 				      sizeof(fe));
 	}
