@@ -60,7 +60,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(__u32));
-} rtt_events SEC(".maps");
+} events SEC(".maps");
 
 // Help functions
 
@@ -137,7 +137,7 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
  * flow_closing to true.
  */
 static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
-				__be16 *dport, bool *flow_closing,
+				__be16 *dport, struct flow_event *fe,
 				__u32 *identifier)
 {
 	__u32 tsval, tsecr;
@@ -146,8 +146,24 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
 	if (parse_tcphdr(&ctx->nh, ctx->data_end, &tcph) < 0)
 		return -1;
 
+	// Check if connection is opening
+	if (tcph->syn) {
+		fe->event = FLOW_EVENT_OPENING;
+		fe->reason = tcph->ack ? EVENT_REASON_SYN_ACK : EVENT_REASON_SYN;
+	}
 	// Check if connection is closing
-	*flow_closing = tcph->rst || (!ctx->is_egress && tcph->fin);
+	if (tcph->rst) {
+		//bpf_printk("RST from %d\n", ctx->is_egress);
+		fe->event = FLOW_EVENT_CLOSING;
+		fe->reason = EVENT_REASON_RST;
+	}
+	else if (!ctx->is_egress && tcph->fin) {
+		//bpf_printk("Fin from %d\n", ctx->is_egress);
+		fe->event = FLOW_EVENT_CLOSING;
+		fe->reason = tcph->ack ? EVENT_REASON_FIN_ACK : EVENT_REASON_FIN;
+	}
+	if (tcph->rst || (!ctx->is_egress && tcph->fin)) {
+	}
 
 	// Do not timestamp pure ACKs
 	if (ctx->is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len &&
@@ -175,7 +191,8 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
  * set to the identifier of a response.
  */
 static int parse_packet_identifier(struct parsing_context *ctx,
-				   struct packet_id *p_id, bool *flow_closing)
+				   struct packet_id *p_id,
+				   struct flow_event *fe)
 {
 	int proto, err;
 	struct ethhdr *eth;
@@ -208,7 +225,7 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 	// Add new protocols here
 	if (p_id->flow.proto == IPPROTO_TCP) {
 		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port,
-					   flow_closing, &p_id->identifier);
+					   fe, &p_id->identifier);
 		if (err)
 			return -1;
 	} else {
@@ -237,6 +254,21 @@ static __u32 remaining_pkt_payload(struct parsing_context *ctx)
 	return parsed_bytes < ctx->pkt_len ? ctx->pkt_len - parsed_bytes : 0;
 }
 
+/*
+ * Fills in event_type, timestamp, flow, from_egress and reserved.
+ * The members event and reason are assumed to have been set already (by
+ * parse_packet_identifier).
+ */
+static void fill_flow_event(struct flow_event *fe, __u64 timestamp,
+			    struct network_tuple *flow, bool is_egress)
+{
+	fe->event_type = EVENT_TYPE_FLOW;
+	fe->timestamp = timestamp;
+	__builtin_memcpy(&fe->flow, flow, sizeof(struct network_tuple));
+	fe->from_egress = is_egress;
+	fe->reserved = 0; // Make sure it's initilized
+}
+
 // Programs
 
 // TC-BFP for parsing packet identifier from egress traffic and add to map
@@ -244,7 +276,8 @@ SEC(EGRESS_PROG_SEC)
 int pping_egress(struct __sk_buff *skb)
 {
 	struct packet_id p_id = { 0 };
-	__u64 p_ts;
+	struct flow_event fe = { .event = FLOW_EVENT_UNSPECIFIED };
+	__u64 now;
 	struct parsing_context pctx = {
 		.data = (void *)(long)skb->data,
 		.data_end = (void *)(long)skb->data_end,
@@ -252,27 +285,42 @@ int pping_egress(struct __sk_buff *skb)
 		.nh = { .pos = pctx.data },
 		.is_egress = true,
 	};
-	bool flow_closing = false;
 	struct flow_state *f_state;
 	struct flow_state new_state = { 0 };
 
-	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
+	if (parse_packet_identifier(&pctx, &p_id, &fe) < 0)
 		goto out;
 
-	// Delete flow and create no timestamp entry if flow is closing
-	if (flow_closing) {
-		bpf_map_delete_elem(&flow_state, &p_id.flow);
+	now = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
+	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+
+	// Flow closing - try to delete flow state and push closing-event
+	if (fe.event == FLOW_EVENT_CLOSING) {
+		if (!f_state) {
+			bpf_map_delete_elem(&flow_state, &p_id.flow);
+			fill_flow_event(&fe, now, &p_id.flow, true);
+			bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU,
+					      &fe, sizeof(fe));
+		}
 		goto out;
 	}
 
-	// Check flow state
-	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
-	if (!f_state) { // No previous state - attempt to create it
+	// No previous state - attempt to create it and push flow-opening event
+	if (!f_state) {
 		bpf_map_update_elem(&flow_state, &p_id.flow, &new_state,
 				    BPF_NOEXIST);
 		f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
-		if (!f_state)
+
+		if (!f_state) // Creation failed
 			goto out;
+
+		if (fe.event != FLOW_EVENT_OPENING) {
+			fe.event = FLOW_EVENT_OPENING;
+			fe.reason = EVENT_REASON_FIRST_OBS_PCKT;
+		}
+		fill_flow_event(&fe, now, &p_id.flow, true);
+		bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU, &fe,
+				      sizeof(fe));
 	}
 
 	f_state->sent_pkts++;
@@ -284,9 +332,8 @@ int pping_egress(struct __sk_buff *skb)
 	f_state->last_id = p_id.identifier;
 
 	// Check rate-limit
-	p_ts = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
-	if (p_ts < f_state->last_timestamp ||
-	    p_ts - f_state->last_timestamp < config.rate_limit)
+	if (now < f_state->last_timestamp ||
+	    now - f_state->last_timestamp < config.rate_limit)
 		goto out;
 
 	/*
@@ -295,8 +342,8 @@ int pping_egress(struct __sk_buff *skb)
 	 * the next available map slot somewhat fairer between heavy and sparse
 	 * flows.
 	 */
-	f_state->last_timestamp = p_ts;
-	bpf_map_update_elem(&packet_ts, &p_id, &p_ts, BPF_NOEXIST);
+	f_state->last_timestamp = now;
+	bpf_map_update_elem(&packet_ts, &p_id, &now, BPF_NOEXIST);
 
 out:
 	return BPF_OK;
@@ -308,7 +355,8 @@ int pping_ingress(struct xdp_md *ctx)
 {
 	struct packet_id p_id = { 0 };
 	__u64 *p_ts;
-	struct rtt_event event = { 0 };
+	struct flow_event fe = { .event = FLOW_EVENT_UNSPECIFIED };
+	struct rtt_event re = { 0 };
 	struct flow_state *f_state;
 	struct parsing_context pctx = {
 		.data = (void *)(long)ctx->data,
@@ -317,15 +365,14 @@ int pping_ingress(struct xdp_md *ctx)
 		.nh = { .pos = pctx.data },
 		.is_egress = false,
 	};
-	bool flow_closing = false;
 	__u64 now;
 
-	if (parse_packet_identifier(&pctx, &p_id, &flow_closing) < 0)
+	if (parse_packet_identifier(&pctx, &p_id, &fe) < 0)
 		goto out;
 
 	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
 	if (!f_state)
-		goto validflow_out;
+		goto out;
 
 	f_state->rec_pkts++;
 	f_state->rec_bytes += remaining_pkt_payload(&pctx);
@@ -335,30 +382,34 @@ int pping_ingress(struct xdp_md *ctx)
 	if (!p_ts || now < *p_ts)
 		goto validflow_out;
 
-	event.rtt = now - *p_ts;
-	event.timestamp = now;
+	re.rtt = now - *p_ts;
 
 	// Delete timestamp entry as soon as RTT is calculated
 	bpf_map_delete_elem(&packet_ts, &p_id);
 
-	if (f_state->min_rtt == 0 || event.rtt < f_state->min_rtt)
-		f_state->min_rtt = event.rtt;
+	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
+		f_state->min_rtt = re.rtt;
 
-	event.min_rtt = f_state->min_rtt;
-	event.sent_pkts = f_state->sent_pkts;
-	event.sent_bytes = f_state->sent_bytes;
-	event.rec_pkts = f_state->rec_pkts;
-	event.rec_bytes = f_state->rec_bytes;
+	re.event_type = EVENT_TYPE_RTT;
+	re.timestamp = now;
+	re.min_rtt = f_state->min_rtt;
+	re.sent_pkts = f_state->sent_pkts;
+	re.sent_bytes = f_state->sent_bytes;
+	re.rec_pkts = f_state->rec_pkts;
+	re.rec_bytes = f_state->rec_bytes;
 
 	// Push event to perf-buffer
-	__builtin_memcpy(&event.flow, &p_id.flow, sizeof(struct network_tuple));
-	bpf_perf_event_output(ctx, &rtt_events, BPF_F_CURRENT_CPU, &event,
-			      sizeof(event));
+	__builtin_memcpy(&re.flow, &p_id.flow, sizeof(struct network_tuple));
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
 
 validflow_out:
 	// Wait with deleting flow until having pushed final RTT message
-	if (flow_closing)
+	if (fe.event == FLOW_EVENT_CLOSING && f_state) {
 		bpf_map_delete_elem(&flow_state, &p_id.flow);
+		fill_flow_event(&fe, now, &p_id.flow, false);
+		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe,
+				      sizeof(fe));
+	}
 
 out:
 	return XDP_PASS;
