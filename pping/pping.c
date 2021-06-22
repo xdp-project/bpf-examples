@@ -23,6 +23,7 @@ static const char *__doc__ =
 #include <time.h>
 #include <pthread.h>
 
+#include "json_writer.h"
 #include "pping.h" //common structs for user-space and BPF parts
 
 #define NS_PER_SECOND 1000000000UL
@@ -83,7 +84,7 @@ struct pping_config {
 };
 
 static volatile int keep_running = 1;
-static bool json_started = false;
+static json_writer_t *json_ctx = NULL;
 
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
@@ -565,32 +566,25 @@ static void print_rtt_event_json(void *ctx, int cpu, void *data,
 	format_ip_address(saddr, sizeof(saddr), e->flow.ipv, &e->flow.saddr.ip);
 	format_ip_address(daddr, sizeof(daddr), e->flow.ipv, &e->flow.daddr.ip);
 
-	if (json_started) {
-		printf(",");
-	} else {
-		printf("[");
-		json_started = true;
+	if (!json_ctx) {
+		json_ctx = jsonw_new(stdout);
+		jsonw_start_array(json_ctx);
 	}
 
-	printf("\n{\"timestamp\":%llu.%09llu, \"rtt\":%llu.%09llu, "
-	       "\"min_rtt\":%llu.%09llu, \"src_ip\":\"%s\", \"src_port\":%d, "
-	       "\"dest_ip\":\"%s\", \"dest_port\":%d, \"protocol\":\"%s\", "
-	       "\"sent_pkts\":%llu, \"sent_bytes\":%llu, \"rec_pkts\":%llu, "
-	       "\"rec_bytes\":%llu }",
-	       time / NS_PER_SECOND, time % NS_PER_SECOND,
-	       e->rtt / NS_PER_SECOND, e->rtt % NS_PER_SECOND,
-	       e->min_rtt / NS_PER_SECOND, e->min_rtt % NS_PER_SECOND, saddr,
-	       ntohs(e->flow.saddr.port), daddr, ntohs(e->flow.daddr.port),
-	       proto_to_str(e->flow.proto), e->sent_pkts, e->sent_bytes,
-	       e->rec_pkts, e->rec_bytes);
-}
-
-static void end_json_output(void)
-{
-	if (json_started)
-		printf("\n]\n");
-	else
-		printf("[]\n");
+	jsonw_start_object(json_ctx);
+	jsonw_u64_field(json_ctx, "timestamp", time);
+	jsonw_u64_field(json_ctx, "rtt", e->rtt);
+	jsonw_u64_field(json_ctx, "min_rtt", e->min_rtt);
+	jsonw_string_field(json_ctx, "src_ip", saddr);
+	jsonw_hu_field(json_ctx, "src_port", ntohs(e->flow.saddr.port));
+	jsonw_string_field(json_ctx, "dest_ip", daddr);
+	jsonw_hu_field(json_ctx, "dest_port", ntohs(e->flow.daddr.port));
+	jsonw_string_field(json_ctx, "protocol", proto_to_str(e->flow.proto));
+	jsonw_u64_field(json_ctx, "sent_packets", e->sent_pkts);
+	jsonw_u64_field(json_ctx, "sent_bytes", e->sent_bytes);
+	jsonw_u64_field(json_ctx, "rec_packets", e->rec_pkts);
+	jsonw_u64_field(json_ctx, "rec_bytes", e->rec_bytes);
+	jsonw_end_object(json_ctx);
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
@@ -797,9 +791,6 @@ int main(int argc, char *argv[])
 cleanup:
 	perf_buffer__free(pb);
 
-	if (config.json_format)
-		end_json_output();
-
 	if (xdp_attached) {
 		err = xdp_detach(config.ifindex, config.xdp_flags);
 		if (err)
@@ -823,6 +814,11 @@ cleanup:
 			fprintf(stderr,
 				"Failed unpinning tc program from %s: %s\n",
 				config.pin_dir, strerror(-err));
+	}
+
+	if (config.json_format && json_ctx) {
+		jsonw_end_array(json_ctx);
+		jsonw_destroy(&json_ctx);
 	}
 
 	return err != 0;
