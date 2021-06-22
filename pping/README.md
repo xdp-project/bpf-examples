@@ -28,6 +28,89 @@ the identifier. The mechanism to ensure only the first packet is timestamped and
 matched differs from the one in Kathie's pping, and is further described in
 [SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
 
+## Output formats
+pping currently supports 3 different formats, *standard*, *ppviz* and *json*. In
+general, the output consists of two different types of events, flow-events which
+gives information that a flow has started/ended, and RTT-events which provides
+information on a computed RTT within a flow.
+
+### Standard format
+The standard format is quite similar to the Kathie's pping default output, and
+is generally intended to be an easily understood human-readable format writing a
+single line per event.
+
+An example of the format is provided below:
+```shell
+16:00:46.142279766 10.11.1.1:5201+10.11.1.2:59528 opening due to SYN-ACK from src
+16:00:46.147705205 5.425439 ms 5.425439 ms 10.11.1.1:5201+10.11.1.2:59528
+16:00:47.148905125 5.261430 ms 5.261430 ms 10.11.1.1:5201+10.11.1.2:59528
+16:00:48.151666385 5.972284 ms 5.261430 ms 10.11.1.1:5201+10.11.1.2:59528
+16:00:49.152489316 6.017589 ms 5.261430 ms 10.11.1.1:5201+10.11.1.2:59528
+16:00:49.878508114 10.11.1.1:5201+10.11.1.2:59528 closing due to RST from dest
+```
+
+### ppviz format
+The ppviz format is primarily intended to be used to generate data that can be
+visualized by Kathie's [ppviz](https://github.com/pollere/ppviz) tool. The
+format is essentially a CSV format, using a single space as the separator, and
+is further described [here](http://www.pollere.net/ppviz.html).
+
+Note that the optional *FBytes*, *DBytes* and *PBytes* from the format
+specification have not been included here, and do not appear to be used by
+ppviz. Furthermore, flow events are not included in the output, as the those are
+not used by ppviz.
+
+An example of the format is provided below:
+```shell
+1623420121.483727575 0.005298909 0.005298909 10.11.1.1:5201+10.11.1.2:59532
+1623420122.484530934 0.006016639 0.005298909 10.11.1.1:5201+10.11.1.2:59532
+1623420123.485899736 0.005590783 0.005298909 10.11.1.1:5201+10.11.1.2:59532
+1623420124.490584753 0.006123511 0.005298909 10.11.1.1:5201+10.11.1.2:59532
+1623420125.492190751 0.005624835 0.005298909 10.11.1.1:5201+10.11.1.2:59532
+```
+### JSON format
+The JSON format is primarily intended to be machine-readable, and thus uses no
+spacing or newlines between entries to reduce the overhead. External tools such
+as [jq](https://stedolan.github.io/jq/) can be used to pretty-print the format.
+
+The format consists of an array at the root-level, and each flow or RTT even is
+added as an object to the root-array. The events contain some additional fields
+in the JSON format which is not displayed by the other formats. All times
+(*timestamp*, *rtt* and *min_rtt*) are provided as integers in nanoseconds.
+
+An example of a (pretty-printed) flow-event is provided below:
+```json
+{
+    "timestamp": 1623420837244545000,
+    "src_ip": "10.11.1.1",
+    "src_port": 5201,
+    "dest_ip": "10.11.1.2",
+    "dest_port": 59572,
+    "protocol": "TCP",
+    "flow_event": "opening",
+    "reason": "SYN-ACK",
+    "triggered_by": "src"
+}
+```
+
+An example of a (pretty-printed) RTT-even is provided below:
+```json
+{
+    "timestamp": 1623420838254558500,
+    "src_ip": "10.11.1.1",
+    "src_port": 5201,
+    "dest_ip": "10.11.1.2",
+    "dest_port": 59572,
+    "protocol": "TCP",
+    "rtt": 5977708,
+    "min_rtt": 5441848,
+    "sent_packets": 9393,
+    "sent_bytes": 492457296,
+    "rec_packets": 5922,
+    "rec_bytes": 37
+}
+```
+
 ## Design and technical description
 !["Design of eBPF pping](./eBPF_pping_design.png)
 
@@ -47,7 +130,8 @@ matched differs from the one in Kathie's pping, and is further described in
   reverse flow (to match source/dest on egress). If there is a match, it
   calculates the RTT from the stored timestamp and deletes the entry. The
   calculated RTT (together with the flow-tuple) is pushed to the perf-buffer
-  `rtt_events`.
+  `events`. Both `pping_egress()` and `pping_ingress` can also push flow-events
+  to the `events` buffer.
 - **bpf_egress_loader.sh:** A shell script that's used by `pping.c` to setup a
   clsact qdisc and attach the `pping_egress()` program to egress using
   tc. **Note**: Unless your iproute2 comes with libbpf support, tc will use
@@ -65,13 +149,13 @@ matched differs from the one in Kathie's pping, and is further described in
   last seen identifier for the flow and when the last timestamp entry for the
   flow was created. Entries are created by `pping_egress()`, and can be updated
   or deleted by both `pping_egress()` and `pping_ingress()`. Leftover entries
-  are eventually removed by `pping.c`. Pinned at `/sys/fs/bpf/pping`.
+  are eventually removed by `pping.c`.
 - **packet_ts:** A hash-map storing a timestamp for a specific packet
   identifier. Entries are created by `pping_egress()` and removed by
-  `pping_ingress()` if a match is found. Leftover entries are eventually
-  removed by `pping.c`. Pinned at `/sys/fs/bpf/pping`.
-- **rtt_events:** A perf-buffer used by `pping_ingress()` to push calculated RTTs
-  to `pping.c`, which continuously polls the map the print out the RTTs.
+  `pping_ingress()` if a match is found. Leftover entries are eventually removed
+  by `pping.c`.
+- **events:** A perf-buffer used by the BPF programs to push flow or RTT events
+  to `pping.c`, which continuously polls the map the prints them out.
 
 ### A note on concurrency
 The program uses "global" (not `PERCPU`) hash maps to keep state. As the BPF
