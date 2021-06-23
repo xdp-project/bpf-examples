@@ -7,6 +7,8 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/tcp.h>
+#include <linux/icmp.h>
+#include <linux/icmpv6.h>
 #include <stdbool.h>
 
 // overwrite xdp/parsing_helpers.h value to avoid hitting verifier limit
@@ -182,6 +184,64 @@ static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
 }
 
 /*
+ * Attemps to fetch an identifier for an ICMPv6 header, based on the echo
+ * request/reply sequence number.
+ * If successful, identifer will be set to the echo sequence number, both
+ * sport and dport will be set to the echo identifier, and 0 will be returned.
+ * On failure, -1 will be returned.
+ * Note: Will store the 16-bit echo sequence number in network byte order in
+ * the 32-bit identifier.
+ */
+static int parse_icmp6_identifier(struct parsing_context *ctx, __u16 *sport,
+				  __u16 *dport, struct flow_event_info *fei,
+				  __u32 *identifier)
+{
+	struct icmp6hdr *icmp6h;
+
+	if (parse_icmp6hdr(&ctx->nh, ctx->data_end, &icmp6h) < 0)
+		return -1;
+
+	if (ctx->is_egress && icmp6h->icmp6_type != ICMPV6_ECHO_REQUEST)
+		return -1;
+	if (!ctx->is_egress && icmp6h->icmp6_type != ICMPV6_ECHO_REPLY)
+		return -1;
+	if (icmp6h->icmp6_code != 0)
+		return -1;
+
+	fei->event = FLOW_EVENT_NONE;
+	*sport = icmp6h->icmp6_identifier;
+	*dport = *sport;
+	*identifier = icmp6h->icmp6_sequence;
+	return 0;
+}
+
+/*
+ * Same as parse_icmp6_identifier, but for an ICMP(v4) header instead.
+ */
+static int parse_icmp_identifier(struct parsing_context *ctx, __u16 *sport,
+				 __u16 *dport, struct flow_event_info *fei,
+				 __u32 *identifier)
+{
+	struct icmphdr *icmph;
+
+	if (parse_icmphdr(&ctx->nh, ctx->data_end, &icmph) < 0)
+		return -1;
+
+	if (ctx->is_egress && icmph->type != ICMP_ECHO)
+		return -1;
+	if (!ctx->is_egress && icmph->type != ICMP_ECHOREPLY)
+		return -1;
+	if (icmph->code != 0)
+		return -1;
+
+	fei->event = FLOW_EVENT_NONE;
+	*sport = icmph->un.echo.id;
+	*dport = *sport;
+	*identifier = icmph->un.echo.sequence;
+	return 0;
+}
+
+/*
  * Attempts to parse the packet limited by the data and data_end pointers,
  * to retrieve a protocol dependent packet identifier. If sucessful, the
  * pointed to p_id and fei will be filled with parsed information from the
@@ -224,15 +284,21 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 		return -1;
 	}
 
-	// Add new protocols here
-	if (p_id->flow.proto == IPPROTO_TCP) {
-		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port,
-					   fei, &p_id->identifier);
-		if (err)
-			return -1;
-	} else {
-		return -1;
-	}
+	// Parse identifer from suitable protocol
+	if (p_id->flow.proto == IPPROTO_TCP)
+		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port, fei,
+					   &p_id->identifier);
+	else if (p_id->flow.proto == IPPROTO_ICMPV6 &&
+		 p_id->flow.ipv == AF_INET6)
+		err = parse_icmp6_identifier(ctx, &saddr->port, &daddr->port,
+					     fei, &p_id->identifier);
+	else if (p_id->flow.proto == IPPROTO_ICMP && p_id->flow.ipv == AF_INET)
+		err = parse_icmp_identifier(ctx, &saddr->port, &daddr->port,
+					    fei, &p_id->identifier);
+	else
+		return -1; // No matching protocol
+	if (err)
+		return -1; // Failed parsing protocol
 
 	// Sucessfully parsed packet identifier - fill in IP-addresses and return
 	if (p_id->flow.ipv == AF_INET) {
@@ -266,7 +332,7 @@ static void fill_flow_event(struct flow_event *fe, __u64 timestamp,
 {
 	fe->event_type = EVENT_TYPE_FLOW;
 	fe->timestamp = timestamp;
-	__builtin_memcpy(&fe->flow, flow, sizeof(struct network_tuple));
+	fe->flow = *flow;
 	fe->source = source;
 	fe->reserved = 0; // Make sure it's initilized
 }
@@ -402,7 +468,7 @@ int pping_ingress(struct xdp_md *ctx)
 	re.rec_bytes = f_state->rec_bytes;
 
 	// Push event to perf-buffer
-	__builtin_memcpy(&re.flow, &p_id.flow, sizeof(struct network_tuple));
+	re.flow = p_id.flow;
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
 
 validflow_out:
