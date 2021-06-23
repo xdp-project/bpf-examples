@@ -65,6 +65,8 @@ struct map_cleanup_args {
 // Store configuration values in struct to easily pass around
 struct pping_config {
 	struct bpf_config bpf_config;
+	struct bpf_tc_opts tc_ingress_opts;
+	struct bpf_tc_opts tc_egress_opts;
 	__u64 cleanup_interval;
 	char *object_path;
 	char *ingress_sec;
@@ -91,6 +93,7 @@ static const struct option long_options[] = {
 	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
+	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
 	{ 0, 0, NULL, 0 }
 };
 
@@ -145,7 +148,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	config->json_format = false;
 	config->ppviz_format = false;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:I:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -189,6 +192,16 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				config->ppviz_format = true;
 			} else if (strcmp(optarg, "standard") != 0) {
 				fprintf(stderr, "format must be \"standard\", \"json\" or \"ppviz\"\n");
+				return -EINVAL;
+			}
+			break;
+		case 'I':
+			if (strcmp(optarg, "xdp") == 0) {
+				config->ingress_sec = SEC_INGRESS_XDP;
+			} else if (strcmp(optarg, "tc") == 0) {
+				config->ingress_sec = SEC_INGRESS_TC;
+			} else {
+				fprintf(stderr, "ingress-hook must be \"xdp\" or \"tc\"\n");
 				return -EINVAL;
 			}
 			break;
@@ -657,8 +670,7 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 }
 
 static int load_attach_bpfprogs(struct bpf_object **obj,
-				struct pping_config *config,
-				struct bpf_tc_opts *tc_opts)
+				struct pping_config *config)
 {
 	int err, detach_err;
 
@@ -686,31 +698,35 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		return err;
 	}
 
-	// Attach tc prog
+	// Attach egress prog
 	err = tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
-			config->egress_sec, tc_opts);
+			config->egress_sec, &config->tc_egress_opts);
 	if (err) {
 		fprintf(stderr,
-			"Failed attaching tc program on interface %s: %s\n",
+			"Failed attaching egress BPF program on interface %s: %s\n",
 			config->ifname, strerror(-err));
 		return err;
 	}
 
-	// Attach xdp prog
-	err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
-			 config->xdp_flags, config->force);
+	// Attach ingress prog
+	if (strcmp(config->ingress_sec, SEC_INGRESS_XDP) == 0)
+		err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
+				 config->xdp_flags, config->force);
+	else
+		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
+				config->ingress_sec, &config->tc_ingress_opts);
 	if (err) {
-		fprintf(stderr, "Failed attaching XDP program to %s%s: %s\n",
-			config->ifname,
-			config->force ? "" : ", ensure no XDP program is already running on interface",
-			strerror(-err));
-		goto err_xdp;
+		fprintf(stderr,
+			"Failed attaching ingress BPF program on interface %s: %s\n",
+			config->ifname, strerror(-err));
+		goto ingress_err;
 	}
 
 	return 0;
 
-err_xdp:
-	detach_err = tc_detach(config->ifindex, BPF_TC_EGRESS, tc_opts);
+ingress_err:
+	detach_err = tc_detach(config->ifindex, BPF_TC_EGRESS,
+			       &config->tc_egress_opts);
 	if (detach_err)
 		fprintf(stderr, "Failed detaching tc program from %s: %s\n",
 			config->ifname, strerror(-detach_err));
@@ -764,19 +780,23 @@ int main(int argc, char *argv[])
 		.lost_cb = handle_missed_rtt_event,
 	};
 
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_ingress_opts);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_egress_opts);
+
 	struct pping_config config = {
 		.bpf_config = { .rate_limit = 100 * NS_PER_MS },
 		.cleanup_interval = 1 * NS_PER_SECOND,
 		.object_path = "pping_kern.o",
-		.ingress_sec = INGRESS_PROG_SEC,
-		.egress_sec = EGRESS_PROG_SEC,
+		.ingress_sec = SEC_INGRESS_XDP,
+		.egress_sec = SEC_EGRESS_TC,
 		.packet_map = "packet_ts",
 		.flow_map = "flow_state",
 		.event_map = "events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
+		.tc_ingress_opts = tc_ingress_opts,
+		.tc_egress_opts = tc_egress_opts,
 	};
 
-	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts); // Need to keep track of where tc prog was attached
 	print_event_func = print_event_standard;
 
 	// Detect if running as root
@@ -809,7 +829,7 @@ int main(int argc, char *argv[])
 		print_event_func = print_event_ppviz;
 	}
 
-	err = load_attach_bpfprogs(&obj, &config, &tc_opts);
+	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
@@ -858,16 +878,21 @@ int main(int argc, char *argv[])
 	perf_buffer__free(pb);
 
 cleanup_attached_progs:
-	detach_err = tc_detach(config.ifindex, BPF_TC_EGRESS, &tc_opts);
+	detach_err = tc_detach(config.ifindex, BPF_TC_EGRESS,
+			       &config.tc_egress_opts);
 	if (detach_err)
 		fprintf(stderr,
-			"Failed removing tc program from interface %s: %s\n",
+			"Failed removing egress program from interface %s: %s\n",
 			config.ifname, strerror(-detach_err));
 
-	detach_err = xdp_detach(config.ifindex, config.xdp_flags);
+	if (strcmp(config.ingress_sec, SEC_INGRESS_XDP) == 0)
+		detach_err = xdp_detach(config.ifindex, config.xdp_flags);
+	else
+		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
+				       &config.tc_ingress_opts);
 	if (detach_err)
 		fprintf(stderr,
-			"Failed removing xdp program from interface %s: %s\n",
+			"Failed removing ingress program from interface %s: %s\n",
 			config.ifname, strerror(-detach_err));
 
 	return (err != 0 && keep_running) || detach_err != 0;
