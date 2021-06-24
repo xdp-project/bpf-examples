@@ -35,11 +35,13 @@ SEC("kprobe/udp_send_skb")
 int BPF_KPROBE(udp_send_skb, struct sk_buff *skb)
 //int udp_send_skb(struct pt_regs *ctx)
 {
+	unsigned int len;
 	__u32 h;
 
-	BPF_CORE_READ_INTO(&h, skb, hash); /* skb->hash */
+	BPF_CORE_READ_INTO(&h,    skb, hash);		/* skb->hash */
+	BPF_CORE_READ_INTO(&len,  skb, len);		/* skb->len */
 
-	bpf_printk("skb->hash = 0x%x ", h);
+	bpf_printk("skb->hash=0x%x len=%d", h, len);
 
 	return 0;
 }
