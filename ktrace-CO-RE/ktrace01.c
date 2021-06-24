@@ -72,6 +72,7 @@ int main(int argc, char **argv)
 		err = -ENOENT;
 		goto out;
 	}
+	printf("Loaded BPF file %s\n", filename);
 
 	link = bpf_program__attach(prog);
 	err = libbpf_get_error(link);
@@ -81,25 +82,10 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	printf("Loaded BPF file %s\n", filename);
-	printf( "Press any key + enter to unload program again [Y/y]:");
-	//c = getchar();
-	//putchar(c);
-
+	printf("Attached and reading trace_pipe\n");
+	printf(" - Press Ctrl-C to unload program again\n");
 	read_trace_pipe();
 
-	// snprintf(pin_file, sizeof(pin_file), "/sys/fs/bpf/%s", argv[0]);
-	/*
-	pin_file = "/sys/fs/bpf/ktrace01";
-	err = bpf_link__pin(link, pin_file);
-	printf("pin_file %s\n", pin_file);
-	if (err) {
-		libbpf_strerror(err, buf, sizeof(buf));
-		pr_err("Error(%d) pinning: %s\n", err, buf);
-		goto out;
-	}
-	printf("Loaded BPF file %s (pinned at %s)\n", filename, pin_file);
-	*/
 out:
 	bpf_link__destroy(link);
 	bpf_object__close(obj);
