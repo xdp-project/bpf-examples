@@ -3,7 +3,7 @@
 USER_TARGETS   := pping
 BPF_TARGETS    := pping_kern
 
-LDFLAGS    += -pthread
+LDLIBS     += -pthread
 EXTRA_DEPS += pping.h
 
 LIB_DIR = ../lib

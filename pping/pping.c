@@ -23,6 +23,7 @@ static const char *__doc__ =
 #include <time.h>
 #include <pthread.h>
 
+#include "json_writer.h"
 #include "pping.h" //common structs for user-space and BPF parts
 
 #define NS_PER_SECOND 1000000000UL
@@ -39,6 +40,9 @@ static const char *__doc__ =
 #define PERF_POLL_TIMEOUT_MS 100
 
 #define MAX_PATH_LEN 1024
+
+#define MON_TO_REAL_UPDATE_FREQ                                                \
+	(1 * NS_PER_SECOND) // Update offset between CLOCK_MONOTONIC and CLOCK_REALTIME once per second
 
 /* 
  * BPF implementation of pping using libbpf
@@ -64,20 +68,24 @@ struct map_cleanup_args {
 struct pping_config {
 	struct bpf_config bpf_config;
 	__u64 cleanup_interval;
-	int xdp_flags;
-	int ifindex;
-	char ifname[IF_NAMESIZE];
-	bool force;
 	char *object_path;
 	char *ingress_sec;
 	char *egress_sec;
 	char *pin_dir;
 	char *packet_map;
 	char *flow_map;
-	char *rtt_map;
+	char *event_map;
+	int xdp_flags;
+	int ifindex;
+	char ifname[IF_NAMESIZE];
+	bool json_format;
+	bool ppviz_format;
+	bool force;
 };
 
 static volatile int keep_running = 1;
+static json_writer_t *json_ctx = NULL;
+static void (*print_event_func)(void *, int, void *, __u32) = NULL;
 
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
@@ -85,6 +93,7 @@ static const struct option long_options[] = {
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
 	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
+	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ 0, 0, NULL, 0 }
 };
 
@@ -135,8 +144,11 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	double rate_limit_ms, cleanup_interval_s;
 
 	config->ifindex = 0;
+	config->force = false;
+	config->json_format = false;
+	config->ppviz_format = false;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:c:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -172,6 +184,16 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 			config->cleanup_interval =
 				cleanup_interval_s * NS_PER_SECOND;
+			break;
+		case 'F':
+			if (strcmp(optarg, "json") == 0) {
+				config->json_format = true;
+			} else if (strcmp(optarg, "ppviz") == 0) {
+				config->ppviz_format = true;
+			} else if (strcmp(optarg, "standard") != 0) {
+				fprintf(stderr, "format must be \"standard\", \"json\" or \"ppviz\"\n");
+				return -EINVAL;
+			}
 			break;
 		case 'f':
 			config->force = true;
@@ -336,16 +358,16 @@ static int tc_bpf_clear(char *interface)
  * Returns time of CLOCK_MONOTONIC as nanoseconds in a single __u64.
  * On failure, the value 0 is returned (and errno will be set).
  */
-static __u64 get_time_ns(void)
+static __u64 get_time_ns(clockid_t clockid)
 {
 	struct timespec t;
-	if (clock_gettime(CLOCK_MONOTONIC, &t) != 0)
+	if (clock_gettime(clockid, &t) != 0)
 		return 0;
 
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
-static bool packet_ts_timeout(void *val_ptr, __u64 now)
+static bool packet_ts_timeout(void *key_ptr, void *val_ptr, __u64 now)
 {
 	__u64 ts = *(__u64 *)val_ptr;
 	if (now > ts && now - ts > TIMESTAMP_LIFETIME)
@@ -353,11 +375,23 @@ static bool packet_ts_timeout(void *val_ptr, __u64 now)
 	return false;
 }
 
-static bool flow_timeout(void *val_ptr, __u64 now)
+static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 {
+	struct flow_event fe;
 	__u64 ts = ((struct flow_state *)val_ptr)->last_timestamp;
-	if (now > ts && now - ts > FLOW_LIFETIME)
+
+	if (now > ts && now - ts > FLOW_LIFETIME) {
+		if (print_event_func) {
+			fe.event_type = EVENT_TYPE_FLOW;
+			fe.timestamp = now;
+			memcpy(&fe.flow, key_ptr, sizeof(struct network_tuple));
+			fe.event_info.event = FLOW_EVENT_CLOSING;
+			fe.event_info.reason = EVENT_REASON_FLOW_TIMEOUT;
+			fe.source = EVENT_SOURCE_USERSPACE;
+			print_event_func(NULL, 0, &fe, sizeof(fe));
+		}
 		return true;
+	}
 	return false;
 }
 
@@ -369,12 +403,12 @@ static bool flow_timeout(void *val_ptr, __u64 now)
  */
 //TODO - maybe add some pointer to arguments for del_decision_func?
 static int clean_map(int map_fd, size_t key_size, size_t value_size,
-		     bool (*del_decision_func)(void *, __u64))
+		     bool (*del_decision_func)(void *, void *, __u64))
 {
 	int removed = 0;
 	void *key, *prev_key, *value;
 	bool delete_prev = false;
-	__u64 now_nsec = get_time_ns();
+	__u64 now_nsec = get_time_ns(CLOCK_MONOTONIC);
 
 #ifdef DEBUG
 	int entries = 0;
@@ -401,7 +435,7 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 		}
 
 		if (bpf_map_lookup_elem(map_fd, key, value) == 0)
-			delete_prev = del_decision_func(value, now_nsec);
+			delete_prev = del_decision_func(key, value, now_nsec);
 #ifdef DEBUG
 		entries++;
 #endif
@@ -412,10 +446,11 @@ static int clean_map(int map_fd, size_t key_size, size_t value_size,
 		removed++;
 	}
 #ifdef DEBUG
-	duration = get_time_ns() - now_nsec;
-	printf("%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
-	       map_fd, entries, removed, duration / NS_PER_SECOND,
-	       duration % NS_PER_SECOND);
+	duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
+	fprintf(stderr,
+		"%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
+		map_fd, entries, removed, duration / NS_PER_SECOND,
+		duration % NS_PER_SECOND);
 #endif
 cleanup:
 	free(key);
@@ -441,12 +476,33 @@ static void *periodic_map_cleanup(void *args)
 	pthread_exit(NULL);
 }
 
+static __u64 convert_monotonic_to_realtime(__u64 monotonic_time)
+{
+	static __u64 offset = 0;
+	static __u64 offset_updated = 0;
+	__u64 now_mon = get_time_ns(CLOCK_MONOTONIC);
+	__u64 now_rt;
+
+	if (offset == 0 ||
+	    (now_mon > offset_updated &&
+	     now_mon - offset_updated > MON_TO_REAL_UPDATE_FREQ)) {
+		now_mon = get_time_ns(CLOCK_MONOTONIC);
+		now_rt = get_time_ns(CLOCK_REALTIME);
+
+		if (now_rt < now_mon)
+			return 0;
+		offset = now_rt - now_mon;
+		offset_updated = now_mon;
+	}
+	return monotonic_time + offset;
+}
+
 /*
  * Wrapper around inet_ntop designed to handle the "bug" that mapped IPv4
  * addresses are formated as IPv6 addresses for AF_INET6
  */
-static int format_ip_address(int af, const struct in6_addr *addr, char *buf,
-			     size_t size)
+static int format_ip_address(char *buf, size_t size, int af,
+			     const struct in6_addr *addr)
 {
 	if (af == AF_INET)
 		return inet_ntop(af, &addr->s6_addr[12],
@@ -456,18 +512,193 @@ static int format_ip_address(int af, const struct in6_addr *addr, char *buf,
 	return -EINVAL;
 }
 
-static void handle_rtt_event(void *ctx, int cpu, void *data, __u32 data_size)
+static const char *proto_to_str(__u16 proto)
 {
-	const struct rtt_event *e = data;
+	static char buf[8];
+
+	switch (proto) {
+	case IPPROTO_TCP:
+		return "TCP";
+	case IPPROTO_ICMP:
+		return "ICMP";
+	case IPPROTO_ICMPV6:
+		return "ICMPv6";
+	default:
+		snprintf(buf, sizeof(buf), "%d", proto);
+		return buf;
+	}
+}
+
+static const char *flowevent_to_str(enum flow_event_type fe)
+{
+	switch (fe) {
+	case FLOW_EVENT_NONE:
+		return "none";
+	case FLOW_EVENT_OPENING:
+		return "opening";
+	case FLOW_EVENT_CLOSING:
+		return "closing";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *eventreason_to_str(enum flow_event_reason er)
+{
+	switch (er) {
+	case EVENT_REASON_SYN:
+		return "SYN";
+	case EVENT_REASON_SYN_ACK:
+		return "SYN-ACK";
+	case EVENT_REASON_FIRST_OBS_PCKT:
+		return "first observed packet";
+	case EVENT_REASON_FIN:
+		return "FIN";
+	case EVENT_REASON_FIN_ACK:
+		return "FIN-ACK";
+	case EVENT_REASON_RST:
+		return "RST";
+	case EVENT_REASON_FLOW_TIMEOUT:
+		return "flow timeout";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *eventsource_to_str(enum flow_event_source es)
+{
+	switch (es) {
+	case EVENT_SOURCE_EGRESS:
+		return "src";
+	case EVENT_SOURCE_INGRESS:
+		return "dest";
+	case EVENT_SOURCE_USERSPACE:
+		return "userspace-cleanup";
+	default:
+		return "unknown";
+	}
+}
+
+static void print_flow_ppvizformat(FILE *stream, const struct network_tuple *flow)
+{
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
 
-	format_ip_address(e->flow.ipv, &e->flow.saddr.ip, saddr, sizeof(saddr));
-	format_ip_address(e->flow.ipv, &e->flow.daddr.ip, daddr, sizeof(daddr));
+	format_ip_address(saddr, sizeof(saddr), flow->ipv, &flow->saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), flow->ipv, &flow->daddr.ip);
+	fprintf(stream, "%s:%d+%s:%d", saddr, ntohs(flow->saddr.port), daddr,
+		ntohs(flow->daddr.port));
+}
 
-	printf("%llu.%06llu ms %s:%d+%s:%d\n", e->rtt / NS_PER_MS,
-	       e->rtt % NS_PER_MS, saddr, ntohs(e->flow.saddr.port), daddr,
-	       ntohs(e->flow.daddr.port));
+static void print_ns_datetime(FILE *stream, __u64 monotonic_ns)
+{
+	char timestr[9];
+	__u64 ts = convert_monotonic_to_realtime(monotonic_ns);
+	time_t ts_s = ts / NS_PER_SECOND;
+
+	strftime(timestr, sizeof(timestr), "%H:%M:%S", localtime(&ts_s));
+	fprintf(stream, "%s.%09llu", timestr, ts % NS_PER_SECOND);
+}
+
+static void print_event_standard(void *ctx, int cpu, void *data,
+				 __u32 data_size)
+{
+	const union pping_event *e = data;
+
+	if (e->event_type == EVENT_TYPE_RTT) {
+		print_ns_datetime(stdout, e->rtt_event.timestamp);
+		printf(" %llu.%06llu ms %llu.%06llu ms ",
+		       e->rtt_event.rtt / NS_PER_MS,
+		       e->rtt_event.rtt % NS_PER_MS,
+		       e->rtt_event.min_rtt / NS_PER_MS,
+		       e->rtt_event.min_rtt % NS_PER_MS);
+		print_flow_ppvizformat(stdout, &e->rtt_event.flow);
+		printf("\n");
+	} else if (e->event_type == EVENT_TYPE_FLOW) {
+		print_ns_datetime(stdout, e->flow_event.timestamp);
+		printf(" ");
+		print_flow_ppvizformat(stdout, &e->flow_event.flow);
+		printf(" %s due to %s from %s\n",
+		       flowevent_to_str(e->flow_event.event_info.event),
+		       eventreason_to_str(e->flow_event.event_info.reason),
+		       eventsource_to_str(e->flow_event.source));
+	}
+}
+
+static void print_event_ppviz(void *ctx, int cpu, void *data, __u32 data_size)
+{
+	const struct rtt_event *e = data;
+	__u64 time = convert_monotonic_to_realtime(e->timestamp);
+
+	if (e->event_type != EVENT_TYPE_RTT)
+		return;
+
+	printf("%llu.%09llu %llu.%09llu %llu.%09llu ", time / NS_PER_SECOND,
+	       time % NS_PER_SECOND, e->rtt / NS_PER_SECOND,
+	       e->rtt % NS_PER_SECOND, e->min_rtt / NS_PER_SECOND, e->min_rtt);
+	print_flow_ppvizformat(stdout, &e->flow);
+	printf("\n");
+}
+
+static void print_common_fields_json(json_writer_t *ctx,
+				     const union pping_event *e)
+{
+	const struct network_tuple *flow = &e->rtt_event.flow;
+	char saddr[INET6_ADDRSTRLEN];
+	char daddr[INET6_ADDRSTRLEN];
+
+	format_ip_address(saddr, sizeof(saddr), flow->ipv, &flow->saddr.ip);
+	format_ip_address(daddr, sizeof(daddr), flow->ipv, &flow->daddr.ip);
+
+	jsonw_u64_field(ctx, "timestamp",
+			convert_monotonic_to_realtime(e->rtt_event.timestamp));
+	jsonw_string_field(ctx, "src_ip", saddr);
+	jsonw_hu_field(ctx, "src_port", ntohs(flow->saddr.port));
+	jsonw_string_field(ctx, "dest_ip", daddr);
+	jsonw_hu_field(ctx, "dest_port", ntohs(flow->daddr.port));
+	jsonw_string_field(ctx, "protocol", proto_to_str(flow->proto));
+}
+
+static void print_rttevent_fields_json(json_writer_t *ctx,
+				       const struct rtt_event *re)
+{
+	jsonw_u64_field(ctx, "rtt", re->rtt);
+	jsonw_u64_field(ctx, "min_rtt", re->min_rtt);
+	jsonw_u64_field(ctx, "sent_packets", re->sent_pkts);
+	jsonw_u64_field(ctx, "sent_bytes", re->sent_bytes);
+	jsonw_u64_field(ctx, "rec_packets", re->rec_pkts);
+	jsonw_u64_field(ctx, "rec_bytes", re->rec_bytes);
+}
+
+static void print_flowevent_fields_json(json_writer_t *ctx,
+					const struct flow_event *fe)
+{
+	jsonw_string_field(ctx, "flow_event",
+			   flowevent_to_str(fe->event_info.event));
+	jsonw_string_field(ctx, "reason",
+			   eventreason_to_str(fe->event_info.reason));
+	jsonw_string_field(ctx, "triggered_by", eventsource_to_str(fe->source));
+}
+
+static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
+{
+	const union pping_event *e = data;
+
+	if (e->event_type != EVENT_TYPE_RTT && e->event_type != EVENT_TYPE_FLOW)
+		return;
+
+	if (!json_ctx) {
+		json_ctx = jsonw_new(stdout);
+		jsonw_start_array(json_ctx);
+	}
+
+	jsonw_start_object(json_ctx);
+	print_common_fields_json(json_ctx, e);
+	if (e->event_type == EVENT_TYPE_RTT)
+		print_rttevent_fields_json(json_ctx, &e->rtt_event);
+	else // flow-event
+		print_flowevent_fields_json(json_ctx, &e->flow_event);
+	jsonw_end_object(json_ctx);
 }
 
 static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
@@ -593,16 +824,17 @@ int main(int argc, char *argv[])
 		.pin_dir = "/sys/fs/bpf/pping",
 		.packet_map = "packet_ts",
 		.flow_map = "flow_state",
-		.rtt_map = "rtt_events",
+		.event_map = "events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
-		.force = false,
 	};
 
 	struct perf_buffer *pb = NULL;
 	struct perf_buffer_opts pb_opts = {
-		.sample_cb = handle_rtt_event,
+		.sample_cb = print_event_standard,
 		.lost_cb = handle_missed_rtt_event,
 	};
+
+	print_event_func = print_event_standard;
 
 	// Detect if running as root
 	if (geteuid() != 0) {
@@ -626,6 +858,14 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	if (config.json_format) {
+		pb_opts.sample_cb = print_event_json;
+		print_event_func = print_event_json;
+	} else if (config.ppviz_format) {
+		pb_opts.sample_cb = print_event_ppviz;
+		print_event_func = print_event_ppviz;
+	}
+
 	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
 	if (err) {
 		fprintf(stderr,
@@ -643,13 +883,13 @@ int main(int argc, char *argv[])
 
 	// Set up perf buffer
 	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
-							      config.rtt_map),
+							      config.event_map),
 			      PERF_BUFFER_PAGES, &pb_opts);
 	err = libbpf_get_error(pb);
 	if (err) {
 		pb = NULL;
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
-			config.rtt_map, strerror(err));
+			config.event_map, strerror(err));
 		goto cleanup;
 	}
 
@@ -693,6 +933,11 @@ cleanup:
 			fprintf(stderr,
 				"Failed unpinning tc program from %s: %s\n",
 				config.pin_dir, strerror(-err));
+	}
+
+	if (config.json_format && json_ctx) {
+		jsonw_end_array(json_ctx);
+		jsonw_destroy(&json_ctx);
 	}
 
 	return err != 0;

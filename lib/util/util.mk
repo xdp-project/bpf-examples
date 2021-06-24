@@ -1,2 +1,2 @@
 # list of objects in this directory
-UTIL_OBJS :=
+UTIL_OBJS := json_writer.o

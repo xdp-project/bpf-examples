@@ -4,9 +4,36 @@
 
 #include <linux/types.h>
 #include <linux/in6.h>
+#include <stdbool.h>
 
 #define INGRESS_PROG_SEC "xdp"
 #define EGRESS_PROG_SEC "classifier"
+
+/* For the event_type members of rtt_event and flow_event */
+#define EVENT_TYPE_FLOW 1
+#define EVENT_TYPE_RTT 2
+
+enum __attribute__((__packed__)) flow_event_type {
+	FLOW_EVENT_NONE,
+	FLOW_EVENT_OPENING,
+	FLOW_EVENT_CLOSING
+};
+
+enum __attribute__((__packed__)) flow_event_reason {
+	EVENT_REASON_SYN,
+	EVENT_REASON_SYN_ACK,
+	EVENT_REASON_FIRST_OBS_PCKT,
+	EVENT_REASON_FIN,
+	EVENT_REASON_FIN_ACK,
+	EVENT_REASON_RST,
+	EVENT_REASON_FLOW_TIMEOUT
+};
+
+enum __attribute__((__packed__)) flow_event_source {
+	EVENT_SOURCE_EGRESS,
+	EVENT_SOURCE_INGRESS,
+	EVENT_SOURCE_USERSPACE
+};
 
 struct bpf_config {
 	__u64 rate_limit;
@@ -39,7 +66,12 @@ struct network_tuple {
 };
 
 struct flow_state {
+	__u64 min_rtt;
 	__u64 last_timestamp;
+	__u64 sent_pkts;
+	__u64 sent_bytes;
+	__u64 rec_pkts;
+	__u64 rec_bytes;
 	__u32 last_id;
 	__u32 reserved;
 };
@@ -49,10 +81,52 @@ struct packet_id {
 	__u32 identifier; //tsval for TCP packets
 };
 
+/*
+ * An RTT event message that can be passed from the bpf-programs to user-space.
+ * The initial event_type memeber is used to allow multiplexing between
+ * different event types in a single perf buffer. Memebers up to and including
+ * flow are identical to other event types.
+ * Uses explicit padding instead of packing based on recommendations in cilium's
+ * BPF reference documentation at https://docs.cilium.io/en/stable/bpf/#llvm.
+ */
 struct rtt_event {
-	__u64 rtt;
+	__u64 event_type;
+	__u64 timestamp;
 	struct network_tuple flow;
+	__u32 padding;
+	__u64 rtt;
+	__u64 min_rtt;
+	__u64 sent_pkts;
+	__u64 sent_bytes;
+	__u64 rec_pkts;
+	__u64 rec_bytes;
 	__u32 reserved;
+};
+
+struct flow_event_info {
+	enum flow_event_type event;
+	enum flow_event_reason reason;
+};
+
+/*
+ * A flow event message that can be passed from the bpf-programs to user-space.
+ * The initial event_type memeber is used to allow multiplexing between
+ * different event types in a single perf buffer. Memebers up to and including
+ * flow are identical to other event types.
+ */
+struct flow_event {
+	__u64 event_type;
+	__u64 timestamp;
+	struct network_tuple flow;
+	struct flow_event_info event_info;
+	enum flow_event_source source;
+	__u8 reserved;
+};
+
+union pping_event {
+	__u64 event_type;
+	struct rtt_event rtt_event;
+	struct flow_event flow_event;
 };
 
 #endif
