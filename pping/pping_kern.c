@@ -488,7 +488,7 @@ int pping_tc_egress(struct __sk_buff *skb)
 
 	pping_egress(skb, &pctx);
 
-	return TC_ACT_OK;
+	return TC_ACT_UNSPEC;
 }
 
 // Ingress path using TC-BPF
@@ -505,7 +505,7 @@ int pping_tc_ingress(struct __sk_buff *skb)
 
 	pping_ingress(skb, &pctx);
 
-	return TC_ACT_OK;
+	return TC_ACT_UNSPEC;
 }
 
 // Ingress path using XDP
