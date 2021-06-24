@@ -1,0 +1,70 @@
+#+Title: Example using CO-RE to access ktrace
+
+This is an example that show how CO-RE came be utilised...
+to learn CO-RE and BTF better.
+
+* Compiling kprobes for different CPU architectures
+
+When BPF-tracing =kprobes= then the header files need to use the correct
+asm-level C-calling convention for the architecture that this is getting
+compiled for, as BPF will be hook/tap directly into the kernels function
+call. These are the raw CPU registers, which we later via BTF demonstrate
+howto use to CO-RE to get the C-type back.
+
+The header include file =<bpf/bpf_tracing.h>= takes care of defining macros
+for accessing the members in kernels =struct pt_regs=, as the struct member
+names differ between architectures. This header file is provided by [[https://github.com/libbpf/libbpf][libbpf]]
+(or distros libbpf-devel package).
+
+The architecture specific definition of =struct pt_regs= can be extracted
+via generating a vmlinux.h file on the ARCH target. To ease getting the
+structs this git repo contains the arch include files here:
+[[file:../headers/vmlinux/arch/]]
+
+You should not include them directly, but instead include [[file:../headers/vmlinux_local.h][vmlinux_local.h]] to
+get the surrounding types defined.
+
+** Gotcha with target bpf
+
+This git-repo compile with clang =-target bpf=. This cause issues for
+=ktrace=, because the fallback mechanism in header file
+=<bpf/bpf_tracing.h>= cannot determine the ARCH from compiler defines.
+
+To solve this our makefile system in [[file:../lib/common.mk]] detect the ARCH
+(via =uname -m=) and defines the =__TARGET_ARCH_$(ARCH)= in =BPF_CFLAGS=.
+
+Without this fix the following compile warnings occurs:
+#+begin_example
+ warning: implicit declaration of function 'PT_REGS_PARM1' is invalid in C99
+ int BPF_KPROBE(udp_send_skb, struct sk_buff *skb)
+     ^
+ /usr/include/bpf/bpf_tracing.h:385:20: note: expanded from macro 'BPF_KPROBE'
+#+end_example
+
+When loading via libbpf the following error happens:
+#+begin_example
+ libbpf: failed to find BTF for extern 'PT_REGS_PARM1': -2
+#+end_example
+
+* Bpftrace
+
+Pre-investigations with bpftrace.
+
+Simple =bpftrace= command to look at callstack for =udp_send_skb=:
+ - bpftrace -e 'kprobe:udp_send_skb { @[kstack] = count() }'
+
+#+begin_src sh
+$ sudo bpftrace -e 'kprobe:udp_send_skb { @[kstack] = count() }'
+Attaching 1 probe...
+^C
+
+@[
+    udp_send_skb+1
+    udp_sendmsg+2407
+    sock_sendmsg+87
+    __sys_sendto+238
+    __x64_sys_sendto+37
+    do_syscall_64+51
+    entry_SYSCALL_64_after_hwframe+68
+]: 70
+#+end_src
