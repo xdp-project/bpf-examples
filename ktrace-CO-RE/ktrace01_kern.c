@@ -50,12 +50,16 @@ int BPF_KPROBE(udp_send_skb, struct sk_buff___local *skb)
 //int udp_send_skb(struct pt_regs *ctx)
 {
 	unsigned int len;
+	__u32 id;
 	__u32 h;
+
+	/* Find the kernels BTF_ID for struct sk_buff */
+	id = bpf_core_type_id_kernel(struct sk_buff___local);
 
 	BPF_CORE_READ_INTO(&h,    skb, hash);		/* skb->hash */
 	BPF_CORE_READ_INTO(&len,  skb, len);		/* skb->len */
 
-	bpf_printk("skb->hash=0x%x len=%d", h, len);
+	bpf_printk("skb->hash=0x%x len=%d btf_id(skb)=%d", h, len, id);
 
 	return 0;
 }
