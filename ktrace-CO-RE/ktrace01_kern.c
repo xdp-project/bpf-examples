@@ -31,8 +31,22 @@ struct trace_event_raw_bpf_trace_printk___x {};
  })
 /* Gotcha: bpf_core_type_exists() needs __builtin_preserve_type_info */
 
+/* Example of using triple-underscore and preserve_access_index
+ * --------------------------------------------------------------------------
+ * This demonstrates how it is possible define a local struct that shadow the
+ * real kernel struct sk_buff. But only defining the members that the program
+ * are interested in. The CO-RE infra-structure will remap the member offsets to
+ * the correct offsets used by the kernel. This require adding the LLVM
+ * attribute "preserve_access_index". Notice the triple-underscore after the
+ * real struct name, which libbpf match and adjust prior to BPF-loading.
+ */
+struct sk_buff___local {
+	unsigned int len;
+	__u32 hash;
+} __attribute__((preserve_access_index));
+
 SEC("kprobe/udp_send_skb")
-int BPF_KPROBE(udp_send_skb, struct sk_buff *skb)
+int BPF_KPROBE(udp_send_skb, struct sk_buff___local *skb)
 //int udp_send_skb(struct pt_regs *ctx)
 {
 	unsigned int len;
