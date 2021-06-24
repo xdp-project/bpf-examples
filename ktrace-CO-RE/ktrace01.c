@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <getopt.h>
 
 #define pr_err(fmt, ...) \
 	fprintf(stderr, "%s:%d - " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
@@ -36,20 +37,44 @@ void read_trace_pipe(void)
 	}
 }
 
+int print_all_levels(enum libbpf_print_level level,
+		     const char *format, va_list args)
+{
+	return vfprintf(stderr, format, args);
+}
+
+static const struct option long_options[] = {
+	{ "debug",	no_argument,	NULL,	'd' },
+	{ 0, 0, NULL, 0 }
+};
 
 int main(int argc, char **argv)
 {
 	struct bpf_object *obj = NULL;
 	struct bpf_link *link = NULL;
 	struct bpf_program *prog;
+	int opt, longindex = 0;
 	char filename[256];
-	//char pin_file[256];
-	// char *pin_file;
 	char buf[100];
 	int err;
-//	int c;
 
 	snprintf(filename, sizeof(filename), "%s_kern.o", argv[0]);
+
+	/* Parse commands line args */
+	while ((opt = getopt_long(argc, argv, "d",
+				  long_options, &longindex)) != -1) {
+		switch (opt) {
+		case 'd':
+			libbpf_set_print(print_all_levels);
+			// verifier_logs = true;
+			break;
+		default:
+			pr_err("Unrecognized option '%s'\n", argv[optind - 1]);
+			return EXIT_FAILURE;
+		}
+	}
+	argc -= optind;
+	argv += optind;
 
 	obj = bpf_object__open_file(filename, NULL);
 	err = libbpf_get_error(obj);
