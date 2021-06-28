@@ -256,6 +256,9 @@ apparently be challenging. Suggestions for packet generators:
 Javid has granted me access to 3 VMs I can use to do the performance test(s).
 
 Current VM specifications:
+
+| Part | Name |
+|---|:---|
 | OS | Ubuntu server 20.04.02 |
 | Kernel | 5.4.0-74-generic |
 | CPU | 4 x Intel(R) Xeon(R) CPU E5-2630 v3 @ 2.40GHz |
@@ -269,6 +272,7 @@ like. If they all run on the same machine or not, and to what degree they may or
 may not share resources with other VMs.
 
 I have tried to set up the machines in the following way:
+
 ![VM-setup](./perf_test_setup.png)
 
 As I have no idea what I'm doing, here's the possibly stupid way I did it.
@@ -386,17 +390,28 @@ evenly distributed. Around 10-15% CPU is now spent in userspace processing,
 which interestingly enough seems to be distributed across the cores. I guess
 this is simply due to task switching as mpstat only gives one value per second,
 and the userspace pping process should only use two threads (one for printing
-out the RTT messages, and one for cleaning the map). The timestamp map now fills
-with around 3000 entries, which is somewhat worrying considering it's only for
-10 flows (many timestamps likely never matched due to retransmissions, delayed
-ACKs etc, and have to be deleted by userspace).
+out the RTT messages, and one for cleaning the map). Additionally, around 18-24%
+of CPU is spent in kernelspace processing (not software interrupts), evenly
+distributed on all the cores.
+
+The timestamp map now fills with around 3000 entries, which is somewhat worrying
+considering it's only for 10 flows (many timestamps likely never matched due to
+retransmissions, delayed ACKs etc, and have to be deleted by userspace, although
+"only" 300-500 entries per second are deleted from userspace). If userspace
+map-cleaning is disabled (simply achieved by setting a long cleanup interval),
+then the 16k timestamp entries were filled up in about 42 seconds, and when the
+map was full (so no more RTTs could be reported), the CPU load dropped back to
+just 16-20% again, with no userspace or kernelspace load (just software
+interrupts). This seems to indicate that the considerable CPU load is either
+caused by pushing the reported RTTs through the perf-buffer and then printing
+them out, or from creating and deleting the timestamp entries (or both).
 
 Running the traffic the other direction (sending data from VM-3 to VM-1) is also
 very problematic for eBPF pping. While my eBPF pping doesn't end up reporting
 any RTTs (other than the one from the initial SYN handshake), it cripples the
 throughput, decreasing it to around 5 Gbit/s. This seems to mainly be an effect
-of XDP disabling GRO, as even when only loading a minimal XDP program the
-performance is similar.
+of XDP disabling GRO, as even when only loading a minimal XDP program (see
+below) the performance is similar.
 
 ```c
 #include <linux/bpf.h>
