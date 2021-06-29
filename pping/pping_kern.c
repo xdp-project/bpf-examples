@@ -324,6 +324,33 @@ static __u32 remaining_pkt_payload(struct parsing_context *ctx)
 }
 
 /*
+ * Calculate a smooted rtt similar to how TCP stack does it in
+ * net/ipv4/tcp_input.c/tcp_rtt_estimator().
+ *
+ * NOTE: Will cause roundoff errors, but if RTTs > 1000ns errors should be small
+ */
+static __u64 calculate_srtt(__u64 prev_srtt, __u64 rtt)
+{
+	if (!prev_srtt)
+		return rtt;
+	// srtt = 7/8*prev_srtt + 1/8*rtt
+	return prev_srtt - (prev_srtt >> 3) + (rtt >> 3);
+}
+
+static bool is_rate_limited(__u64 now, __u64 last_ts, __u64 rtt)
+{
+	if (now < last_ts)
+		return true;
+
+	// RTT-based rate limit
+	if (config.rtt_rate && rtt)
+		return now - last_ts < FIXPOINT_TO_UINT(config.rtt_rate * rtt);
+
+	// Static rate limit
+	return now - last_ts < config.rate_limit;
+}
+
+/*
  * Fills in event_type, timestamp, flow, source and reserved.
  * Does not fill in the flow_info.
  */
@@ -402,8 +429,9 @@ static void pping_egress(void *ctx, struct parsing_context *pctx)
 	f_state->last_id = p_id.identifier;
 
 	// Check rate-limit
-	if (!new_flow && (now < f_state->last_timestamp ||
-			  now - f_state->last_timestamp < config.rate_limit))
+	if (!new_flow &&
+	    is_rate_limited(now, f_state->last_timestamp,
+			    config.use_srtt ? f_state->srtt : f_state->min_rtt))
 		return;
 
 	/*
@@ -448,12 +476,12 @@ static void pping_ingress(void *ctx, struct parsing_context *pctx)
 		goto validflow_out;
 
 	re.rtt = now - *p_ts;
-
 	// Delete timestamp entry as soon as RTT is calculated
 	bpf_map_delete_elem(&packet_ts, &p_id);
 
 	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
 		f_state->min_rtt = re.rtt;
+	f_state->srtt = calculate_srtt(f_state->srtt, re.rtt);
 
 	// Fill event and push to perf-buffer
 	re.event_type = EVENT_TYPE_RTT;

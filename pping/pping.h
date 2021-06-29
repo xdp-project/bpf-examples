@@ -10,6 +10,11 @@
 #define SEC_INGRESS_TC "classifier/ingress"
 #define SEC_EGRESS_TC "classifier/egress"
 
+typedef __u64 fixpoint64;
+#define FIXPOINT_SHIFT 16
+#define DOUBLE_TO_FIXPOINT(X) ((fixpoint64)((X) * (1UL << FIXPOINT_SHIFT)))
+#define FIXPOINT_TO_UINT(X) ((X) >> FIXPOINT_SHIFT)
+
 /* For the event_type members of rtt_event and flow_event */
 #define EVENT_TYPE_FLOW 1
 #define EVENT_TYPE_RTT 2
@@ -38,6 +43,9 @@ enum __attribute__((__packed__)) flow_event_source {
 
 struct bpf_config {
 	__u64 rate_limit;
+	fixpoint64 rtt_rate;
+	bool use_srtt;
+	__u8 reserved[7];
 };
 
 /*
@@ -68,6 +76,7 @@ struct network_tuple {
 
 struct flow_state {
 	__u64 min_rtt;
+	__u64 srtt;
 	__u64 last_timestamp;
 	__u64 sent_pkts;
 	__u64 sent_bytes;
