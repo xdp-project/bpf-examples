@@ -349,6 +349,7 @@ static void pping_egress(void *ctx, struct parsing_context *pctx)
 	struct flow_event fe;
 	struct flow_state *f_state;
 	struct flow_state new_state = { 0 };
+	bool new_flow = false;
 	__u64 now;
 
 	if (parse_packet_identifier(pctx, &p_id, &fe.event_info) < 0)
@@ -371,20 +372,25 @@ static void pping_egress(void *ctx, struct parsing_context *pctx)
 
 	// No previous state - attempt to create it and push flow-opening event
 	if (!f_state) {
-		bpf_map_update_elem(&flow_state, &p_id.flow, &new_state,
-				    BPF_NOEXIST);
-		f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+		new_state.last_timestamp = now;
+		if (bpf_map_update_elem(&flow_state, &p_id.flow, &new_state,
+					BPF_NOEXIST) == 0) {
+			new_flow = true;
 
+			if (fe.event_info.event != FLOW_EVENT_OPENING) {
+				fe.event_info.event = FLOW_EVENT_OPENING;
+				fe.event_info.reason =
+					EVENT_REASON_FIRST_OBS_PCKT;
+			}
+			fill_flow_event(&fe, now, &p_id.flow,
+					EVENT_SOURCE_EGRESS);
+			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+					      &fe, sizeof(fe));
+		}
+
+		f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
 		if (!f_state) // Creation failed
 			return;
-
-		if (fe.event_info.event != FLOW_EVENT_OPENING) {
-			fe.event_info.event = FLOW_EVENT_OPENING;
-			fe.event_info.reason = EVENT_REASON_FIRST_OBS_PCKT;
-		}
-		fill_flow_event(&fe, now, &p_id.flow, EVENT_SOURCE_EGRESS);
-		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe,
-				      sizeof(fe));
 	}
 
 	f_state->sent_pkts++;
@@ -396,8 +402,8 @@ static void pping_egress(void *ctx, struct parsing_context *pctx)
 	f_state->last_id = p_id.identifier;
 
 	// Check rate-limit
-	if (now < f_state->last_timestamp ||
-	    now - f_state->last_timestamp < config.rate_limit)
+	if (!new_flow && (now < f_state->last_timestamp ||
+			  now - f_state->last_timestamp < config.rate_limit))
 		return;
 
 	/*
@@ -462,8 +468,8 @@ static void pping_ingress(void *ctx, struct parsing_context *pctx)
 
 validflow_out:
 	// Wait with deleting flow until having pushed final RTT message
-	if (fe.event_info.event == FLOW_EVENT_CLOSING && f_state) {
-		bpf_map_delete_elem(&flow_state, &p_id.flow);
+	if (fe.event_info.event == FLOW_EVENT_CLOSING &&
+	    bpf_map_delete_elem(&flow_state, &p_id.flow) == 0) {
 		fill_flow_event(&fe, now, &p_id.flow, EVENT_SOURCE_INGRESS);
 		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe,
 				      sizeof(fe));
