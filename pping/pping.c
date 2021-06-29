@@ -138,22 +138,21 @@ static const char *get_libbpf_strerror(int err)
 	return buf;
 }
 
-static double parse_positive_double_argument(const char *str,
-					     const char *parname)
+static int parse_bounded_double(double *res, const char *str, double low,
+				   double high, const char *name)
 {
 	char *endptr;
-	double val;
-	val = strtod(str, &endptr);
+	*res = strtod(str, &endptr);
 	if (strlen(str) != endptr - str) {
-		fprintf(stderr, "%s %s is not a valid number\n", parname, str);
+		fprintf(stderr, "%s %s is not a valid number\n", name, str);
 		return -EINVAL;
 	}
-	if (val < 0) {
-		fprintf(stderr, "%s must be positive\n", parname);
+	if (*res < low || *res > high) {
+		fprintf(stderr, "%s must in range [%g, %g]\n", name, low, high);
 		return -EINVAL;
 	}
 
-	return val;
+	return 0;
 }
 
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
@@ -186,18 +185,19 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			}
 			break;
 		case 'r':
-			rate_limit_ms = parse_positive_double_argument(
-				optarg, "rate-limit");
-			if (rate_limit_ms < 0)
+			err = parse_bounded_double(&rate_limit_ms, optarg, 0,
+						   1000000000, "rate-limit");
+			if (err)
 				return -EINVAL;
 
 			config->bpf_config.rate_limit =
 				rate_limit_ms * NS_PER_MS;
 			break;
 		case 'c':
-			cleanup_interval_s = parse_positive_double_argument(
-				optarg, "cleanup-interval");
-			if (cleanup_interval_s < 0)
+			err = parse_bounded_double(&cleanup_interval_s, optarg,
+						   0, 1000000000,
+						   "cleanup-interval");
+			if (err)
 				return -EINVAL;
 
 			config->cleanup_interval =
