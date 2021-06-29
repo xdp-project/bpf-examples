@@ -28,6 +28,8 @@ static const char *__doc__ =
 
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
+#define MS_PER_S 1000UL
+#define S_PER_DAY (24*3600UL)
 
 #define TIMESTAMP_LIFETIME                                                     \
 	(10 * NS_PER_SECOND) // Clear out packet timestamps if they're over 10 seconds
@@ -94,7 +96,7 @@ static const struct option long_options[] = {
 	{ "interface",        required_argument, NULL, 'i' }, // Name of interface to run on
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
 	{ "force",            no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
-	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
+	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
 	{ 0, 0, NULL, 0 }
@@ -138,22 +140,21 @@ static const char *get_libbpf_strerror(int err)
 	return buf;
 }
 
-static double parse_positive_double_argument(const char *str,
-					     const char *parname)
+static int parse_bounded_double(double *res, const char *str, double low,
+				   double high, const char *name)
 {
 	char *endptr;
-	double val;
-	val = strtod(str, &endptr);
+	*res = strtod(str, &endptr);
 	if (strlen(str) != endptr - str) {
-		fprintf(stderr, "%s %s is not a valid number\n", parname, str);
+		fprintf(stderr, "%s %s is not a valid number\n", name, str);
 		return -EINVAL;
 	}
-	if (val < 0) {
-		fprintf(stderr, "%s must be positive\n", parname);
+	if (*res < low || *res > high) {
+		fprintf(stderr, "%s must in range [%g, %g]\n", name, low, high);
 		return -EINVAL;
 	}
 
-	return val;
+	return 0;
 }
 
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
@@ -186,18 +187,20 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			}
 			break;
 		case 'r':
-			rate_limit_ms = parse_positive_double_argument(
-				optarg, "rate-limit");
-			if (rate_limit_ms < 0)
+			err = parse_bounded_double(&rate_limit_ms, optarg, 0,
+						   7 * S_PER_DAY * MS_PER_S,
+						   "rate-limit");
+			if (err)
 				return -EINVAL;
 
 			config->bpf_config.rate_limit =
 				rate_limit_ms * NS_PER_MS;
 			break;
 		case 'c':
-			cleanup_interval_s = parse_positive_double_argument(
-				optarg, "cleanup-interval");
-			if (cleanup_interval_s < 0)
+			err = parse_bounded_double(&cleanup_interval_s, optarg,
+						   0, 7 * S_PER_DAY,
+						   "cleanup-interval");
+			if (err)
 				return -EINVAL;
 
 			config->cleanup_interval =
@@ -893,6 +896,11 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 		.cleanup_interval = config->cleanup_interval
 	};
 	int err;
+
+	if (!clean_args.cleanup_interval) {
+		fprintf(stderr, "Periodic map cleanup disabled\n");
+		return 0;
+	}
 
 	clean_args.packet_map_fd =
 		bpf_object__find_map_fd_by_name(obj, config->packet_map);
