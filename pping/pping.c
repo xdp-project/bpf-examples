@@ -15,11 +15,8 @@ static const char *__doc__ =
 #include <unistd.h>
 #include <getopt.h>
 #include <stdbool.h>
-#include <limits.h>
 #include <signal.h> // For detecting Ctrl-C
 #include <sys/resource.h> // For setting rlmit
-#include <sys/wait.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -99,6 +96,7 @@ static const struct option long_options[] = {
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
+	{ "localfilt-off",    no_argument,       NULL, 'l' }, // Disable local filtering (will start to report "internal" RTTs)
 	{ 0, 0, NULL, 0 }
 };
 
@@ -163,11 +161,12 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	double rate_limit_ms, cleanup_interval_s, rtt_rate;
 
 	config->ifindex = 0;
+	config->bpf_config.localfilt = true;
 	config->force = false;
 	config->json_format = false;
 	config->ppviz_format = false;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:R:T:c:F:I:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfli:r:R:T:c:F:I:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -244,6 +243,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				fprintf(stderr, "ingress-hook must be \"xdp\" or \"tc\"\n");
 				return -EINVAL;
 			}
+			break;
+		case 'l':
+			config->bpf_config.localfilt = false;
 			break;
 		case 'f':
 			config->force = true;
@@ -469,9 +471,9 @@ static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 		if (print_event_func) {
 			fe.event_type = EVENT_TYPE_FLOW;
 			fe.timestamp = now;
-			fe.flow = *(struct network_tuple *)key_ptr;
-			fe.event_info.event = FLOW_EVENT_CLOSING;
-			fe.event_info.reason = EVENT_REASON_FLOW_TIMEOUT;
+			reverse_flow(&fe.flow, key_ptr);
+			fe.flow_event_type = FLOW_EVENT_CLOSING;
+			fe.reason = EVENT_REASON_FLOW_TIMEOUT;
 			fe.source = EVENT_SOURCE_USERSPACE;
 			print_event_func(NULL, 0, &fe, sizeof(fe));
 		}
@@ -622,6 +624,7 @@ static const char *flowevent_to_str(enum flow_event_type fe)
 	case FLOW_EVENT_OPENING:
 		return "opening";
 	case FLOW_EVENT_CLOSING:
+	case FLOW_EVENT_CLOSING_BOTH:
 		return "closing";
 	default:
 		return "unknown";
@@ -639,8 +642,6 @@ static const char *eventreason_to_str(enum flow_event_reason er)
 		return "first observed packet";
 	case EVENT_REASON_FIN:
 		return "FIN";
-	case EVENT_REASON_FIN_ACK:
-		return "FIN-ACK";
 	case EVENT_REASON_RST:
 		return "RST";
 	case EVENT_REASON_FLOW_TIMEOUT:
@@ -653,9 +654,9 @@ static const char *eventreason_to_str(enum flow_event_reason er)
 static const char *eventsource_to_str(enum flow_event_source es)
 {
 	switch (es) {
-	case EVENT_SOURCE_EGRESS:
+	case EVENT_SOURCE_PKT_SRC:
 		return "src";
-	case EVENT_SOURCE_INGRESS:
+	case EVENT_SOURCE_PKT_DEST:
 		return "dest";
 	case EVENT_SOURCE_USERSPACE:
 		return "userspace-cleanup";
@@ -705,8 +706,8 @@ static void print_event_standard(void *ctx, int cpu, void *data,
 		printf(" %s ", proto_to_str(e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stdout, &e->flow_event.flow);
 		printf(" %s due to %s from %s\n",
-		       flowevent_to_str(e->flow_event.event_info.event),
-		       eventreason_to_str(e->flow_event.event_info.reason),
+		       flowevent_to_str(e->flow_event.flow_event_type),
+		       eventreason_to_str(e->flow_event.reason),
 		       eventsource_to_str(e->flow_event.source));
 	}
 }
@@ -755,18 +756,20 @@ static void print_rttevent_fields_json(json_writer_t *ctx,
 	jsonw_u64_field(ctx, "sent_bytes", re->sent_bytes);
 	jsonw_u64_field(ctx, "rec_packets", re->rec_pkts);
 	jsonw_u64_field(ctx, "rec_bytes", re->rec_bytes);
+	jsonw_bool_field(ctx, "match_on_egress", re->match_on_egress);
 }
 
 static void print_flowevent_fields_json(json_writer_t *ctx,
 					const struct flow_event *fe)
 {
 	jsonw_string_field(ctx, "flow_event",
-			   flowevent_to_str(fe->event_info.event));
+			   flowevent_to_str(fe->flow_event_type));
 	jsonw_string_field(ctx, "reason",
-			   eventreason_to_str(fe->event_info.reason));
+			   eventreason_to_str(fe->reason));
 	jsonw_string_field(ctx, "triggered_by", eventsource_to_str(fe->source));
 }
 
+// TODO - add field noting if RTT includes "internal" delays or not
 static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
 {
 	const union pping_event *e = data;

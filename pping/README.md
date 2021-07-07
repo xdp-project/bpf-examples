@@ -13,20 +13,21 @@ spinbit and DNS queries. See the [TODO-list](./TODO.md) for more potential
 features (which may or may not ever get implemented).
 
 The fundamental logic of pping is to timestamp a pseudo-unique identifier for
-outgoing packets, and then look for matches in the incoming packets. If a match
-is found, the RTT is simply calculated as the time difference between the
-current time and the stored timestamp.
+packets, and then look for matches in the reply packets. If a match is found,
+the RTT is simply calculated as the time difference between the current time and
+the stored timestamp.
 
 This tool, just as Kathie's original pping implementation, uses TCP timestamps
-as identifiers for TCP traffic. For outgoing packets, the TSval (which is a
-timestamp in and off itself) is timestamped. Incoming packets are then parsed
-for the TSecr, which are the echoed TSval values from the receiver. The TCP
-timestamps are not necessarily unique for every packet (they have a limited
-update frequency, appears to be 1000 Hz for modern Linux systems), so only the
-first instance of an identifier is timestamped, and matched against the first
-incoming packet with the identifier. The mechanism to ensure only the first
-packet is timestamped and matched differs from the one in Kathie's pping, and is
-further described in [SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
+as identifiers for TCP traffic. The TSval (which is a timestamp in and off
+itself) is used as an identifier and timestamped. Reply packets in the reverse
+flow are then parsed for the TSecr, which are the echoed TSval values from the
+receiver. The TCP timestamps are not necessarily unique for every packet (they
+have a limited update frequency, appears to be 1000 Hz for modern Linux
+systems), so only the first instance of an identifier is timestamped, and
+matched against the first incoming packet with a matching reply identifier. The
+mechanism to ensure only the first packet is timestamped and matched differs
+from the one in Kathie's pping, and is further described in
+[SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
 
 For ICMP echo, it uses the echo identifier as port numbers, and echo sequence
 number as identifer to match against. Linux systems will typically use different
@@ -48,7 +49,7 @@ single line per event.
 
 An example of the format is provided below:
 ```shell
-16:00:46.142279766 TCP 10.11.1.1:5201+10.11.1.2:59528 opening due to SYN-ACK from src
+16:00:46.142279766 TCP 10.11.1.1:5201+10.11.1.2:59528 opening due to SYN-ACK from dest
 16:00:46.147705205 5.425439 ms 5.425439 ms TCP 10.11.1.1:5201+10.11.1.2:59528
 16:00:47.148905125 5.261430 ms 5.261430 ms TCP 10.11.1.1:5201+10.11.1.2:59528
 16:00:48.151666385 5.972284 ms 5.261430 ms TCP 10.11.1.1:5201+10.11.1.2:59528
@@ -96,7 +97,7 @@ An example of a (pretty-printed) flow-event is provided below:
     "protocol": "TCP",
     "flow_event": "opening",
     "reason": "SYN-ACK",
-    "triggered_by": "src"
+    "triggered_by": "dest"
 }
 ```
 
@@ -114,7 +115,8 @@ An example of a (pretty-printed) RTT-even is provided below:
     "sent_packets": 9393,
     "sent_bytes": 492457296,
     "rec_packets": 5922,
-    "rec_bytes": 37
+    "rec_bytes": 37,
+    "match_on_egress": false
 }
 ```
 
@@ -123,22 +125,20 @@ An example of a (pretty-printed) RTT-even is provided below:
 
 ### Files:
 - **pping.c:** Userspace program that loads and attaches the BPF programs, pulls
-  the perf-buffer `rtt_events` to print out RTT messages and periodically cleans
+  the perf-buffer `events` to print out RTT messages and periodically cleans
   up the hash-maps from old entries. Also passes user options to the BPF
   programs by setting a "global variable" (stored in the programs .rodata
   section).
-- **pping_kern.c:** Contains the BPF programs that are loaded on tc (egress) and
-  XDP (ingress), as well as several common functions, a global constant `config`
-  (set from userspace) and map definitions. The tc program `pping_egress()`
-  parses outgoing packets for identifiers. If an identifier is found and the
-  sampling strategy allows it, a timestamp for the packet is created in
-  `packet_ts`. The XDP program `pping_ingress()` parses incomming packets for an
-  identifier. If found, it looks up the `packet_ts` map for a match on the
-  reverse flow (to match source/dest on egress). If there is a match, it
-  calculates the RTT from the stored timestamp and deletes the entry. The
-  calculated RTT (together with the flow-tuple) is pushed to the perf-buffer
-  `events`. Both `pping_egress()` and `pping_ingress` can also push flow-events
-  to the `events` buffer.
+- **pping_kern.c:** Contains the BPF programs that are loaded on egress (tc) and
+  ingress (XDP or tc), as well as several common functions, a global constant
+  `config` (set from userspace) and map definitions. Essentially the same pping
+  program is loaded on both ingress and egress. All packets are parsed for both
+  an identifier that can be used to create a timestamp entry `packet_ts`, and a
+  reply identifier that can be used to match the packet with a previously
+  timestamped one in the reverse flow. If a match is found, an RTT is calculated
+  and an RTT-event is pushed to userspace through the perf-buffer `events`. For
+  each packet with a valid identifier, the program also keeps track of and
+  updates the state flow and reverse flow, stored in the `flow_state` map.
 - **pping.h:** Common header file included by `pping.c` and
   `pping_kern.c`. Contains some common structs used by both (are part of the
   maps).
@@ -146,13 +146,12 @@ An example of a (pretty-printed) RTT-even is provided below:
 ### BPF Maps:
 - **flow_state:** A hash-map storing some basic state for each flow, such as the
   last seen identifier for the flow and when the last timestamp entry for the
-  flow was created. Entries are created by `pping_egress()`, and can be updated
-  or deleted by both `pping_egress()` and `pping_ingress()`. Leftover entries
-  are eventually removed by `pping.c`.
+  flow was created. Entries are created, updated and deleted by the BPF pping
+  programs. Leftover entries are eventually removed by userspace (`pping.c`).
 - **packet_ts:** A hash-map storing a timestamp for a specific packet
-  identifier. Entries are created by `pping_egress()` and removed by
-  `pping_ingress()` if a match is found. Leftover entries are eventually removed
-  by `pping.c`.
+  identifier. Entries are created by the BPF pping program if a valid identifier
+  is found, and removed if a match is found. Leftover entries are eventually
+  removed by userspace (`pping.c`).
 - **events:** A perf-buffer used by the BPF programs to push flow or RTT events
   to `pping.c`, which continuously polls the map the prints them out.
 
@@ -222,9 +221,9 @@ additional map space and report some additional RTT(s) more than expected
 (however the reported RTTs should still be correct).
 
 If the packets have the same identifier, they must first have managed to bypass
-the previous check for unique identifiers (see [previous point](#Tracking last
-seen identifier)), and only one of them will be able to successfully store a
-timestamp entry.
+the previous check for unique identifiers (see [previous
+point](#tracking-last-seen-identifier)), and only one of them will be able to
+successfully store a timestamp entry.
 
 #### Matching against stored timestamps
 The XDP/ingress program could potentially match multiple concurrent packets with
@@ -246,8 +245,8 @@ if this is the lowest RTT seen so far for the flow. If multiple RTTs are
 calculated concurrently, then several could pass this check concurrently and
 there may be a lost update. It should only be possible for multiple RTTs to be
 calculated concurrently in case either the [timestamp rate-limit was
-bypassed](#Rate-limiting new timestamps) or [multiple packets managed to match
-against the same timestamp](#Matching against stored timestamps).
+bypassed](#rate-limiting-new-timestamps) or [multiple packets managed to match
+against the same timestamp](#matching-against-stored-timestamps).
 
 It's worth noting that with sampling the reported minimum-RTT is only an
 estimate anyways (may never calculate RTT for packet with the true minimum

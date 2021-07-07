@@ -25,6 +25,8 @@
 #define AF_INET6 10
 #define MAX_TCP_OPTIONS 10
 
+#define IPV6_FLOWINFO_MASK __cpu_to_be32(0x0FFFFFFF)
+
 /*
  * This struct keeps track of the data and data_end pointers from the xdp_md or
  * __skb_buff contexts, as well as a currently parsed to position kept in nh.
@@ -33,11 +35,43 @@
  * header encloses.
  */
 struct parsing_context {
-	void *data; //Start of eth hdr
-	void *data_end; //End of safe acessible area
-	struct hdr_cursor nh; //Position to parse next
-	__u32 pkt_len; //Full packet length (headers+data)
-	bool is_egress; //Is packet on egress or ingress?
+	void *data;           // Start of eth hdr
+	void *data_end;       // End of safe acessible area
+	struct hdr_cursor nh; // Position to parse next
+	__u32 pkt_len;        // Full packet length (headers+data)
+	__u32 ifindex;        // Interface packet arrived on
+	bool is_egress;       // Is packet on egress or ingress?
+};
+
+/*
+ * Struct filled in by parse_packet_id.
+ *
+ * Note: As long as parse_packet_id is successful, the flow-parts of pid
+ * and reply_pid should be valid, regardless of value for pid_valid and
+ * reply_pid valid. The *pid_valid members are there to indicate that the
+ * identifier part of *pid are valid and can be used for timestamping/lookup.
+ * The reason for not keeping the flow parts as an entirely separate members
+ * is to save some performance by avoid doing a copy for lookup/insertion
+ * in the packet_ts map.
+ */
+struct packet_info {
+	union {
+		struct iphdr *iph;
+		struct ipv6hdr *ip6h;
+	};
+	union {
+		struct icmphdr *icmph;
+		struct icmp6hdr *icmp6h;
+		struct tcphdr *tcph;
+	};
+	__u64 time;                  // Arrival time of packet
+	__u32 payload;               // Size of packet data (excluding headers)
+	struct packet_id pid;        // identifier to timestamp (ex. TSval)
+	struct packet_id reply_pid;  // identifier to match against (ex. TSecr)
+	bool pid_valid;              // identifier can be used to timestamp packet
+	bool reply_pid_valid;        // reply_identifier can be used to match packet
+	enum flow_event_type event_type; // flow event triggered by packet
+	enum flow_event_reason event_reason; // reason for triggering flow event
 };
 
 char _license[] SEC("license") = "GPL";
@@ -70,11 +104,22 @@ struct {
 /*
  * Maps an IPv4 address into an IPv6 address according to RFC 4291 sec 2.5.5.2
  */
-static void map_ipv4_to_ipv6(__be32 ipv4, struct in6_addr *ipv6)
+static void map_ipv4_to_ipv6(struct in6_addr *ipv6, __be32 ipv4)
 {
 	__builtin_memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
 	__builtin_memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
 	ipv6->in6_u.u6_addr32[3] = ipv4;
+}
+
+/*
+ * Returns the number of unparsed bytes left in the packet (bytes after nh.pos)
+ */
+static __u32 remaining_pkt_payload(struct parsing_context *ctx)
+{
+	// pkt_len - (pos - data) fails because compiler transforms it to pkt_len - pos + data (pkt_len - pos not ok because value - pointer)
+	// data + pkt_len - pos fails on (data+pkt_len) - pos due to math between pkt_pointer and unbounded register
+	__u32 parsed_bytes = ctx->nh.pos - ctx->data;
+	return parsed_bytes < ctx->pkt_len ? ctx->pkt_len - parsed_bytes : 0;
 }
 
 /*
@@ -134,193 +179,186 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 /*
  * Attempts to fetch an identifier for TCP packets, based on the TCP timestamp
  * option.
- * If successful, identifier will be set to TSval if is_ingress, or TSecr
- * otherwise, the port-members of saddr and daddr will be set to the TCP source
- * and dest, respectively, fei will be filled appropriately (based on
- * SYN/FIN/RST) and 0 will be returned.
- * On failure, -1 will be returned.
+ *
+ * Will use the TSval as pid and TSecr as reply_pid, and the TCP source and dest
+ * as port numbers.
+ *
+ * If successful, the pid (identifer + flow.port), reply_pid, pid_valid,
+ * reply_pid_valid, event_type and event_reason members of p_info will be set
+ * appropriately and 0 will be returned.
+ * On failure -1 will be returned (no guarantees on values set in p_info).
  */
-static int parse_tcp_identifier(struct parsing_context *ctx, __be16 *sport,
-				__be16 *dport, struct flow_event_info *fei,
-				__u32 *identifier)
+static int parse_tcp_identifier(struct parsing_context *pctx,
+				struct packet_info *p_info)
 {
-	__u32 tsval, tsecr;
-	struct tcphdr *tcph;
-
-	if (parse_tcphdr(&ctx->nh, ctx->data_end, &tcph) < 0)
+	if (parse_tcphdr(&pctx->nh, pctx->data_end, &p_info->tcph) < 0)
 		return -1;
 
-	// Do not timestamp pure ACKs
-	if (ctx->is_egress && ctx->nh.pos - ctx->data >= ctx->pkt_len &&
-	    !tcph->syn)
-		return -1;
-
-	// Do not match on non-ACKs (TSecr not valid)
-	if (!ctx->is_egress && !tcph->ack)
-		return -1;
-
-	// Check if connection is opening/closing
-	if (tcph->syn) {
-		fei->event = FLOW_EVENT_OPENING;
-		fei->reason =
-			tcph->ack ? EVENT_REASON_SYN_ACK : EVENT_REASON_SYN;
-	} else if (tcph->rst) {
-		fei->event = FLOW_EVENT_CLOSING;
-		fei->reason = EVENT_REASON_RST;
-	} else if (!ctx->is_egress && tcph->fin) {
-		fei->event = FLOW_EVENT_CLOSING;
-		fei->reason =
-			tcph->ack ? EVENT_REASON_FIN_ACK : EVENT_REASON_FIN;
-	} else {
-		fei->event = FLOW_EVENT_NONE;
-	}
-
-	if (parse_tcp_ts(tcph, ctx->data_end, &tsval, &tsecr) < 0)
+	if (parse_tcp_ts(p_info->tcph, pctx->data_end, &p_info->pid.identifier,
+			 &p_info->reply_pid.identifier) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead
 
-	*sport = tcph->source;
-	*dport = tcph->dest;
-	*identifier = ctx->is_egress ? tsval : tsecr;
+	p_info->pid.flow.saddr.port = p_info->tcph->source;
+	p_info->pid.flow.daddr.port = p_info->tcph->dest;
+
+	// Do not timestamp pure ACKs (no payload)
+	p_info->pid_valid =
+		pctx->nh.pos - pctx->data < pctx->pkt_len || p_info->tcph->syn;
+
+	// Do not match on non-ACKs (TSecr not valid)
+	p_info->reply_pid_valid = p_info->tcph->ack;
+
+	// Check if connection is opening/closing
+	if (p_info->tcph->rst) {
+		p_info->event_type = FLOW_EVENT_CLOSING_BOTH;
+		p_info->event_reason = EVENT_REASON_RST;
+	} else if (p_info->tcph->fin) {
+		p_info->event_type = FLOW_EVENT_CLOSING;
+		p_info->event_reason = EVENT_REASON_FIN;
+	} else if (p_info->tcph->syn) {
+		p_info->event_type = FLOW_EVENT_OPENING;
+		p_info->event_reason = p_info->tcph->ack ?
+						     EVENT_REASON_SYN_ACK :
+						     EVENT_REASON_SYN;
+	} else {
+		p_info->event_type = FLOW_EVENT_NONE;
+	}
+
 	return 0;
 }
 
 /*
- * Attemps to fetch an identifier for an ICMPv6 header, based on the echo
+ * Attempts to fetch an identifier for an ICMPv6 header, based on the echo
  * request/reply sequence number.
- * If successful, identifer will be set to the echo sequence number, both
- * sport and dport will be set to the echo identifier, and 0 will be returned.
- * On failure, -1 will be returned.
- * Note: Will store the 16-bit echo sequence number in network byte order in
- * the 32-bit identifier.
+ *
+ * Will use the echo sequence number as pid/reply_pid and the echo identifier
+ * as port numbers. Echo requests will only generate a valid pid and echo
+ * replies will only generate a valid reply_pid.
+ *
+ * If successful, the pid (identifier + flow.port), reply_pid, pid_valid,
+ * reply pid_valid and event_type of p_info will be set appropriately and 0
+ * will be returned.
+ * On failure, -1 will be returned (no guarantees on p_info members).
+ *
+ * Note: Will store the 16-bit sequence number in network byte order
+ * in the 32-bit (reply_)pid.identifier.
  */
-static int parse_icmp6_identifier(struct parsing_context *ctx, __u16 *sport,
-				  __u16 *dport, struct flow_event_info *fei,
-				  __u32 *identifier)
+static int parse_icmp6_identifier(struct parsing_context *pctx,
+				  struct packet_info *p_info)
 {
-	struct icmp6hdr *icmp6h;
-
-	if (parse_icmp6hdr(&ctx->nh, ctx->data_end, &icmp6h) < 0)
+	if (parse_icmp6hdr(&pctx->nh, pctx->data_end, &p_info->icmp6h) < 0)
 		return -1;
 
-	if (ctx->is_egress && icmp6h->icmp6_type != ICMPV6_ECHO_REQUEST)
-		return -1;
-	if (!ctx->is_egress && icmp6h->icmp6_type != ICMPV6_ECHO_REPLY)
-		return -1;
-	if (icmp6h->icmp6_code != 0)
+	if (p_info->icmp6h->icmp6_code != 0)
 		return -1;
 
-	fei->event = FLOW_EVENT_NONE;
-	*sport = icmp6h->icmp6_identifier;
-	*dport = *sport;
-	*identifier = icmp6h->icmp6_sequence;
+	if (p_info->icmp6h->icmp6_type == ICMPV6_ECHO_REQUEST) {
+		p_info->pid.identifier = p_info->icmp6h->icmp6_sequence;
+		p_info->pid_valid = true;
+		p_info->reply_pid_valid = false;
+	} else if (p_info->icmp6h->icmp6_type == ICMPV6_ECHO_REPLY) {
+		p_info->reply_pid.identifier = p_info->icmp6h->icmp6_sequence;
+		p_info->reply_pid_valid = true;
+		p_info->pid_valid = false;
+	} else {
+		return -1;
+	}
+
+	p_info->event_type = FLOW_EVENT_NONE;
+	p_info->pid.flow.saddr.port = p_info->icmp6h->icmp6_identifier;
+	p_info->pid.flow.daddr.port = p_info->pid.flow.saddr.port;
 	return 0;
 }
 
 /*
  * Same as parse_icmp6_identifier, but for an ICMP(v4) header instead.
  */
-static int parse_icmp_identifier(struct parsing_context *ctx, __u16 *sport,
-				 __u16 *dport, struct flow_event_info *fei,
-				 __u32 *identifier)
+static int parse_icmp_identifier(struct parsing_context *pctx,
+				 struct packet_info *p_info)
 {
-	struct icmphdr *icmph;
-
-	if (parse_icmphdr(&ctx->nh, ctx->data_end, &icmph) < 0)
+	if (parse_icmphdr(&pctx->nh, pctx->data_end, &p_info->icmph) < 0)
 		return -1;
 
-	if (ctx->is_egress && icmph->type != ICMP_ECHO)
-		return -1;
-	if (!ctx->is_egress && icmph->type != ICMP_ECHOREPLY)
-		return -1;
-	if (icmph->code != 0)
+	if (p_info->icmph->code != 0)
 		return -1;
 
-	fei->event = FLOW_EVENT_NONE;
-	*sport = icmph->un.echo.id;
-	*dport = *sport;
-	*identifier = icmph->un.echo.sequence;
+	if (p_info->icmph->type == ICMP_ECHO) {
+		p_info->pid.identifier = p_info->icmph->un.echo.sequence;
+		p_info->pid_valid = true;
+		p_info->reply_pid_valid = false;
+	} else if (p_info->icmph->type == ICMP_ECHOREPLY) {
+		p_info->reply_pid.identifier = p_info->icmph->un.echo.sequence;
+		p_info->reply_pid_valid = true;
+		p_info->pid_valid = false;
+	} else {
+		return -1;
+	}
+
+	p_info->event_type = FLOW_EVENT_NONE;
+	p_info->pid.flow.saddr.port = p_info->icmph->un.echo.id;
+	p_info->pid.flow.daddr.port = p_info->pid.flow.saddr.port;
 	return 0;
 }
 
 /*
- * Attempts to parse the packet limited by the data and data_end pointers,
- * to retrieve a protocol dependent packet identifier. If sucessful, the
- * pointed to p_id and fei will be filled with parsed information from the
- * packet, and 0 will be returned. On failure, -1 will be returned.
- * If is_egress saddr and daddr will match source and destination of packet,
- * respectively, and identifier will be set to the identifer for an outgoing
- * packet. Otherwise, saddr and daddr will be swapped (will match
- * destination and source of packet, respectively), and identifier will be
- * set to the identifier of a response.
+ * Attempts to parse the packet defined by pctx for a valid packet identifier
+ * and reply identifier, filling in p_info.
+ *
+ * If succesful, all members of p_info will be set appropriately and 0 will
+ * be returned.
+ * On failure -1 will be returned (no garantuees on p_info members).
  */
-static int parse_packet_identifier(struct parsing_context *ctx,
-				   struct packet_id *p_id,
-				   struct flow_event_info *fei)
+static int parse_packet_identifier(struct parsing_context *pctx,
+				   struct packet_info *p_info)
 {
 	int proto, err;
 	struct ethhdr *eth;
-	struct iphdr *iph;
-	struct ipv6hdr *ip6h;
-	struct flow_address *saddr, *daddr;
 
-	// Switch saddr <--> daddr on ingress to match egress
-	if (ctx->is_egress) {
-		saddr = &p_id->flow.saddr;
-		daddr = &p_id->flow.daddr;
-	} else {
-		saddr = &p_id->flow.daddr;
-		daddr = &p_id->flow.saddr;
-	}
-
-	proto = parse_ethhdr(&ctx->nh, ctx->data_end, &eth);
+	p_info->time = bpf_ktime_get_ns();
+	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
 
 	// Parse IPv4/6 header
 	if (proto == bpf_htons(ETH_P_IP)) {
-		p_id->flow.ipv = AF_INET;
-		p_id->flow.proto = parse_iphdr(&ctx->nh, ctx->data_end, &iph);
+		p_info->pid.flow.ipv = AF_INET;
+		p_info->pid.flow.proto =
+			parse_iphdr(&pctx->nh, pctx->data_end, &p_info->iph);
 	} else if (proto == bpf_htons(ETH_P_IPV6)) {
-		p_id->flow.ipv = AF_INET6;
-		p_id->flow.proto = parse_ip6hdr(&ctx->nh, ctx->data_end, &ip6h);
+		p_info->pid.flow.ipv = AF_INET6;
+		p_info->pid.flow.proto =
+			parse_ip6hdr(&pctx->nh, pctx->data_end, &p_info->ip6h);
 	} else {
 		return -1;
 	}
 
 	// Parse identifer from suitable protocol
-	if (p_id->flow.proto == IPPROTO_TCP)
-		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port, fei,
-					   &p_id->identifier);
-	else if (p_id->flow.proto == IPPROTO_ICMPV6 &&
-		 p_id->flow.ipv == AF_INET6)
-		err = parse_icmp6_identifier(ctx, &saddr->port, &daddr->port,
-					     fei, &p_id->identifier);
-	else if (p_id->flow.proto == IPPROTO_ICMP && p_id->flow.ipv == AF_INET)
-		err = parse_icmp_identifier(ctx, &saddr->port, &daddr->port,
-					    fei, &p_id->identifier);
+	if (p_info->pid.flow.proto == IPPROTO_TCP)
+		err = parse_tcp_identifier(pctx, p_info);
+	else if (p_info->pid.flow.proto == IPPROTO_ICMPV6 &&
+		 p_info->pid.flow.ipv == AF_INET6)
+		err = parse_icmp6_identifier(pctx, p_info);
+	else if (p_info->pid.flow.proto == IPPROTO_ICMP &&
+		 p_info->pid.flow.ipv == AF_INET)
+		err = parse_icmp_identifier(pctx, p_info);
 	else
 		return -1; // No matching protocol
 	if (err)
 		return -1; // Failed parsing protocol
 
 	// Sucessfully parsed packet identifier - fill in IP-addresses and return
-	if (p_id->flow.ipv == AF_INET) {
-		map_ipv4_to_ipv6(iph->saddr, &saddr->ip);
-		map_ipv4_to_ipv6(iph->daddr, &daddr->ip);
+	if (p_info->pid.flow.ipv == AF_INET) {
+		map_ipv4_to_ipv6(&p_info->pid.flow.saddr.ip,
+				 p_info->iph->saddr);
+		map_ipv4_to_ipv6(&p_info->pid.flow.daddr.ip,
+				 p_info->iph->daddr);
 	} else { // IPv6
-		saddr->ip = ip6h->saddr;
-		daddr->ip = ip6h->daddr;
+		p_info->pid.flow.saddr.ip = p_info->ip6h->saddr;
+		p_info->pid.flow.daddr.ip = p_info->ip6h->daddr;
 	}
-	return 0;
-}
 
-/*
- * Returns the number of unparsed bytes left in the packet (bytes after nh.pos)
- */
-static __u32 remaining_pkt_payload(struct parsing_context *ctx)
-{
-	// pkt_len - (pos - data) fails because compiler transforms it to pkt_len - pos + data (pkt_len - pos not ok because value - pointer)
-	// data + pkt_len - pos fails on (data+pkt_len) - pos due to math between pkt_pointer and unbounded register
-	__u32 parsed_bytes = ctx->nh.pos - ctx->data;
-	return parsed_bytes < ctx->pkt_len ? ctx->pkt_len - parsed_bytes : 0;
+	reverse_flow(&p_info->reply_pid.flow, &p_info->pid.flow);
+	p_info->payload = remaining_pkt_payload(pctx);
+
+	return 0;
 }
 
 /*
@@ -337,6 +375,9 @@ static __u64 calculate_srtt(__u64 prev_srtt, __u64 rtt)
 	return prev_srtt - (prev_srtt >> 3) + (rtt >> 3);
 }
 
+/*
+ * Return true if flow should wait with timestamping due to rate limit
+ */
 static bool is_rate_limited(__u64 now, __u64 last_ts, __u64 rtt)
 {
 	if (now < last_ts)
@@ -351,86 +392,154 @@ static bool is_rate_limited(__u64 now, __u64 last_ts, __u64 rtt)
 }
 
 /*
- * Fills in event_type, timestamp, flow, source and reserved.
- * Does not fill in the flow_info.
+ * Fills in the members of flow_event based on the passed values.
+ * 
+ * If rev_flow is true, will report src/dest as in p_info.reply_pid.flow and set
+ * reason as packet-dest. Otherwise, will report src/dest as in p_info.pid.flow
+ * and reason as packet-src.
  */
-static void fill_flow_event(struct flow_event *fe, __u64 timestamp,
-			    struct network_tuple *flow,
-			    enum flow_event_source source)
+static void fill_flow_event(struct flow_event *fe, struct packet_info *p_info,
+			    bool rev_flow)
 {
 	fe->event_type = EVENT_TYPE_FLOW;
-	fe->timestamp = timestamp;
-	fe->flow = *flow;
-	fe->source = source;
+	fe->flow_event_type = p_info->event_type;
+	fe->reason = p_info->event_reason;
+	fe->timestamp = p_info->time;
 	fe->reserved = 0; // Make sure it's initilized
+
+	if (rev_flow) {
+		fe->flow = p_info->reply_pid.flow;
+		fe->source = EVENT_SOURCE_PKT_DEST;
+	} else {
+		fe->flow = p_info->pid.flow;
+		fe->source = EVENT_SOURCE_PKT_SRC;
+	}
 }
 
 /*
- * Main function for handling the pping egress path.
- * Parses the packet for an identifer and attemps to store a timestamp for it
- * in the packet_ts map.
+ * Attempt to create a new flow-state and push flow-opening message
+ * Returns a pointer to the flow_state if successful, NULL otherwise
  */
-static void pping_egress(void *ctx, struct parsing_context *pctx)
+static struct flow_state *create_flow(struct network_tuple *flow, void *ctx,
+				      struct packet_info *p_info,
+				      struct flow_event *fe)
 {
-	struct packet_id p_id = { 0 };
-	struct flow_event fe;
-	struct flow_state *f_state;
 	struct flow_state new_state = { 0 };
-	bool new_flow = false;
-	__u64 now;
 
-	if (parse_packet_identifier(pctx, &p_id, &fe.event_info) < 0)
-		return;
+	new_state.last_timestamp = p_info->time;
+	if (bpf_map_update_elem(&flow_state, &p_info->pid.flow, &new_state,
+				BPF_NOEXIST) != 0)
+		return NULL;
 
-	now = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
-	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
+	if (p_info->event_type != FLOW_EVENT_OPENING) {
+		p_info->event_type = FLOW_EVENT_OPENING;
+		p_info->event_reason = EVENT_REASON_FIRST_OBS_PCKT;
+	}
+	fill_flow_event(fe, p_info, true);
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, fe, sizeof(*fe));
 
-	// Flow closing - try to delete flow state and push closing-event
-	if (fe.event_info.event == FLOW_EVENT_CLOSING) {
-		if (!f_state) {
-			bpf_map_delete_elem(&flow_state, &p_id.flow);
-			fill_flow_event(&fe, now, &p_id.flow,
-					EVENT_SOURCE_EGRESS);
-			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-					      &fe, sizeof(fe));
-		}
-		return;
+	return bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
+}
+
+static struct flow_state *update_flow(void *ctx, struct packet_info *p_info,
+				      struct flow_event *fe, bool *new_flow)
+{
+	struct flow_state *f_state;
+	*new_flow = false;
+
+	f_state = bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
+	if (!f_state && p_info->pid_valid) {
+		*new_flow = true;
+		f_state = create_flow(&p_info->pid.flow, ctx, p_info, fe);
 	}
 
-	// No previous state - attempt to create it and push flow-opening event
-	if (!f_state) {
-		new_state.last_timestamp = now;
-		if (bpf_map_update_elem(&flow_state, &p_id.flow, &new_state,
-					BPF_NOEXIST) == 0) {
-			new_flow = true;
-
-			if (fe.event_info.event != FLOW_EVENT_OPENING) {
-				fe.event_info.event = FLOW_EVENT_OPENING;
-				fe.event_info.reason =
-					EVENT_REASON_FIRST_OBS_PCKT;
-			}
-			fill_flow_event(&fe, now, &p_id.flow,
-					EVENT_SOURCE_EGRESS);
-			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-					      &fe, sizeof(fe));
-		}
-
-		f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
-		if (!f_state) // Creation failed
-			return;
-	}
+	if (!f_state)
+		return NULL;
 
 	f_state->sent_pkts++;
-	f_state->sent_bytes += remaining_pkt_payload(pctx);
+	f_state->sent_bytes += p_info->payload;
+
+	return f_state;
+}
+
+static struct flow_state *update_rev_flow(struct packet_info *p_info)
+{
+	struct flow_state *f_state;
+
+	f_state = bpf_map_lookup_elem(&flow_state, &p_info->reply_pid.flow);
+	if (!f_state)
+		return NULL;
+
+	f_state->rec_pkts++;
+	f_state->rec_bytes += p_info->payload;
+
+	return f_state;
+}
+
+/*
+ * Return true if p_info->pid.flow.daddr is a "local" address.
+ *
+ * Works by performing a fib lookup for p_info->pid.flow.
+ * Code heavily inspired by samples/bpf/xdp_fwd_kern.c/xdp_fwd_flags().
+ */
+static bool is_local_address(struct packet_info *p_info, void *ctx,
+			     struct parsing_context *pctx)
+{
+	int err;
+	struct bpf_fib_lookup lookup = { 0 };
+	__builtin_memset(&lookup, 0, sizeof(lookup));
+
+	if (p_info->pid.flow.ipv == AF_INET) {
+		lookup.family = AF_INET;
+		lookup.tos = p_info->iph->tos;
+		lookup.tot_len = bpf_ntohs(p_info->iph->tot_len);
+		lookup.ipv4_src = p_info->iph->saddr;
+		lookup.ipv4_dst = p_info->iph->daddr;
+	} else {
+		struct in6_addr *src = (struct in6_addr *)lookup.ipv6_src;
+		struct in6_addr *dst = (struct in6_addr *)lookup.ipv6_dst;
+
+		lookup.family = AF_INET6;
+		lookup.flowinfo = *(__be32 *)p_info->ip6h & IPV6_FLOWINFO_MASK;
+		lookup.tot_len = bpf_ntohs(p_info->ip6h->payload_len);
+		*src = p_info->pid.flow.saddr.ip; //verifier did not like ip6h->saddr
+		*dst = p_info->pid.flow.daddr.ip;
+	}
+
+	lookup.family = p_info->pid.flow.ipv;
+	lookup.l4_protocol = p_info->pid.flow.proto;
+	lookup.sport = 0;
+	lookup.dport = 0;
+	lookup.ifindex = pctx->ifindex;
+
+	err = bpf_fib_lookup(ctx, &lookup, sizeof(lookup), 0);
+
+	return err == BPF_FIB_LKUP_RET_NOT_FWDED ||
+	       err == BPF_FIB_LKUP_RET_FWD_DISABLED;
+}
+
+/*
+ * Attempt to create a timestamp-entry for packet p_info for flow in f_state
+ */
+static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
+				   struct parsing_context *pctx,
+				   struct packet_info *p_info, bool new_flow)
+{
+	if (!f_state || !p_info->pid_valid)
+		return;
+
+	if (config.localfilt && !pctx->is_egress &&
+	    is_local_address(p_info, ctx, pctx))
+		return;
 
 	// Check if identfier is new
-	if (f_state->last_id == p_id.identifier)
+	if (!new_flow && f_state->last_id == p_info->pid.identifier)
 		return;
-	f_state->last_id = p_id.identifier;
+	f_state->last_id = p_info->pid.identifier;
 
 	// Check rate-limit
 	if (!new_flow &&
-	    is_rate_limited(now, f_state->last_timestamp,
+	    is_rate_limited(p_info->time, f_state->last_timestamp,
 			    config.use_srtt ? f_state->srtt : f_state->min_rtt))
 		return;
 
@@ -440,44 +549,32 @@ static void pping_egress(void *ctx, struct parsing_context *pctx)
 	 * the next available map slot somewhat fairer between heavy and sparse
 	 * flows.
 	 */
-	f_state->last_timestamp = now;
-	bpf_map_update_elem(&packet_ts, &p_id, &now, BPF_NOEXIST);
+	f_state->last_timestamp = p_info->time;
 
-	return;
+	bpf_map_update_elem(&packet_ts, &p_info->pid, &p_info->time,
+			    BPF_NOEXIST);
 }
 
 /*
- * Main function for handling the pping ingress path.
- * Parses the packet for an identifer and tries to lookup a stored timestmap.
- * If it finds a match, it pushes an rtt_event to the events buffer.
+ * Attempt to match packet in p_info with a timestamp from flow in f_state
  */
-static void pping_ingress(void *ctx, struct parsing_context *pctx)
+static void pping_match_packet(struct flow_state *f_state, void *ctx,
+			       struct parsing_context *pctx,
+			       struct packet_info *p_info)
 {
-	struct packet_id p_id = { 0 };
-	struct flow_event fe;
 	struct rtt_event re = { 0 };
-	struct flow_state *f_state;
 	__u64 *p_ts;
-	__u64 now;
 
-	if (parse_packet_identifier(pctx, &p_id, &fe.event_info) < 0)
+	if (!f_state || !p_info->reply_pid_valid)
 		return;
 
-	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
-	if (!f_state)
+	p_ts = bpf_map_lookup_elem(&packet_ts, &p_info->reply_pid);
+	if (!p_ts || p_info->time < *p_ts)
 		return;
 
-	f_state->rec_pkts++;
-	f_state->rec_bytes += remaining_pkt_payload(pctx);
-
-	now = bpf_ktime_get_ns();
-	p_ts = bpf_map_lookup_elem(&packet_ts, &p_id);
-	if (!p_ts || now < *p_ts)
-		goto validflow_out;
-
-	re.rtt = now - *p_ts;
+	re.rtt = p_info->time - *p_ts;
 	// Delete timestamp entry as soon as RTT is calculated
-	bpf_map_delete_elem(&packet_ts, &p_id);
+	bpf_map_delete_elem(&packet_ts, &p_info->reply_pid);
 
 	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
 		f_state->min_rtt = re.rtt;
@@ -485,25 +582,59 @@ static void pping_ingress(void *ctx, struct parsing_context *pctx)
 
 	// Fill event and push to perf-buffer
 	re.event_type = EVENT_TYPE_RTT;
-	re.timestamp = now;
+	re.timestamp = p_info->time;
 	re.min_rtt = f_state->min_rtt;
 	re.sent_pkts = f_state->sent_pkts;
 	re.sent_bytes = f_state->sent_bytes;
 	re.rec_pkts = f_state->rec_pkts;
 	re.rec_bytes = f_state->rec_bytes;
-	re.flow = p_id.flow;
+	re.flow = p_info->pid.flow;
+	re.match_on_egress = pctx->is_egress;
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
+}
 
-validflow_out:
-	// Wait with deleting flow until having pushed final RTT message
-	if (fe.event_info.event == FLOW_EVENT_CLOSING &&
-	    bpf_map_delete_elem(&flow_state, &p_id.flow) == 0) {
-		fill_flow_event(&fe, now, &p_id.flow, EVENT_SOURCE_INGRESS);
-		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe,
-				      sizeof(fe));
+/*
+ * Will parse the ingress/egress packet in pctx and attempt to create a
+ * timestamp for it and match it against the reverse flow.
+ */
+static void pping(void *ctx, struct parsing_context *pctx)
+{
+	struct packet_info p_info = { 0 };
+	struct flow_state *f_state;
+	struct flow_event fe;
+	bool new_flow;
+
+ 	if (parse_packet_identifier(pctx, &p_info) < 0)
+		return;
+
+	if (p_info.event_type != FLOW_EVENT_CLOSING &&
+	    p_info.event_type != FLOW_EVENT_CLOSING_BOTH) {
+		f_state = update_flow(ctx, &p_info, &fe, &new_flow);
+		pping_timestamp_packet(f_state, ctx, pctx, &p_info, new_flow);
 	}
 
-	return;
+	f_state = update_rev_flow(&p_info);
+	pping_match_packet(f_state, ctx, pctx, &p_info);
+
+	// Flow closing - try to delete flow state and push closing-event
+	if (p_info.event_type == FLOW_EVENT_CLOSING ||
+	    p_info.event_type == FLOW_EVENT_CLOSING_BOTH) {
+		if (bpf_map_delete_elem(&flow_state, &p_info.pid.flow) == 0) {
+			fill_flow_event(&fe, &p_info, true);
+			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+					      &fe, sizeof(fe));
+		}
+	}
+
+	// Also close reverse flow
+	if (p_info.event_type == FLOW_EVENT_CLOSING_BOTH) {
+		if (bpf_map_delete_elem(&flow_state, &p_info.reply_pid.flow) ==
+		    0) {
+			fill_flow_event(&fe, &p_info, false);
+			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+					      &fe, sizeof(fe));
+		}
+	}
 }
 
 // Programs
@@ -517,10 +648,11 @@ int pping_tc_egress(struct __sk_buff *skb)
 		.data_end = (void *)(long)skb->data_end,
 		.pkt_len = skb->len,
 		.nh = { .pos = pctx.data },
+		.ifindex = skb->ingress_ifindex,
 		.is_egress = true,
 	};
 
-	pping_egress(skb, &pctx);
+	pping(skb, &pctx);
 
 	return TC_ACT_UNSPEC;
 }
@@ -534,10 +666,11 @@ int pping_tc_ingress(struct __sk_buff *skb)
 		.data_end = (void *)(long)skb->data_end,
 		.pkt_len = skb->len,
 		.nh = { .pos = pctx.data },
+		.ifindex = skb->ingress_ifindex,
 		.is_egress = false,
 	};
 
-	pping_ingress(skb, &pctx);
+	pping(skb, &pctx);
 
 	return TC_ACT_UNSPEC;
 }
@@ -551,10 +684,11 @@ int pping_xdp_ingress(struct xdp_md *ctx)
 		.data_end = (void *)(long)ctx->data_end,
 		.pkt_len = pctx.data_end - pctx.data,
 		.nh = { .pos = pctx.data },
+		.ifindex = ctx->ingress_ifindex,
 		.is_egress = false,
 	};
 
-	pping_ingress(ctx, &pctx);
+	pping(ctx, &pctx);
 
 	return XDP_PASS;
 }
