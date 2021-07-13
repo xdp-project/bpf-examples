@@ -417,26 +417,20 @@ static void fill_flow_event(struct flow_event *fe, struct packet_info *p_info,
 }
 
 /*
- * Attempt to create a new flow-state and push flow-opening message
+ * Attempt to create a new flow-state.
  * Returns a pointer to the flow_state if successful, NULL otherwise
  */
-static struct flow_state *create_flow(struct network_tuple *flow, void *ctx,
-				      struct packet_info *p_info,
-				      struct flow_event *fe)
+static struct flow_state *create_flow(struct packet_info *p_info)
 {
 	struct flow_state new_state = { 0 };
-
 	new_state.last_timestamp = p_info->time;
+	new_state.opening_reason = p_info->event_type == FLOW_EVENT_OPENING ?
+					       p_info->event_reason :
+					       EVENT_REASON_FIRST_OBS_PCKT;
+
 	if (bpf_map_update_elem(&flow_state, &p_info->pid.flow, &new_state,
 				BPF_NOEXIST) != 0)
 		return NULL;
-
-	if (p_info->event_type != FLOW_EVENT_OPENING) {
-		p_info->event_type = FLOW_EVENT_OPENING;
-		p_info->event_reason = EVENT_REASON_FIRST_OBS_PCKT;
-	}
-	fill_flow_event(fe, p_info, true);
-	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, fe, sizeof(*fe));
 
 	return bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
 }
@@ -445,31 +439,83 @@ static struct flow_state *update_flow(void *ctx, struct packet_info *p_info,
 				      struct flow_event *fe, bool *new_flow)
 {
 	struct flow_state *f_state;
+	bool has_opened;
 	*new_flow = false;
 
 	f_state = bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
+
+	// Flow is closing - attempt to delete state if it exists
+	if (p_info->event_type == FLOW_EVENT_CLOSING ||
+	    p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
+		if (!f_state)
+			return NULL;
+
+		has_opened = f_state->has_opened;
+		if (bpf_map_delete_elem(&flow_state, &p_info->pid.flow) == 0 &&
+		    has_opened) {
+			fill_flow_event(fe, p_info, true);
+			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+					      fe, sizeof(*fe));
+		}
+		return NULL;
+	}
+
+	// Attempt to create flow if it does not exist
 	if (!f_state && p_info->pid_valid) {
 		*new_flow = true;
-		f_state = create_flow(&p_info->pid.flow, ctx, p_info, fe);
+		f_state = create_flow(p_info);
 	}
 
 	if (!f_state)
 		return NULL;
 
+	// Update flow state
 	f_state->sent_pkts++;
 	f_state->sent_bytes += p_info->payload;
 
 	return f_state;
 }
 
-static struct flow_state *update_rev_flow(struct packet_info *p_info)
+static struct flow_state *update_rev_flow(void *ctx, struct packet_info *p_info,
+					  struct flow_event *fe)
 {
 	struct flow_state *f_state;
+	bool has_opened;
 
 	f_state = bpf_map_lookup_elem(&flow_state, &p_info->reply_pid.flow);
+
 	if (!f_state)
 		return NULL;
 
+	// Close reverse flow
+	if (p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
+
+		has_opened = f_state->has_opened;
+		if (bpf_map_delete_elem(&flow_state, &p_info->reply_pid.flow) ==
+			    0 && has_opened) {
+			fill_flow_event(fe, p_info, false);
+			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+					      fe, sizeof(*fe));
+		}
+		return NULL;
+	}
+
+	// Is a new flow, push opening flow message
+	if (!f_state->has_opened) {
+		f_state->has_opened = true;
+
+		fe->event_type = EVENT_TYPE_FLOW;
+		fe->flow = p_info->pid.flow;
+		fe->timestamp = f_state->last_timestamp;
+		fe->flow_event_type = FLOW_EVENT_OPENING;
+		fe->reason = f_state->opening_reason;
+		fe->source = EVENT_SOURCE_PKT_DEST;
+		fe->reserved = 0;
+		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, fe,
+				      sizeof(*fe));
+	}
+
+	// Update flow state
 	f_state->rec_pkts++;
 	f_state->rec_bytes += p_info->payload;
 
@@ -607,34 +653,11 @@ static void pping(void *ctx, struct parsing_context *pctx)
  	if (parse_packet_identifier(pctx, &p_info) < 0)
 		return;
 
-	if (p_info.event_type != FLOW_EVENT_CLOSING &&
-	    p_info.event_type != FLOW_EVENT_CLOSING_BOTH) {
-		f_state = update_flow(ctx, &p_info, &fe, &new_flow);
-		pping_timestamp_packet(f_state, ctx, pctx, &p_info, new_flow);
-	}
+	f_state = update_flow(ctx, &p_info, &fe, &new_flow);
+	pping_timestamp_packet(f_state, ctx, pctx, &p_info, new_flow);
 
-	f_state = update_rev_flow(&p_info);
+	f_state = update_rev_flow(ctx, &p_info, &fe);
 	pping_match_packet(f_state, ctx, pctx, &p_info);
-
-	// Flow closing - try to delete flow state and push closing-event
-	if (p_info.event_type == FLOW_EVENT_CLOSING ||
-	    p_info.event_type == FLOW_EVENT_CLOSING_BOTH) {
-		if (bpf_map_delete_elem(&flow_state, &p_info.pid.flow) == 0) {
-			fill_flow_event(&fe, &p_info, true);
-			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-					      &fe, sizeof(fe));
-		}
-	}
-
-	// Also close reverse flow
-	if (p_info.event_type == FLOW_EVENT_CLOSING_BOTH) {
-		if (bpf_map_delete_elem(&flow_state, &p_info.reply_pid.flow) ==
-		    0) {
-			fill_flow_event(&fe, &p_info, false);
-			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-					      &fe, sizeof(fe));
-		}
-	}
 }
 
 // Programs

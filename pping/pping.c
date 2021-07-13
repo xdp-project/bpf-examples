@@ -465,10 +465,11 @@ static bool packet_ts_timeout(void *key_ptr, void *val_ptr, __u64 now)
 static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 {
 	struct flow_event fe;
-	__u64 ts = ((struct flow_state *)val_ptr)->last_timestamp;
+	struct flow_state *f_state = val_ptr;
 
-	if (now > ts && now - ts > FLOW_LIFETIME) {
-		if (print_event_func) {
+	if (now > f_state->last_timestamp &&
+	    now - f_state->last_timestamp > FLOW_LIFETIME) {
+		if (print_event_func && f_state->has_opened) {
 			fe.event_type = EVENT_TYPE_FLOW;
 			fe.timestamp = now;
 			reverse_flow(&fe.flow, key_ptr);
