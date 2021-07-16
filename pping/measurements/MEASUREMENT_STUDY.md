@@ -238,20 +238,6 @@ apparently be challenging. Suggestions for packet generators:
 - [pktgen][pktgen-doc] - [paper][pktgen-paper]
 
 
-[ICANN-recommend]: https://www.icann.org/en/system/files/files/rssac-040-07aug18-en.pdf
-[CAIDA-recommend]: https://www.caida.org/projects/impact/anonymization/
-[google-anonym]: https://support.google.com/analytics/answer/2763052
-[id-myths]:  https://www.cs.utexas.edu/~shmat/shmat_cacm10.pdf "Alt. link: https://www.doi.org/10.1145/1743546.1743558"
-[priv-risks-anonymIP]: https://www.doi.org/10.1007/11909033_3
-[devil-trace]: http://www.icir.org/enterprise-tracing/devil-ccr-jan06.pdf "Alt. link: https://doi.org/10.1145/1111322.1111330"
-[tame-devil]: https://www.cs.colostate.edu/~cs656/papers-to-read/p00-coull.pdf "Alt. link: https://doi.org/10.7916/D8BC47W0"
-[net-anonym-attack]: https://www.researchgate.net/publication/202120661_The_Role_of_Network_Trace_Anonymization_under_Attack "Alt. link http://doi.acm.org/10.1145/1672308.1672310"
-[survey-net-anonym]: https://doi.org/10.1145/3182660
-[pktgen-doc]: https://www.kernel.org/doc/Documentation/networking/pktgen.txt
-[pktgen-paper]: http://kth.diva-portal.org/smash/get/diva2:919045/FULLTEXT01.pdf
-[MoonGen-github]: https://github.com/emmericp/MoonGen
-[MoonGen-paper]: https://www.net.in.tum.de/fileadmin/bibtex/publications/papers/MoonGen_IMC2015.pdf
-
 ### Initial setup (2021-06-21)
 Javid has granted me access to 3 VMs I can use to do the performance test(s).
 
@@ -293,11 +279,17 @@ On VM-3:
 ip route add 172.16.24.11/32 via 172.16.24.21 dev ens192
 ```
 
-Simon-VM-1 and Simon-VM-3 are intended to be used as traffic generators/sinks,
-and Simon-VM-2 acts as a middlebox between this traffic, where both Kathie's pping
-and my eBPF pping have been installed.
+To avoid [ARP Flux][ARP-Flux], I've also on all hosts set:
+```shell
+sysctl -w net.ipv4.conf.all.arp_ignore=1
+sysctl -w net.ipv4.conf.all.arp_announce=2
+```
 
-#### Some simple iperf3 tests
+Simon-VM-1 and Simon-VM-3 are intended to be used as traffic generators/sinks,
+and Simon-VM-2 acts as a middlebox between this traffic, where both Kathie's
+pping and my eBPF pping have been installed.
+
+#### Some simple iperf3 tests (2021-06-28)
 **NOTE:** CPU-performance has simply been measured with mpstat and then
 eyeballed. Results have no statistical significance at all and should be taken
 with a grain of salt. With 100% CPU utilization I mean 100% of a single core, so
@@ -423,3 +415,26 @@ int dummy_prog(struct xdp_md *ctx)
 	return XDP_PASS;
 }
 ```
+
+#### Some more thorough iperf3 tests (2021-07-16)
+Will write some more about these tests when I get back from vacation. But they
+were performed using the *run_tests.sh* script and plotted with the
+*plot_results.sh* scrip.
+
+For now, I've uploaded the results to [Box][Box-iperfresults-link].
+
+[ICANN-recommend]: https://www.icann.org/en/system/files/files/rssac-040-07aug18-en.pdf
+[CAIDA-recommend]: https://www.caida.org/projects/impact/anonymization/
+[google-anonym]: https://support.google.com/analytics/answer/2763052
+[id-myths]:  https://www.cs.utexas.edu/~shmat/shmat_cacm10.pdf "Alt. link: https://www.doi.org/10.1145/1743546.1743558"
+[priv-risks-anonymIP]: https://www.doi.org/10.1007/11909033_3
+[devil-trace]: http://www.icir.org/enterprise-tracing/devil-ccr-jan06.pdf "Alt. link: https://doi.org/10.1145/1111322.1111330"
+[tame-devil]: https://www.cs.colostate.edu/~cs656/papers-to-read/p00-coull.pdf "Alt. link: https://doi.org/10.7916/D8BC47W0"
+[net-anonym-attack]: https://www.researchgate.net/publication/202120661_The_Role_of_Network_Trace_Anonymization_under_Attack "Alt. link http://doi.acm.org/10.1145/1672308.1672310"
+[survey-net-anonym]: https://doi.org/10.1145/3182660
+[pktgen-doc]: https://www.kernel.org/doc/Documentation/networking/pktgen.txt
+[pktgen-paper]: http://kth.diva-portal.org/smash/get/diva2:919045/FULLTEXT01.pdf
+[MoonGen-github]: https://github.com/emmericp/MoonGen
+[MoonGen-paper]: https://www.net.in.tum.de/fileadmin/bibtex/publications/papers/MoonGen_IMC2015.pdf
+[ARP-Flux]: https://wiki.openvz.org/Multiple_network_interfaces_and_ARP_flux
+[Box-iperfresults-link]: https://kau.box.com/s/uqwbojj9h7nocjo5hawrx117has35ijb
