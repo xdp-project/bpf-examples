@@ -252,14 +252,18 @@ Current VM specifications:
 | Storage | ~20 GB |
 | Network | 2 x VMXNET3 Ethernet Controller |
 
-**Problem**: The VMXNET3 drivers do not have XDP support (so runs in XDP generic
-mode). Also have no idea how the underlying infrastructure/hardware is set up
-like. If they all run on the same machine or not, and to what degree they may or
-may not share resources with other VMs.
+**Problem**: The VMXNET3 drivers do not have XDP support, so either have to run
+in generic XDP mode or use the TC ingress hook instead of XDP. For the first
+simple [tests](#some-simple-iperf3-tests-2021-06-28) it was using XDP generic,
+but the later tests instead used the TC ingress hook.
+
+After some discussion with Javid I've learned that all VMs run on a single
+physical host. The host has 20 CPU cores and is not running any other tasks, so
+there should be very limited resource contention.
 
 I have tried to set up the machines in the following way:
 
-![VM-setup](./perf_test_setup.png)
+![VM-setup](figures/perf_test_setup.png)
 
 As I have no idea what I'm doing, here's the possibly stupid way I did it.
 On VM-1:
@@ -417,11 +421,151 @@ int dummy_prog(struct xdp_md *ctx)
 ```
 
 #### Some more thorough iperf3 tests (2021-07-16)
-Will write some more about these tests when I get back from vacation. But they
-were performed using the *run_tests.sh* script and plotted with the
-*plot_results.sh* scrip.
 
-For now, I've uploaded the results to [Box][Box-iperfresults-link].
+These tests were similar in nature to my earlier tests, but more thorough and
+systematic. The tests were performed using the *run_tests.sh* script and plotted
+with *plot_results.sh*. For now, all results have been uploaded to
+[Box][Box-iperfresults-link].
+
+Iperf3 servers were setup at VM-3, Kathie's or my eBPF pping was set up on the
+ens192 interface of VM-2, and iperf3 clients were started on VM-1 uploading
+traffic to VM-3 (which is routed through VM-2).
+
+To get a "fair" comparison with Kathie's pping, no sampling was used and the
+standard output format was chosen. Since my [initial
+testing](#some-simple-iperf3-tests-2021-06-28), eBPF pping has been changed to
+be more similar to Kathie's pping in that it now also timestamps and matches
+packets in both directions (instead of only timestamping on egress and matching
+on ingress). However, it does still not timestamp "pure ACKs" like Kathie's
+pping does, so for this test scenario it should only report RTTs in one
+direction (as actual traffic is only flowing in one direction), whereas Kathie's
+pping also will report RTTs for the reverse ACK-flow.
+
+These tests were performed with the, at the time, latest version of pping on the
+[miscellaneous fixes][github-misc-fixes-pr] branch, with the latest commit being
+"pping: Only consider flow opened on reply"
+([2827700](https://github.com/xdp-project/bpf-examples/pull/23/commits/28277002d72112c5d2cb2fe2bc629d72287dca17),
+although commit may have been force-pushed over). A small modification to the
+code was made to get it past the verifier on the older 5.4 kernels the VMs were
+running, by ignoring checking `config.use_srtt`, but that should be irrelevant
+for the tests as no sampling was used at all.
+
+For the "no messages" tests, the code was modified to not push any RTT-events
+(the single line calling `bpf_perf_event_output()` was commented out) in order
+to investigate if pushing and printing out a large amount of RTT-events was
+related to the relatively high overhead of eBPF pping (spoiler - it was).
+
+Overall, the tests seem to indicate that my eBPF pping is much more efficient
+that Kathie's pping when all traffic comes from a single stream, as seen in the
+figure below:
+
+![pping comparsion single stream](figures/pping_comparison_single.png)
+
+In this instance eBPF pping actually seems to have lower CPU usage than no pping
+at all, which of course doesn't seem reasonable. I'm guessing this is simply due
+to variations between runs, so will have to run a few more tests once I get
+access to the VMs again.
+
+It can also be noted that while Kathie's pping overall reports more RTTs here,
+if you only look at the "filtered" data for RTTs for VM-1 > VM-3 > VM-1 (as data
+is only sent from VM-1 > VM-3), eBPF pping has the expected 1000 RTTs/sec (from
+the TSval update frequency), whereas Kathie's reports about 750 RTTs/sec in each
+direction (where VM-3 > VM-1 is based on timestamping pure ACKs).
+
+When running 10 parallel streams instead, the results looks as in the figure
+below:
+
+![pping comparsion 10 streams](figures/pping_comparison_10.png)
+
+The CPU overhead of eBPF pping is now quite noticeable, even if it's still a lot
+lower than Kathie's pping. The number of reported RTTs is just over 8k, which is
+a bit short of the expected 10k, but a lot better than the ~2k from Kathie's
+pping.
+
+Another somewhat interesting aspect to note is that Kathie's pping now also
+seems to report mainly RTTs in the VM-1 > VM-3 direction instead of being split
+even with the reverse ACK flow as in the single flow case. The 100 and 500 flow
+tests seem to have an even lower fraction of RTTs in the "wrong" direction. I'm
+not sure what causes this behavior for Kathie's pping, but when it fails to keep
+up it conveniently enough seems to prioritize the "correct" RTTs (instead of the
+ones based on timestamping pure ACKs).
+
+**Note to self:** Run some tests where traffic is sent in both directions and
+see if Kathie's pping  still seems to favor reporting RTTs in one direction over
+the other.
+
+If we jump up to 500 flows, it looks as follows::
+
+![pping comparsion 500 streams](figures/pping_comparison_500.png)
+
+Here my eBPF pping completely falls apart. CPU usage is on average still less
+than for Kathie's, but it's very spiky and at times even surpasses
+Kathie's. Looking at the reported RTTs, they are also extremely spiky, with eBPF
+pping for long periods barley reporting anything, but occasionally
+reporting over 80k RTTs in a single second.
+
+Looking at some of the debug/error information from eBPF pping, visualized
+below, shows that there are several issues.
+
+![pping cleaning and lost events 500
+streams](figures/epping_mapcleaning_500.png)
+
+From the cleaning reports we can see that the timestamp entry map very quickly
+fills up to 16k (more precisely, 2^14, it's max size at the time of the
+tests). Once this occurs, we will start missing RTTs due to not being able to
+create timestamps until spots clear out (either due to a successful match or
+from user space cleanup). This issue can be alleviated by using a bigger map
+(although that will increase userspace cleanup time) or using sampling (however
+with enough flows it will still end up hitting the max size at some point). A
+very large fraction of the entries also seem to be stale based on the spikes of
+removed entries. In several instances over 10k (of the 16k) entries are timed
+out, meaning nothing has matched against them for over 10s.
+
+At some points the cleaning process also reports looping through way more than
+the 16k entries that should fit in the map. I'm guessing that this is because
+the BPF programs add or remove entries while the userspace process is looping
+through them, causing the loop to (at least partially) reset and going over the
+same entries multiple times. I don't see a way to fix this with the current
+approach of looping through the map entries one by one from userspace. In the
+future it will likely have to be redesigned using some new BTF capabilities,
+ex. [bpf_for_each_map_elem()][for-each-map-elem-helper], or removed entirely if
+something like [timeout maps][timeout-maps-discussion] make it into the
+kernel. The current cleanup process is also fairly slow when the maps get full,
+taking upwards of 0.5 seconds in one case.
+
+One can also note that a very large amount of the pushed events are lost. It
+simply seems incapable of dealing with a very large burst of RTT events being
+pushed at once. Looking at the scales, it seems like it in fact on several
+occasions may lose more events than it manages to print out.
+
+To see if simply pushing (and printing out) the RTT reports had a significant
+impact on the results, I also repeated the tests but with the line pushing the
+RTT-event to the perf-buffer in the BPF program commented out. The results for
+500 flows again can be seen below:
+
+![pping comparsion 500 streams no
+messages](figures/pping_comparison_500_nomsg.png)
+
+The CPU usage for eBPF pping is now much lower, even if it's still a significant
+overhead compared to the baseline of no pping at all. Similar results can be
+seen for the tests with 100 and 10 flows. So for CPU overhead, it seems like the
+main contributing factor to the CPU overhead right now. This begs the question
+if pushing an event for every calculated RTT is a sensible behavior for a
+performant pping. Should it instead be redesigned to provide periodic summaries,
+such as min, mean and max, or histograms?
+
+It is worth pointing out that for the tests with 500 flows, with and without
+eBPF pping pushing RTT-events, there are also some pretty considerable
+differences between the results for the "no pping" baseline. For example, the
+average CPU utalization drops from 27% to 16% while throughput increases from
+while throughput increases from ~6Gbit/s to ~10Gbit/, indicating that there is
+quite a lot of variance between runs. With so large differences between runs,
+it's hard to tell if the results really show the difference between the
+different pping versions, or just difference between runs. So until I get access
+to the VMs again and can repeat these tests multiple times, the results I've
+presented so far should be taken with a grain salt (or quite possibly a whole
+saltcellar).
+
 
 [ICANN-recommend]: https://www.icann.org/en/system/files/files/rssac-040-07aug18-en.pdf
 [CAIDA-recommend]: https://www.caida.org/projects/impact/anonymization/
@@ -437,4 +581,7 @@ For now, I've uploaded the results to [Box][Box-iperfresults-link].
 [MoonGen-github]: https://github.com/emmericp/MoonGen
 [MoonGen-paper]: https://www.net.in.tum.de/fileadmin/bibtex/publications/papers/MoonGen_IMC2015.pdf
 [ARP-Flux]: https://wiki.openvz.org/Multiple_network_interfaces_and_ARP_flux
-[Box-iperfresults-link]: https://kau.box.com/s/uqwbojj9h7nocjo5hawrx117has35ijb
+[Box-iperfresults-link]: https://kau.box.com/s/epoif0wi2qlffjxpcwmg4ibv7lsojwvo
+[github-misc-fixes-pr]: https://github.com/xdp-project/bpf-examples/pull/23
+[for-each-map-elem-helper]: https://lwn.net/Articles/846504/
+[timeout-maps-discussion]: https://lore.kernel.org/bpf/20210122205415.113822-1-xiyou.wangcong@gmail.com/
