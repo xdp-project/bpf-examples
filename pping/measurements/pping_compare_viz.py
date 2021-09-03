@@ -56,6 +56,8 @@ def count_epping_messages(file_name, src_ip="172.16.24.31"):
     with open(file_name) as file:
         for line in file:
             words = line.split()
+            if len(words) < 7:
+                continue
 
             if t_off is None:
                 t_off = parse_timestamp(words[0])
@@ -91,6 +93,8 @@ def count_kpping_messages(file_name, src_ip="172.16.24.31"):
     with open(file_name) as file:
         for i, line in enumerate(file):
             words = line.split()
+            if len(words) != 4:
+                continue
 
             if t_off is None:
                 t_off = parse_timestamp(words[0])
