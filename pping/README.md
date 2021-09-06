@@ -3,6 +3,66 @@ A re-implementation of [Kathie Nichols' passive ping
 (pping)](https://github.com/pollere/pping) utility using XDP (on ingress) and
 TC-BPF (on egress) for the packet capture logic.
 
+## Why eBPF pping?
+When evaluating network performance the focus has traditionally been on
+throughput. However, for many applications latency may be an equally or even
+more important metric. The [bufferbloat
+project](https://www.bufferbloat.net/projects/) has for many years tried to
+raise awareness of the importance of network latency, and more specifically the
+negative effects on QoE that an increase in latency due to oversized packet
+buffers can have. Being able to measure network latency is therefore essential
+for understanding network performance, and may also prove useful when
+troubleshooting applications or network missconfigurations.
+
+The most well known tool for measuring network latency is probably ping, which
+reports a Round Trip Time (RTT) to a target node by sending a message and
+measuring the time until it gets a response. Due to being standardized as part
+of the ICMP protocol, ping is universally available and usually a good first
+choice to determine the idle latency between two specific nodes. But the
+fundamental approach of actively sending out additional network traffic to
+measure network latency has several problems.
+
+1. It introduces additional network overhead. While a single ICMP packet every
+second is negligible on most links, increasing the granularity of RTT reports
+requires sending packets at a higher rate which could add up to considerable
+overhead on slower links.
+
+2. It only reports the RTT between a single pair of nodes. To get overview of
+the latency in a large network would require running ping between every possible
+pairing which is cumbersome and does not scale well.
+
+3. It only provides the latency experienced by the ICMP echos. This latency does
+not necessarily correspond with latency experienced by traffic from other
+applications. Running ping in isolation from other traffic will likely fail to
+capture an increase in latency that can be caused by buffer bloat. Even if ping
+is run concurrently with other traffic, the ping traffic may be treated
+differently due to for example active queue management, or even routed
+differently because of e.g. a load balancer.
+
+Passive ping (pping) uses a different approach that avoids these issues. Instead
+of sending out additional network traffic, pping looks at existing traffic and
+reports the RTT experienced by this traffic. This means that pping adds no
+network overhead, can report RTTs to any hosts for which regular network traffic
+is passing through, regardless if it's being run on an endhost or a middlebox,
+and the reported latency corresponds to the network latency experienced by the
+real application traffic.
+
+Kathleen Nichols proved the feasibility of this approach by implementing pping
+for TCP traffic, based on the TCP timestamp option. Kathie's C++ implementation,
+like most userspace programs, uses the traditional but rather inefficient
+technique of copying packet headers to userspace and parsing them there. At high
+line rates copying all packet headers to userspace is very resource demanding,
+and it may not be possible for the program to keep up with the network traffic,
+leading to it missing packets.
+
+With eBPF pping we want to leverage the power of eBPF to fix this
+inefficiency. Using eBPF, the packets can be parsed directly in kernel space
+while they pass through the network stack, without ever being copied to
+userspace. This approach allows pping to keep up with higher line rates and
+imposes less overhead. Furthermore, eBPF pping adds some additional features,
+such as JSON output, and extends it beyond TCP so it can be used to monitor a
+wider range of traffic.
+
 ## Simple description
 Passive Ping (PPing) is a simple tool for passively measuring per-flow RTTs. It
 can be used on endhosts as well as any (BPF-capable Linux) device which can see
@@ -122,6 +182,13 @@ An example of a (pretty-printed) RTT-even is provided below:
 
 ## Design and technical description
 !["Design of eBPF pping](./eBPF_pping_design.png)
+
+eBPF pping consists of two major components, the kernel space BPF program and
+the userspace program. The BPF program parses incoming and outgoing packets, and
+uses BPF maps to store packet timestamps as well as some state about each
+flow. When the BPF program can match a reply packet against one of the stored
+packet timestamps, it pushes the calculated RTT to the userspace program which
+in turn prints it out.
 
 ### Files:
 - **pping.c:** Userspace program that loads and attaches the BPF programs, pulls
