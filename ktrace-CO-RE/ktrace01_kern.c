@@ -45,7 +45,7 @@ struct sk_buff___local {
 	__u32 hash;
 } __attribute__((preserve_access_index));
 
-SEC("kprobe/udp_send_skb")
+SEC("kprobe/udp_send_skb.isra.0")
 int BPF_KPROBE(udp_send_skb, struct sk_buff___local *skb)
 //int udp_send_skb(struct pt_regs *ctx)
 {
