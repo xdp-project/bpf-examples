@@ -1,6 +1,7 @@
 #!/bin/bash
 
 N_FLOWS=(1 5 10 100 500)
+INTERTEST_INTERVAL=120 #sec
 
 # $1 = path to save results in
 # $2 = number of times to repeat the tests
@@ -21,5 +22,6 @@ for (( i = 1; i <= $2; i++ )); do
 	SPATH="${1}/run_${i}/${flows}_streams"
 	./run_tests.sh $SPATH $flows
 	./plot_results.sh $SPATH
+	sleep $INTERTEST_INTERVAL
     done
 done

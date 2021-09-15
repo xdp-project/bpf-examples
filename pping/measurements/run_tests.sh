@@ -12,6 +12,7 @@ IP_TARGET="172.16.24.31"
 IFACE="ens192"
 KPPING_FLAGS=""
 EPPING_FLAGS="-r 0 -I tc -f"
+INTERTEST_INTERVAL=120 #sec
 #PATH_PREFIX="pping_testing"
 
 # $1 = path to save results in
@@ -122,6 +123,7 @@ copy_back_results() {
 
     for (( i = 1; i < 4; i++ )); do
 	mkdir -p ${1}/VM${i}
+	ssh Simon-VM-${i} "xz ${1}/*"
 	scp -p "Simon-VM-${i}:${1}/*" "${1}/VM${i}/"
 	ssh Simon-VM-${i} "rm -r ${1}"
     done
@@ -136,12 +138,16 @@ SPATH="${1}/no_pping"
 run_tests $SPATH $2
 copy_back_results $SPATH
 
+sleep $INTERTEST_INTERVAL
+
 echo -e "\n\nRunning test with Kathie's pping..."
 SPATH="${1}/k_pping"
 start_kpping $SPATH
 run_tests $SPATH $2
 stop_pping
 copy_back_results $SPATH
+
+sleep $INTERTEST_INTERVAL
 
 echo -e "\n\nRunning test with my eBPF pping..."
 SPATH="${1}/e_pping"

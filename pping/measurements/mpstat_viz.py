@@ -7,11 +7,12 @@ import json
 import argparse
 
 import common_plotting as complot
+import util
 
 # Data mangling
 
-def load_mpstat_json(filename):
-    with open(filename) as file:
+def load_mpstat_json(filename, compression="auto"):
+    with util.open_compressed_file(filename, compression, mode="rt") as file:
         stats = json.load(file)
     return stats["sysstat"]["hosts"][0]
 
@@ -66,7 +67,7 @@ def normalize_timestamps(timestamps):
 def trim_only_under_load(per_cpu_dfs, load_thresh=10, neighbours=1, norm_timestamps="auto"):
     cpu_load = per_cpu_dfs["all"]
     if norm_timestamps == "auto":
-        norm_timestamps = not np.issubdtype(complot.get_first_dict_entry(per_cpu_dfs)["timestamp"].dtype,
+        norm_timestamps = not np.issubdtype(util.get_first_dict_entry(per_cpu_dfs)["timestamp"].dtype,
                                             np.datetime64)
         
     loaded_mask = per_cpu_dfs["all"]["total"].values >= load_thresh

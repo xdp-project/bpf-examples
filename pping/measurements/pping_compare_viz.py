@@ -9,12 +9,19 @@ import argparse
 import common_plotting as complot
 import mpstat_viz
 import iperf_viz
+import util
+
+def find_file_startswith(dir, name):
+    for file in os.listdir(dir):
+        if file.startswith(name):
+            return os.path.join(dir, file)
+    return ""
 
 def load_cpu_data(root_folder):
     load_dict = dict()
     for pping_type in ("no_pping", "k_pping", "e_pping"):
-        j_data = mpstat_viz.load_mpstat_json(os.path.join(root_folder, pping_type, 
-                                                          "VM2", "VM2_mpstat.json"))
+        j_data = mpstat_viz.load_mpstat_json(find_file_startswith(os.path.join(
+            root_folder, pping_type,"VM2"), "VM2_mpstat"))
         data = mpstat_viz.trim_only_under_load(mpstat_viz.to_percpu_df(j_data))
         load_dict[pping_type] = data["all"].copy()
     return load_dict
@@ -26,7 +33,7 @@ def load_iperf_data(root_folder):
         iperf_data = []
 
         for iperf_file in os.listdir(dpath):
-            if iperf_file.startswith("iperf") and iperf_file.endswith(".json"):
+            if iperf_file.startswith("iperf") and ".json" in iperf_file:
                 j_data = iperf_viz.load_iperf3_json(os.path.join(dpath, iperf_file))
                 iperf_data.append(iperf_viz.to_perstream_df(j_data, include_total=False))
 
@@ -41,19 +48,19 @@ def parse_timestamp(t_str):
     h_m_s = t_str.split(":")
     return float(h_m_s[0]) * 3600 + float(h_m_s[1]) * 60 + float(h_m_s[2])
 
-def count_epping_messages(file_name, src_ip="172.16.24.31"):
+def count_epping_messages(filename, src_ip="172.16.24.31"):
     """
     Count nr of rtt-events per second from the standard output of eBPF pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
     The column "all_events" includes both rtt-events and flow-events
 
-    NOTE: Assumes all events in file_name are from the same day
+    NOTE: Assumes all events in filename are from the same day
     """
     t_off = None
 
     count = {"ts":[0], "rtt_events":[0], "filtered_rtt_events":[0], "all_events":[0]}
 
-    with open(file_name) as file:
+    with util.open_compressed_file(filename, mode="rt") as file:
         for line in file:
             words = line.split()
             if len(words) < 7:
@@ -79,18 +86,18 @@ def count_epping_messages(file_name, src_ip="172.16.24.31"):
 
     return pd.DataFrame(count)
 
-def count_kpping_messages(file_name, src_ip="172.16.24.31"):
+def count_kpping_messages(filename, src_ip="172.16.24.31"):
     """
     Count nr of rtt-events per second from the standard output of Kathie's pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
 
-    NOTE: Assumes all events in file_name are from the same day
+    NOTE: Assumes all events in filename are from the same day
     """
     t_off = None
 
     count = {"ts":[0], "rtt_events":[0], "filtered_rtt_events":[0]}
 
-    with open(file_name) as file:
+    with util.open_compressed_file(filename, mode="rt") as file:
         for i, line in enumerate(file):
             words = line.split()
             if len(words) != 4:
@@ -141,8 +148,8 @@ def main():
     cpu_data = load_cpu_data(args.input)
     iperf_data = load_iperf_data(args.input)
 
-    epping_messages = count_epping_messages(os.path.join(args.input, "e_pping", "VM2", "pping.out"))
-    kpping_messages = count_kpping_messages(os.path.join(args.input, "k_pping", "VM2", "pping.out"))
+    epping_messages = count_epping_messages(find_file_startswith(os.path.join(args.input, "e_pping", "VM2"), "pping.out"))
+    kpping_messages = count_kpping_messages(find_file_startswith(os.path.join(args.input, "k_pping", "VM2"), "pping.out"))
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 

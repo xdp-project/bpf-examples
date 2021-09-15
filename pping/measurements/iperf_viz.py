@@ -7,10 +7,11 @@ import json
 import argparse
 
 import common_plotting as complot
+import util
 
 # Data mangling
-def load_iperf3_json(filename):
-    with open(filename) as file:
+def load_iperf3_json(filename, compression="auto"):
+    with util.open_compressed_file(filename, compression, mode="rt") as file:
         data = json.load(file)
     return data
 

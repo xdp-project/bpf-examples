@@ -4,11 +4,6 @@ import matplotlib.pyplot as plt
 def get_n_groups(group_dfs):
     return len([group for group in group_dfs if group != "all"])
 
-def get_first_dict_entry(dictionary):
-    if len(dictionary) < 1:
-        raise ValueError("dictionary is empty")
-    return next(iter(dictionary.values()))
-
 def auto_alpha(n):
     if n < 2:
         return 1.0

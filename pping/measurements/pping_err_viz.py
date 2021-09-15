@@ -5,6 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import argparse
 
+import util
+
 def parse_map_line(words, counts, clean_cycle, entry_map_id, conn_map_id):
     try:
         map_id = int(words[0].split(":")[0])
@@ -27,9 +29,9 @@ def parse_map_line(words, counts, clean_cycle, entry_map_id, conn_map_id):
 
     return clean_cycle, entry_map_id, conn_map_id
 
-def load_epping_errdata(file_name):
+def load_epping_errdata(file_name, compression="auto"):
     lines = []
-    with open(file_name) as file:
+    with util.open_compressed_file(file_name, compression, mode="rt") as file:
         lines = file.readlines()
 
     counts = {"clean_cycle":[0], "entry_map":[], "entry_map_removed":[], 
