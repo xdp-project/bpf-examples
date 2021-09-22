@@ -72,15 +72,18 @@ def plot_cleaning(errdata, axes=None, processing_time=True, grid=True):
 
     if processing_time:
         ax2 = axes.twinx()
-        ax2.plot(errdata["clean_cycle"], errdata["clean_time"], c="C2", ls="-")
+        ax2.plot(errdata["clean_cycle"].values, errdata["clean_time"].values, c="C2", ls="-")
         axes.plot([], [], c="C2", ls="-", label="processing time") # Hack to get a nice legend
 
         ax2.set_ylim(0)
         ax2.set_ylabel("Processing time (s)")
 
-    axes.plot(errdata["clean_cycle"], errdata["entry_map"], c="C0", ls="-", label="entry map")
-    axes.plot(errdata["clean_cycle"], errdata["entry_map_removed"], c="C0", ls="--", label="removed")
-    axes.plot(errdata["clean_cycle"], errdata["conn_map"], c="C1", ls="-", label="connection map")
+    axes.plot(errdata["clean_cycle"].values, errdata["entry_map"].values, c="C0", ls="-",
+              label="entry map")
+    axes.plot(errdata["clean_cycle"].values, errdata["entry_map_removed"].values, c="C0",
+              ls="--", label="removed")
+    axes.plot(errdata["clean_cycle"].values, errdata["conn_map"].values, c="C1", ls="-",
+              label="connection map")
 
     axes.grid(grid)
     axes.set_ylim(0)
@@ -95,7 +98,7 @@ def plot_lost_events(errdata, axes=None, grid=True):
     if axes is None:
         axes = plt.gca()
 
-    axes.plot(errdata["clean_cycle"], errdata["lost_events"])
+    axes.plot(errdata["clean_cycle"].values, errdata["lost_events"].values)
 
     axes.grid(grid)
     axes.set_ylim(0)

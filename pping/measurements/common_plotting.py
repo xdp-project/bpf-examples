@@ -29,14 +29,14 @@ def plot_pergroup_timeseries(group_dfs, col, axes=None, max_groups=10,
         
     for group, data in group_dfs.items():
         if group == "all":
-            axes.plot(data["timestamp"], data[col]/norm, label="average", 
+            axes.plot(data["timestamp"].values, data[col].values/norm, label="average",
                       color="k", linewidth=2, zorder=2.5)
         else:
             if many_groups:
-                axes.plot(data["timestamp"], data[col], label=group, color="C0",
+                axes.plot(data["timestamp"].values, data[col].values, label=group, color="C0",
                           alpha=alpha, **kwargs)
             else:
-                axes.plot(data["timestamp"], data[col], label=group, alpha=alpha,
+                axes.plot(data["timestamp"].values, data[col].values, label=group, alpha=alpha,
                           **kwargs)
                 
     axes.grid(grid)
@@ -92,10 +92,10 @@ def plot_pergroup_cdf(group_dfs, col, axes=None, normalize_all=True,
     
     for group, df in group_dfs.items():
         if group == "all":
-            plot_cdf(df[col]/norm, axes=axes, label="average",
+            plot_cdf(df[col].values/norm, axes=axes, label="average",
                      color="k", linewidth=2, zorder=2.5)
         else:
-            plot_cdf(df[col], axes=axes, label=group, **kwargs)
+            plot_cdf(df[col].values, axes=axes, label=group, **kwargs)
             
     axes.grid(grid)
     if legend:

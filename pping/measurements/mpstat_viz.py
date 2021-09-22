@@ -88,6 +88,7 @@ def plot_percpu_timeseries(per_cpu_dfs, axes=None):
     axes = complot.plot_pergroup_timeseries(per_cpu_dfs, col="total", axes=axes, 
                                             stat_kwargs=stat_kwargs)
     axes.set_ylabel("CPU load (%)")
+    axes.set_ylim(0)
     return axes
 
 def plot_percpu_cdf(per_cpu_dfs, axes=None):
@@ -147,6 +148,12 @@ def plot_cpu_load(per_cpu_dfs, title=None):
     
     if title is not None:
         fig.suptitle(title)
+
+    # Hack fix for it to render correctly on older matplotlib
+    # https://stackoverflow.com/a/59341086
+    fig.canvas.draw()
+    fig.canvas.draw()
+
 
     return fig
 

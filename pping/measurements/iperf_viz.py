@@ -128,6 +128,11 @@ def plot_iperf(stream_dfs, title=None):
     
     if title is not None:
         fig.suptitle(title)
+
+    # Hack fix for it to render correctly on older matplotlib
+    # https://stackoverflow.com/a/59341086
+    fig.canvas.draw()
+    fig.canvas.draw()
     
     return fig
 

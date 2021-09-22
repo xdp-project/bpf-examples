@@ -11,6 +11,8 @@ import mpstat_viz
 import iperf_viz
 import util
 
+label_folder_map = {"baseline":"no_pping", "PPing":"k_pping", "ePPing":"e_pping"}
+
 def find_file_startswith(dir, name):
     for file in os.listdir(dir):
         if file.startswith(name):
@@ -19,17 +21,17 @@ def find_file_startswith(dir, name):
 
 def load_cpu_data(root_folder):
     load_dict = dict()
-    for pping_type in ("no_pping", "k_pping", "e_pping"):
+    for label, folder in label_folder_map.items():
         j_data = mpstat_viz.load_mpstat_json(find_file_startswith(os.path.join(
-            root_folder, pping_type,"VM2"), "VM2_mpstat"))
+            root_folder, folder, "VM2"), "VM2_mpstat"))
         data = mpstat_viz.trim_only_under_load(mpstat_viz.to_percpu_df(j_data))
-        load_dict[pping_type] = data["all"].copy()
+        load_dict[label] = data["all"].copy()
     return load_dict
 
 def load_iperf_data(root_folder):
     net_dict = dict()
-    for pping_type in ("no_pping", "k_pping", "e_pping"):
-        dpath = os.path.join(root_folder, pping_type, "VM1")
+    for label, folder in label_folder_map.items():
+        dpath = os.path.join(root_folder, folder, "VM1")
         iperf_data = []
 
         for iperf_file in os.listdir(dpath):
@@ -37,7 +39,7 @@ def load_iperf_data(root_folder):
                 j_data = iperf_viz.load_iperf3_json(os.path.join(dpath, iperf_file))
                 iperf_data.append(iperf_viz.to_perstream_df(j_data, include_total=False))
 
-        net_dict[pping_type] = iperf_viz.merge_iperf_data(*iperf_data)["all"].copy()
+        net_dict[label] = iperf_viz.merge_iperf_data(*iperf_data)["all"].copy()
 
     return net_dict
 
@@ -125,11 +127,11 @@ def plot_pping_output(kpping_data, epping_data, axes=None, grid=True):
     if axes is None:
         axes = plt.gca()
 
-    axes.plot(kpping_data["ts"], kpping_data["rtt_events"], c="C1", ls="-", label="k_pping")
-    axes.plot(kpping_data["ts"], kpping_data["filtered_rtt_events"], c="C1", ls="--", label="k_pping filtered")
+    axes.plot(kpping_data["ts"], kpping_data["rtt_events"], c="C1", ls="-", label="PPing")
+    axes.plot(kpping_data["ts"], kpping_data["filtered_rtt_events"], c="C1", ls="--", label="PPing filtered")
 
-    axes.plot(epping_data["ts"], epping_data["rtt_events"], c="C2", ls="-", label="e_pping")
-    axes.plot(epping_data["ts"], epping_data["filtered_rtt_events"], c="C2", ls="--", label="e_pping filtered")
+    axes.plot(epping_data["ts"], epping_data["rtt_events"], c="C2", ls="-", label="ePPing")
+    axes.plot(epping_data["ts"], epping_data["filtered_rtt_events"], c="C2", ls="--", label="ePPing filtered")
 
     axes.set_ylim(0)
     axes.set_xlabel("Time (s)")
@@ -154,9 +156,17 @@ def main():
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 
     mpstat_viz.plot_percpu_timeseries(cpu_data, axes=axes[0])
+    axes[0].set_xlabel("Time (s)")
     iperf_viz.plot_throughput_timeseries(iperf_data, axes=axes[1])
+    axes[1].set_xlabel("Time (s)")
     plot_pping_output(kpping_messages, epping_messages, axes=axes[2])
     fig.suptitle("Comparing performance of pping variants")
+
+    # Hack fix for it to render correctly on older matplotlib
+    # https://stackoverflow.com/a/59341086
+    fig.canvas.draw()
+    fig.canvas.draw()
+
 
     if args.output is not None:
         fig.savefig(args.output, bbox_inches="tight");
