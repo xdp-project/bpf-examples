@@ -12,6 +12,7 @@
 #
 BPF_C = ${BPF_TARGETS:=.c}
 BPF_OBJ = ${BPF_C:.c=.o}
+BPF_SKEL = ${BPF_SKEL_OBJ:.o=.skel.h}
 USER_C := ${USER_TARGETS:=.c}
 USER_OBJ := ${USER_C:.c=.o}
 BPF_OBJ_INSTALL ?= $(BPF_OBJ)
@@ -51,7 +52,7 @@ BPF_CFLAGS += -I$(INCLUDE_DIR) -I$(HEADER_DIR) $(EXTRA_CFLAGS)
 
 BPF_HEADERS := $(wildcard $(HEADER_DIR)/*/*.h) $(wildcard $(INCLUDE_DIR)/*/*.h)
 
-all: $(USER_TARGETS) $(BPF_OBJ) $(EXTRA_TARGETS)
+all: $(USER_TARGETS) $(BPF_OBJ) $(EXTRA_TARGETS) $(BPF_SKEL)
 
 .PHONY: clean
 clean::
@@ -70,7 +71,7 @@ LIB_H := ${LIB_OBJS:.o=.h}
 $(LIB_OBJS): %.o: %.c %.h $(LIB_H)
 	$(Q)$(MAKE) -C $(dir $@) $(notdir $@)
 
-$(USER_TARGETS): %: %.c  $(OBJECT_LIBBPF) $(OBJECT_LIBXDP) $(LIBMK) $(LIB_OBJS) $(KERN_USER_H) $(EXTRA_DEPS) $(EXTRA_USER_DEPS)
+$(USER_TARGETS): %: %.c  $(OBJECT_LIBBPF) $(OBJECT_LIBXDP) $(LIBMK) $(LIB_OBJS) $(KERN_USER_H) $(EXTRA_DEPS) $(EXTRA_USER_DEPS) $(BPF_SKEL)
 	$(QUIET_CC)$(CC) -Wall $(CFLAGS) $(LDFLAGS) -o $@ $(LIB_OBJS) \
 	 $< $(LDLIBS)
 
@@ -85,6 +86,9 @@ $(BPF_OBJ): %.o: %.c $(KERN_USER_H) $(EXTRA_DEPS) $(BPF_HEADERS) $(LIBMK)
 	    -Wno-compare-distinct-pointer-types \
 	    -O2 -emit-llvm -c -g -o ${@:.o=.ll} $<
 	$(QUIET_LLC)$(LLC) -march=bpf -filetype=obj -o $@ ${@:.o=.ll}
+
+$(BPF_SKEL): %.skel.h: %.o
+	$(QUIET_GEN)$(BPFTOOL) gen skeleton ${@:.skel.h=.o} > $@
 
 
 .PHONY: test
