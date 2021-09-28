@@ -1,0 +1,16 @@
+* NAT64 BPF implementation
+
+This directory contains a BPF implementation of a stateless NAT64
+implementation, like that performed by Tayga, but entirely in BPF.
+
+Design:
+
+- Global v6 /96 prefix defined as NAT64 prefix
+- Each interface is assigned a v4 prefix for mapping v6 addresses
+  - Install onlink v4 route for that prefix to make sure traffic goes out the interface
+
+- Attach ingress and egress BPF programs to each interface
+  - On ingress: match v6 packets with a NAT64 prefix destination; remap to v4
+  - On egress: lookup v4 destination address; if it's in the configured NAT64 prefix, remap back to v6
+
+- Some logic to dynamically assign v4 addresses each time a new v6 source is seen
