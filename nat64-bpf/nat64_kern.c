@@ -120,6 +120,9 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
         dst_hdr.daddr = *dst_v6;
         dst_hdr.nexthdr = iph->protocol;
         dst_hdr.hop_limit = iph->ttl;
+        /* weird definition in ipv6hdr */
+        dst_hdr.priority = (iph->tos & 0x70) >> 4;
+        dst_hdr.flow_lbl[0] = iph->tos << 4;
         dst_hdr.payload_len = bpf_htons(bpf_ntohs(iph->tot_len) - iphdr_len);
 
         if (bpf_skb_change_proto(skb, bpf_htons(ETH_P_IPV6), 0))
@@ -333,6 +336,7 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
         dst_hdr.saddr = bpf_htonl(v6_state->v4_addr);
         dst_hdr.protocol = ip6h->nexthdr;
         dst_hdr.ttl = ip6h->hop_limit;
+        dst_hdr.tos = ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4);
         dst_hdr.tot_len = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(dst_hdr));
         dst_hdr.check = csum_fold_helper(bpf_csum_diff((__be32 *)&dst_hdr, 0,
                                                        (__be32 *)&dst_hdr, sizeof(dst_hdr),
