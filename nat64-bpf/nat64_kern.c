@@ -10,6 +10,8 @@
 #include "../include/xdp/parsing_helpers.h"
 #include "nat64.h"
 
+char _license[] SEC("license") = "GPL";
+
 struct nat64_config config;
 
 struct {
