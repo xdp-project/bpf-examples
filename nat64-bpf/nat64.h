@@ -6,9 +6,9 @@
 struct nat64_config {
         struct in6_addr v6_prefix;
         __u64 timeout_ns;
+        __u64 next_addr;
         __u32 v4_prefix;
         __u32 v4_mask;
-        __u32 next_addr;
 };
 
 struct v6_addr_state {

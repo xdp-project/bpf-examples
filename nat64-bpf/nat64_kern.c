@@ -157,8 +157,7 @@ static struct v6_addr_state *alloc_new_state(struct in6_addr *src_v6)
         for (i = 0; i < 10; i++) {
                 __u32 next_v4, next_addr;
 
-                //               next_addr = __sync_fetch_and_add(&config.next_addr, 0);
-                next_addr = config.next_addr;
+                next_addr = __sync_fetch_and_add(&config.next_addr, 0);
                 next_v4 = config.v4_prefix + next_addr;
 
                 if (next_v4 >= max_v4) {
@@ -166,14 +165,12 @@ static struct v6_addr_state *alloc_new_state(struct in6_addr *src_v6)
                         break;
                 }
 
-/*                if (__sync_val_compare_and_swap(&config.next_addr,
+                if (__sync_val_compare_and_swap(&config.next_addr,
                                                 next_addr,
                                                 next_addr + 1) == next_addr) {
                         src_v4 = next_v4;
                         break;
-                        }*/
-                config.next_addr = next_addr + 1;
-                src_v4 = next_v4;
+                        }
         }
 
         /* If src_v4 is 0 here, we failed to find an available addr */
