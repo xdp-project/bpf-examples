@@ -91,10 +91,17 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
          */
         ret = TC_ACT_SHOT;
 
+        /* we don't bother dealing with IP options or fragmented packets. The
+         * latter are identified by the 'frag_off' field having a value (either
+         * the MF bit, or the fragmet offset, or both). However, this field also
+         * contains the "don't fragment" (DF) bit, which we ignore, so mask that
+         * out. The DF is the second-most-significant bit (as bit 0 is
+         * reserved).
+         */
         iphdr_len = iph->ihl * 4;
-        /* drop packets with IP options */
-        if (iphdr_len != sizeof(struct iphdr)) {
-                DBG("v4: pkt src/dst %pI4/%pI4 has IP options, dropping\n",
+        if (iphdr_len != sizeof(struct iphdr) ||
+            (iph->frag_off & ~bpf_htons(1<<14))) {
+                DBG("v4: pkt src/dst %pI4/%pI4 has IP options or is fragmented, dropping\n",
                     &iph->daddr, &iph->saddr);
                 goto out;
         }
