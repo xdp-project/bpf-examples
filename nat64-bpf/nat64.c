@@ -82,7 +82,7 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 	/* Default to special prefix 64:ff9b::/96 */
 	config->c.v6_prefix.s6_addr[1] = 0x64;
 	config->c.v6_prefix.s6_addr[2] = 0xff;
-	config->c.v6_prefix.s6_addr[3] = 0x0b;
+	config->c.v6_prefix.s6_addr[3] = 0x9b;
 
 	while ((opt = getopt_long(argc, argv, "i:6:4:t:a:hu", long_options,
 				  NULL)) != -1) {
