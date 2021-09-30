@@ -45,6 +45,18 @@ struct {
 	__uint(max_entries, 1);
 } reclaimed_addrs SEC(".maps");
 
+#ifdef DEBUG
+#define DBG(fmt, ...)                                   \
+({							\
+	char ____fmt[] = "nat64: " fmt;                 \
+	bpf_trace_printk(____fmt, sizeof(____fmt),	\
+			 ##__VA_ARGS__);		\
+})
+#else
+#define DBG
+#endif
+
+
 static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 {
 	void *data_end = (void *)(unsigned long long)skb->data_end;
@@ -81,12 +93,20 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 
         iphdr_len = iph->ihl * 4;
         /* drop packets with IP options */
-        if (iphdr_len != sizeof(struct iphdr))
+        if (iphdr_len != sizeof(struct iphdr)) {
+                DBG("v4: pkt src/dst %pI4/%pI4 has IP options, dropping\n",
+                    &iph->daddr, &iph->saddr);
                 goto out;
+        }
+
 
         dst_v6 = bpf_map_lookup_elem(&v4_reversemap, &dst_v4);
-        if (!dst_v6)
+        if (!dst_v6) {
+                DBG("v4: no mapping found for dst %pI4\n", &iph->daddr);
                 goto out;
+        }
+
+        DBG("v4: Found mapping for dst %pI4 to %pI6c\n", &iph->daddr, dst_v6);
 
         // src v4 as last octet of nat64 address
         dst_hdr.saddr.s6_addr32[3] = iph->saddr;
@@ -170,7 +190,7 @@ static struct v6_addr_state *alloc_new_state(struct in6_addr *src_v6)
                                                 next_addr + 1) == next_addr) {
                         src_v4 = next_v4;
                         break;
-                        }
+                }
         }
 
         /* If src_v4 is 0 here, we failed to find an available addr */
@@ -221,13 +241,13 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	void *data = (void *)(unsigned long long)skb->data;
 
 	struct v6_trie_key saddr_key = { .t.prefixlen = 128 };
-        struct in6_addr *dst_v6, src_v6, subnet_v6 = {};
+        struct in6_addr *dst_v6, subnet_v6 = {};
+        __u32 *allowval, src_v4;
         int ip_type, ip_offset;
 	struct ipv6hdr *ip6h;
         int ret = TC_ACT_OK;
 	struct ethhdr *eth;
         struct iphdr *iph;
-        __u32 *allowval;
 
         struct v6_addr_state *v6_state;
 
@@ -246,8 +266,11 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
         subnet_v6 = *dst_v6;
         /* v6 pxlen is always 96 */
         subnet_v6.s6_addr32[3] = 0;
-        if (cmp_v6addr(&subnet_v6, &config.v6_prefix))
+        if (cmp_v6addr(&subnet_v6, &config.v6_prefix)) {
+                DBG("v6: dst subnet %pI6c not in configured prefix %pI6c\n",
+                    &subnet_v6, &config.v6_prefix);
                 goto out;
+        }
 
         /* At this point we know the destination IP is within the configured
          * subnet, so if we can't rewrite the packet it should be dropped (so as
@@ -261,18 +284,29 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 
         saddr_key.addr = ip6h->saddr;
         allowval = bpf_map_lookup_elem(&allowed_v6_src, &saddr_key);
-        if (!allowval)
+        if (!allowval) {
+                DBG("v6: saddr %pI6c not in allowed src\n", &ip6h->saddr);
                 goto out;
+        }
 
-        src_v6 = ip6h->saddr;
-        v6_state = bpf_map_lookup_elem(&v6_state_map, &src_v6);
+        v6_state = bpf_map_lookup_elem(&v6_state_map, &ip6h->saddr);
         if (!v6_state) {
-                v6_state = alloc_new_state(&src_v6);
-                if (!v6_state)
+                v6_state = alloc_new_state(&ip6h->saddr);
+                if (!v6_state) {
+                        DBG("v6: failed to allocate state for src %pI6c\n",
+                            &ip6h->saddr);
                         goto out;
+                }
+                src_v4 = bpf_htonl(v6_state->v4_addr);
+                DBG("v6: created new state for v6 %pI6c -> %pI4\n",
+                    &ip6h->saddr, &src_v4);
         } else {
                 v6_state->last_seen = bpf_ktime_get_ns();
-                bpf_map_update_elem(&v6_state_map, &src_v6, v6_state, BPF_EXIST);
+                bpf_map_update_elem(&v6_state_map, &ip6h->saddr, v6_state, BPF_EXIST);
+
+                src_v4 = bpf_htonl(v6_state->v4_addr);
+                DBG("v6: updated old state for v6 %pI6c -> %pI4\n",
+                    &ip6h->saddr, &src_v4);
         }
 
         dst_hdr.daddr = ip6h->daddr.s6_addr32[3];
