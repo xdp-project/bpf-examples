@@ -207,6 +207,7 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	void *data = (void *)(unsigned long long)skb->data;
 
         struct in6_addr *dst_v6, src_v6, subnet_v6 = {};
+	struct v6_trie_key saddr_key = { .t.prefixlen = 128 };
         int ip_type, ip_offset;
 	struct ipv6hdr *ip6h;
         int ret = TC_ACT_OK;
@@ -241,7 +242,8 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
         if (ip_type != ip6h->nexthdr)
                 goto out;
 
-        allowval = bpf_map_lookup_elem(&allowed_v6_src, &ip6h->saddr);
+        saddr_key.addr = ip6h->saddr;
+        allowval = bpf_map_lookup_elem(&allowed_v6_src, &saddr_key);
         if (!allowval)
                 goto out;
 

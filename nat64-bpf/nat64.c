@@ -42,10 +42,6 @@ struct nat64_user_config {
 	bool unload;
 };
 
-struct v6_trie_key {
-	struct bpf_lpm_trie_key t;
-	struct in6_addr addr;
-};
 
 
 static int parse_v6_prefix(char *str, struct in6_addr *v6addr)

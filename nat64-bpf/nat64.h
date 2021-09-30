@@ -17,4 +17,9 @@ struct v6_addr_state {
   __u32 static_conf;
 };
 
+struct v6_trie_key {
+	struct bpf_lpm_trie_key t;
+	struct in6_addr addr;
+};
+
 #endif
