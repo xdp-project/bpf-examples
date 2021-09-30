@@ -52,8 +52,10 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 
         int ip_type, iphdr_len, ip_offset;
         struct in6_addr *dst_v6;
+	struct ipv6hdr *ip6h;
         int ret = TC_ACT_OK;
 	struct iphdr *iph;
+        struct ethhdr *eth;
         __u32 dst_v4;
 
 	struct ipv6hdr dst_hdr = {
@@ -88,21 +90,26 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 
         // src v4 as last octet of nat64 address
         dst_hdr.saddr.s6_addr32[3] = iph->saddr;
+        dst_hdr.daddr = *dst_v6;
         dst_hdr.nexthdr = iph->protocol;
         dst_hdr.hop_limit = iph->ttl;
-        dst_hdr.payload_len = iph->tot_len - iphdr_len;
-        __builtin_memcpy(&dst_hdr.daddr, dst_v6, sizeof(struct in6_addr));
+        dst_hdr.payload_len = bpf_htons(bpf_ntohs(iph->tot_len) - iphdr_len);
 
         if (bpf_skb_change_proto(skb, bpf_htons(ETH_P_IPV6), 0))
                 goto out;
 
-        /* If this fails we already mangled the packet, so need to drop it */
-        if (bpf_skb_store_bytes(skb, ip_offset,
-                                &dst_hdr, sizeof(dst_hdr),
-                                BPF_F_RECOMPUTE_CSUM))
+	data = (void *)(unsigned long long)skb->data;
+	data_end = (void *)(unsigned long long)skb->data_end;
+
+        eth = data;
+        ip6h = data + ip_offset;
+        if (eth + 1 > data_end || ip6h + 1 > data_end)
                 goto out;
 
-        ret = TC_ACT_OK;
+        eth->h_proto = bpf_htons(ETH_P_IPV6);
+        *ip6h = dst_hdr;
+
+        ret = bpf_redirect_neigh(skb->ifindex, NULL, 0, 0);
 out:
         return ret;
 }
@@ -203,23 +210,34 @@ static int cmp_v6addr(struct in6_addr *a, struct in6_addr *b)
         return 0;
 }
 
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
+	__u32 sum;
+	sum = (csum >> 16) + (csum & 0xffff);
+	sum += (sum >> 16);
+	return ~sum;
+}
+
 static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 {
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
 
-        struct in6_addr *dst_v6, src_v6, subnet_v6 = {};
 	struct v6_trie_key saddr_key = { .t.prefixlen = 128 };
+        struct in6_addr *dst_v6, src_v6, subnet_v6 = {};
         int ip_type, ip_offset;
 	struct ipv6hdr *ip6h;
         int ret = TC_ACT_OK;
+	struct ethhdr *eth;
+        struct iphdr *iph;
         __u32 *allowval;
 
         struct v6_addr_state *v6_state;
 
 	struct iphdr dst_hdr = {
 		.version = 4,
-	};
+                .ihl = 5,
+        };
 
         ip_offset = (nh->pos - data) & 0x1fff;
 
@@ -264,18 +282,26 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
         dst_hdr.saddr = bpf_htonl(v6_state->v4_addr);
         dst_hdr.protocol = ip6h->nexthdr;
         dst_hdr.ttl = ip6h->hop_limit;
-        dst_hdr.tot_len = ip6h->payload_len + sizeof(struct iphdr);
+        dst_hdr.tot_len = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(dst_hdr));
+        dst_hdr.check = csum_fold_helper(bpf_csum_diff((__be32 *)&dst_hdr, 0,
+                                                       (__be32 *)&dst_hdr, sizeof(dst_hdr),
+                                                       0));
 
         if (bpf_skb_change_proto(skb, bpf_htons(ETH_P_IP), 0))
                 goto out;
 
-        /* If this fails we already mangled the packet, so need to drop it */
-        if (bpf_skb_store_bytes(skb, ip_offset,
-                                &dst_hdr, sizeof(dst_hdr),
-                                BPF_F_RECOMPUTE_CSUM))
+	data = (void *)(unsigned long long)skb->data;
+	data_end = (void *)(unsigned long long)skb->data_end;
+
+        eth = data;
+        iph = data + ip_offset;
+        if (eth + 1 > data_end || iph + 1 > data_end)
                 goto out;
 
-        ret = TC_ACT_OK;
+        eth->h_proto = bpf_htons(ETH_P_IP);
+        *iph = dst_hdr;
+
+        ret = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
 out:
         return ret;
 }
