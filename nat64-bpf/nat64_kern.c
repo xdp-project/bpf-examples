@@ -249,7 +249,7 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 
 	struct v6_trie_key saddr_key = { .t.prefixlen = 128 };
         struct in6_addr *dst_v6, subnet_v6 = {};
-        __u32 *allowval, src_v4;
+        __u32 *allowval, src_v4, dst_v4;
         int ip_type, ip_offset;
 	struct ipv6hdr *ip6h;
         int ret = TC_ACT_OK;
@@ -286,8 +286,21 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
         ret = TC_ACT_SHOT;
 
         /* drop packets with IP options - parser skips options */
-        if (ip_type != ip6h->nexthdr)
+        if (ip_type != ip6h->nexthdr) {
+                DBG("v6: dropping packet with IP options from %pI6c\n",
+                    &ip6h->saddr);
                 goto out;
+        }
+
+        /* drop a few special addresses */
+        dst_v4 = ip6h->daddr.s6_addr32[3];
+        if (!dst_v4 || /* 0.0.0.0 */
+            (dst_v4 & bpf_htonl(0xFF000000)) == bpf_htonl(0x7F000000) || /* 127.x.x.x */
+            (dst_v4 & bpf_htonl(0xF0000000)) == bpf_htonl(0xe0000000)) { /* multicast */
+                DBG("v6: dropping invalid v4 dst %pI4 from %pI6c\n",
+                    &dst_v4, &ip6h->saddr);
+                goto out;
+        }
 
         saddr_key.addr = ip6h->saddr;
         allowval = bpf_map_lookup_elem(&allowed_v6_src, &saddr_key);
@@ -316,7 +329,7 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
                     &ip6h->saddr, &src_v4);
         }
 
-        dst_hdr.daddr = ip6h->daddr.s6_addr32[3];
+        dst_hdr.daddr = dst_v4;
         dst_hdr.saddr = bpf_htonl(v6_state->v4_addr);
         dst_hdr.protocol = ip6h->nexthdr;
         dst_hdr.ttl = ip6h->hop_limit;
