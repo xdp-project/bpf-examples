@@ -5,6 +5,7 @@ BPF_TARGETS    := nat64_kern
 BPF_SKEL_OBJ := nat64_kern.o
 
 #LDLIBS     += -pthread
+USER_LIBS = -lmnl
 EXTRA_DEPS += nat64.h
 
 LIB_DIR = ../lib

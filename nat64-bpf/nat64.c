@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 #include <net/if.h>
 #include <linux/if_arp.h>
 #include <getopt.h>
@@ -15,6 +16,9 @@
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+
+#include <libmnl/libmnl.h>
+#include <linux/rtnetlink.h>
 
 #include "nat64.h"
 #include "nat64_kern.skel.h"
@@ -39,6 +43,7 @@ struct nat64_user_config {
 	char ifname[IF_NAMESIZE+1];
 	struct in6_addr v6_allow;
 	__u32 v6_allow_pxlen;
+	__u32 v4_pxlen;
 	bool unload;
 };
 
@@ -137,6 +142,7 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 				return -EINVAL;
 			}
 			config->c.v4_mask = 0xFFFFFFFF << (32 - pxlen);
+			config->v4_pxlen = pxlen;
 			config->c.v4_prefix = ntohl(v4addr.s_addr);
 			if (config->c.v4_prefix & ~config->c.v4_mask) {
 				fprintf(stderr, "Not a network address: %s\n", optarg);
@@ -175,6 +181,173 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 	return 0;
 }
 
+static int do_v4_neigh(struct mnl_socket *nl, struct nat64_user_config *cfg, bool create)
+{
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	struct nlmsghdr *nlh;
+	uint32_t seq, portid;
+	struct rtmsg *rtm;
+	int ret, err = 0;
+
+	struct {
+		__u16 family;
+		struct in6_addr addr;
+	} __attribute__((packed)) via = {
+		.family = AF_INET6,
+		.addr = cfg->c.v6_prefix
+	};
+
+
+	nlh = mnl_nlmsg_put_header(buf);
+	if (create) {
+		nlh->nlmsg_type = RTM_NEWROUTE;
+		nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
+	} else {
+		nlh->nlmsg_type = RTM_DELROUTE;
+		nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	}
+	nlh->nlmsg_seq = seq = time(NULL);
+
+	rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtmsg));
+	rtm->rtm_family = AF_INET;
+	rtm->rtm_dst_len = cfg->v4_pxlen;
+	rtm->rtm_src_len = 0;
+	rtm->rtm_tos = 0;
+	rtm->rtm_protocol = RTPROT_STATIC;
+	rtm->rtm_table = RT_TABLE_MAIN;
+	rtm->rtm_type = RTN_UNICAST;
+	rtm->rtm_scope = RT_SCOPE_UNIVERSE;
+	rtm->rtm_flags = RTNH_F_ONLINK;
+
+	mnl_attr_put_u32(nlh, RTA_DST, htonl(cfg->c.v4_prefix));
+	mnl_attr_put_u32(nlh, RTA_OIF, cfg->ifindex);
+	mnl_attr_put(nlh, RTA_VIA, sizeof(via), &via);
+
+	portid = mnl_socket_get_portid(nl);
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+		perror("mnl_socket_sendto");
+		err = -errno;
+		goto out;
+	}
+
+	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	if (ret < 0) {
+		perror("mnl_socket_recvfrom");
+		err = -errno;
+		goto out;
+	}
+
+	ret = mnl_cb_run(buf, ret, seq, portid, NULL, NULL);
+	if (ret < 0) {
+		if ((create && errno != EEXIST) ||
+		    !(create && errno != ENOENT && errno != ESRCH))
+			err = -errno;
+		goto out;
+	}
+
+out:
+	return err;
+}
+
+static int do_v4_route(struct mnl_socket *nl, struct nat64_user_config *cfg, bool create)
+{
+	char buf[MNL_SOCKET_BUFFER_SIZE];
+	struct nlmsghdr *nlh;
+	uint32_t seq, portid;
+	struct ndmsg *ndm;
+	int ret, err = 0;
+
+	__u8 lladdr[6] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+	nlh = mnl_nlmsg_put_header(buf);
+	if (create) {
+		nlh->nlmsg_type = RTM_NEWNEIGH;
+		nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
+	} else {
+		nlh->nlmsg_type = RTM_DELNEIGH;
+		nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	}
+	nlh->nlmsg_seq = seq = time(NULL);
+
+	ndm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct ndmsg));
+	ndm->ndm_family = AF_INET6;
+	ndm->ndm_ifindex = cfg->ifindex;
+	ndm->ndm_state = NUD_PERMANENT;
+	ndm->ndm_type = 0;
+
+	mnl_attr_put(nlh, NDA_LLADDR, sizeof(lladdr), &lladdr);
+	mnl_attr_put(nlh, NDA_DST, sizeof(struct in6_addr), &cfg->c.v6_prefix);
+
+	portid = mnl_socket_get_portid(nl);
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+		perror("mnl_socket_sendto");
+		err = -errno;
+		goto out;
+	}
+
+	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	if (ret < 0) {
+		perror("mnl_socket_recvfrom");
+		err = -errno;
+		goto out;
+	}
+
+	ret = mnl_cb_run(buf, ret, seq, portid, NULL, NULL);
+	if (ret < 0) {
+		if ((create && errno != EEXIST) ||
+		    !(create && errno != ENOENT && errno != ESRCH))
+			err = -errno;
+		goto out;
+	}
+
+out:
+	return err;
+}
+
+static int do_netlink(struct nat64_user_config *cfg, bool create)
+{
+	struct mnl_socket *nl;
+	int err = 0;
+
+	nl = mnl_socket_open(NETLINK_ROUTE);
+	if (nl == NULL) {
+		perror("mnl_socket_open");
+		err = -errno;
+		goto out;
+	}
+
+	if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
+		perror("mnl_socket_bind");
+		err = -errno;
+		goto out;
+	}
+
+	err = do_v4_route(nl, cfg, create);
+	err = err ?: do_v4_neigh(nl, cfg, create);
+
+out:
+	mnl_socket_close(nl);
+	return err;
+}
+
+
+int teardown(struct nat64_user_config *cfg)
+{
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook,
+			    .attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS,
+			    .ifindex = cfg->ifindex);
+	int err;
+
+	err = bpf_tc_hook_destroy(&hook);
+	if (err)
+		fprintf(stderr, "Couldn't remove clsact qdisc on %s\n", cfg->ifname);
+
+	err = do_netlink(cfg, false);
+	if (err)
+		fprintf(stderr, "Couldn't remove route on %s: %s\n",
+			cfg->ifname, strerror(-err));
+
+	return err;
+}
 
 
 int main(int argc, char *argv[])
@@ -194,13 +367,8 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 
 	hook.ifindex = cfg.ifindex;
-	if (cfg.unload) {
-		err = bpf_tc_hook_destroy(&hook);
-		if (err)
-			fprintf(stderr, "Couldn't remove clsact qdisc on %s\n", cfg.ifname);
-
-		return err;
-	}
+	if (cfg.unload)
+		return teardown(&cfg);
 
 	obj = nat64_kern__open();
 	err = libbpf_get_error(obj);
@@ -211,8 +379,6 @@ int main(int argc, char *argv[])
 	}
 
 	num_addr = (cfg.c.v4_prefix | ~cfg.c.v4_mask) - cfg.c.v4_prefix - 2;
-
-	printf("num addr: %u\n", num_addr);
 
 	obj->bss->config = cfg.c;
 	bpf_map__resize(obj->maps.v6_state_map, num_addr);
@@ -274,6 +440,12 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Couldn't attach egress program to ifindex %d\n",
 			hook.ifindex);
 		goto out;
+	}
+
+	err = do_netlink(&cfg, true);
+	if (err) {
+		fprintf(stderr, "Couldn't create route: %s\n", strerror(-err));
+		err = teardown(&cfg);
 	}
 
 out:
