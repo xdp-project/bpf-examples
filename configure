@@ -13,6 +13,8 @@ trap 'status=$?; rm -rf $TMPDIR; rm -f $CONFIG; exit $status' EXIT HUP INT QUIT 
 
 check_toolchain()
 {
+    local clang_version
+
     : ${PKG_CONFIG:=pkg-config}
     : ${CC=gcc}
     : ${CLANG=clang}
@@ -24,6 +26,13 @@ check_toolchain()
             exit 1;
         fi;
     done
+
+    clang_version=$($CLANG --version | sed -n '/clang version/ s/clang version // p')
+    if [ "${clang_version//\.[0-9\.]*/}" -lt "11" ]; then
+        echo "ERROR: Need clang version >= 11, found $clang_version"
+        exit 1
+    fi
+    echo "clang: $clang_version"
 
     echo "PKG_CONFIG:=${PKG_CONFIG}" >>$CONFIG
     echo "CC:=${CC}" >>$CONFIG
