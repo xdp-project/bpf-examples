@@ -264,6 +264,7 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	struct iphdr dst_hdr = {
 		.version = 4,
                 .ihl = 5,
+                .frag_off = bpf_htons(1<<14), /* set Don't Fragment bit */
         };
 
         ip_offset = (nh->pos - data) & 0x1fff;
