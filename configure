@@ -28,8 +28,9 @@ check_toolchain()
     done
 
     clang_version=$($CLANG --version | sed -n '/clang version/ s/^.*clang version // p')
-    if [ "${clang_version//.*/}" -lt "11" ]; then
-        echo "ERROR: Need clang version >= 11, found $clang_version"
+    clang_major_version=$(echo "$clang_version" | sed 's/\..*$//')
+    if [ "$clang_major_version" -lt "11" ]; then
+        echo "ERROR: Need clang version >= 11, found $clang_major_version ($clang_version)"
         exit 1
     fi
     echo "clang: $clang_version"
