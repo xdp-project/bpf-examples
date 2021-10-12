@@ -1,0 +1,86 @@
+* NAT64 BPF implementation
+
+This directory contains a BPF implementation of a stateless NAT64
+implementation, like that performed by Tayga, but entirely in BPF. It works by
+attaching to the TC hooks of an interface and translating incoming IPv6
+addresses with a destination in the configured NAT64 prefix, and routing v4
+packets back out through that interface based on the (v4) prefix used for
+translation.
+
+** Running
+
+To run the translator on =eth0= with an IPv4 prefix of =10.0.1.0/24= and using
+the default well-known v6 prefix (=64:ff9b::/96=), simply issue
+
+#+begin_src sh
+sudo ./nat64 -i eth0 -4 10.0.1.0/24 -a fc00::/8
+#+end_src
+
+Run again with a =-u= parameter to unload (but make sure to also specify the
+rest of the parameters as they are needed to properly clean up). To specify
+another v6 prefix, use =-6=.
+
+The userspace utility will install the necessary routing rules, and setup the
+BPF programs, then exit. The translator will then keep running entirely in the
+kernel until unloaded (with =-u=).
+
+** Assumptions
+
+The operation of this NAT64 translator makes a few assumptions:
+
+- A single v6 NAT64 prefix is used, and the prefix length is always 96 (i.e.,
+  the v4 addresses live in the last four bytes). By default the well-known
+  prefix =64:ff9b::/96= is used.
+
+- IPv6 source addresses are mapped into a configured IPv4 prefix one-to-one.
+  Regular NAT4 can be applied afterwards to map to a single public IP. A
+  separate v4 prefix should be used for every interface that the translator runs
+  on. Source address v6-to-v4 mappings are dynamically created as new sources
+  appear, and time out after two hours.
+
+- An allowlist of IPv6 source prefixes that should be subject to translation is
+  maintained.
+
+** How it works
+
+Two BPF programs are attached to the ingress and egress hooks of the interface
+being configured. The ingress program will process IPv6 packets, and any packet
+with a destination address in the configured NAT64 prefix will be either
+translated (if the source is allowed), or dropped. The egress program processes
+IPv4 packets and any packet with a destination in the configured v4 prefix will
+be either translated (if a v6 address is found in the state map) or dropped.
+
+To make sure the v4 traffic makes it to the right interface, a v4-via-v6 route
+is installed on that interface with a gateway address of the network address of
+the v6 prefix, and a fake neighbour entry is installed to avoid the kernel doing
+neighbour lookups of the gateway. This gets the packets to where the BPF program
+can process them, and after translation a new neighbour lookup with be performed
+with the new v6 destination.
+
+Note that because of the place of the BPF hook in ingress processing, the
+ingress BPF program will need to redirect the packet to the same interface after
+translation for re-processing as an IPv4 packet. This means that things like
+tcpdump will see first the original IPv6 packet, and then the translated IPv4
+packet. On egress the translation happens earlier, so only the translated packet
+will be seen.
+
+** Limitations / known issues
+At least the first two of these should probably be fixed before deploying this:
+
+- The IP headers in ICMP error message payloads are not translated, which
+  probably breaks ICMP errors.
+
+- The BPF programs assume the interface is an Ethernet interface, so translation
+  won't work on layer 3 devices (like Wireguard tunnels).
+
+- IP options are not handled at all. In particular this means that fragmented
+  IPv6 packets won't pass the translator.
+
+- The BPF programs support specifying multiple allowed source IPv6 prefixes, as
+  well as doing ahead-of-time static mappings, but the userspace component
+  doesn't support these yet.
+
+- The userspace program also has no way to print its status, or dump the state
+  of the translation table. The BPF maps can be inspected with bpftool as a
+  stopgap measure, though.
+
