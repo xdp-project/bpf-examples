@@ -61,6 +61,9 @@ clean::
 $(OBJECT_LIBBPF): $(LIBBPF_SOURCES)
 	$(Q)$(MAKE) -C $(LIB_DIR) libbpf
 
+$(OBJECT_LIBXDP): $(LIBXDP_SOURCES)
+	$(Q)$(MAKE) -C $(LIB_DIR) libxdp
+
 $(CONFIGMK):
 	$(Q)$(MAKE) -C $(LIB_DIR)/.. config.mk
 
