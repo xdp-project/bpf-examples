@@ -60,7 +60,7 @@ P:= >/dev/null
 endif
 
 # Detect submodule libbpf source file changes
-LIBXDP_SOURCES := $(wildcard xdp-tools/lib/libxdp/*.[ch])
+LIBXDP_SOURCES := $(wildcard xdp-tools/lib/libxdp/libxdp*.[ch]) xdp-tools/lib/libxdp/xsk.c
 
 
 $(LIB_INSTALL)/lib/libxdp.a: $(LIBXDP_SOURCES)
