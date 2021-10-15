@@ -2,7 +2,7 @@
 LIBBPF_CFLAGS:=$(if $(CFLAGS),$(CFLAGS),-g -O2 -Werror -Wall) -fPIC
 
 LIB_DIR = .
-LIB_INSTALL := lib-install
+LIB_INSTALL := $(LIB_DIR)/install
 include defines.mk
 
 SUBDIRS=
@@ -16,6 +16,8 @@ all: $(OBJECT_LIBBPF) $(OBJECT_LIBXDP)
 clean: libbpf_clean libxdp_clean
 	@for i in $(SUBDIRS); \
 	do $(MAKE) -C $$i clean; done
+	$(Q)find $(LIB_INSTALL) -type f -not -name .gitignore -delete
+	$(Q)find $(LIB_INSTALL) -type d -empty -delete
 
 install:
 	install -m 0755 -d $(DESTDIR)$(HDRDIR)
@@ -35,15 +37,15 @@ endif
 # Detect submodule libbpf source file changes
 LIBBPF_SOURCES := $(wildcard libbpf/src/*.[ch])
 
-libbpf/src/libbpf.a: $(LIBBPF_SOURCES)
+$(LIB_INSTALL)/lib/libbpf.a: $(LIBBPF_SOURCES)
 	@echo ; echo "  libbpf"
 	$(QUIET_CC)$(MAKE) -C libbpf/src CFLAGS="$(LIBBPF_CFLAGS)" $P
-	$(QUIET_INSTALL)$(MAKE) -C libbpf/src DESTDIR=../../$(LIB_INSTALL) install_headers $P
+	$(QUIET_INSTALL)$(MAKE) -C libbpf/src DESTDIR=../../$(LIB_INSTALL) PREFIX= install_headers $P
+	$(Q)cp -fp libbpf/src/libbpf.a install/lib/
 
 .PHONY: libbpf_clean
 libbpf_clean:
 	$(Q)$(MAKE) -C libbpf/src clean $P
-	$(Q)$(RM) -r $(LIB_INSTALL)
 
 else
 
@@ -61,15 +63,14 @@ endif
 LIBXDP_SOURCES := $(wildcard xdp-tools/lib/libxdp/*.[ch])
 
 
-$(LIB_INSTALL)/usr/lib/libxdp.a: $(LIBXDP_SOURCES)
+$(LIB_INSTALL)/lib/libxdp.a: $(LIBXDP_SOURCES)
 	@echo ; echo "  libxdp"
 	$(QUIET_CC)$(MAKE) -C xdp-tools BUILD_STATIC_ONLY=1 libxdp  $P
-	$(QUIET_INSTALL)$(MAKE) -C xdp-tools DESTDIR=../../../$(LIB_INSTALL) PREFIX=/usr BUILD_STATIC_ONLY=1 libxdp_install $P
+	$(QUIET_INSTALL)$(MAKE) -C xdp-tools DESTDIR=../../../$(LIB_INSTALL) PREFIX= BUILD_STATIC_ONLY=1 libxdp_install $P
 
 .PHONY: libxdp_clean
 libxdp_clean:
 	$(Q)$(MAKE) -C xdp-tools clean $P
-	$(Q)$(RM) -r $(LIB_INSTALL)
 
 else
 

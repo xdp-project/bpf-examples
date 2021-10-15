@@ -127,11 +127,8 @@ EOF
     echo submodule
     SUBMODULE_LIBBPF=1
     echo "SYSTEM_LIBBPF:=n" >> $CONFIG
-    echo 'CFLAGS += -I$(LIB_DIR)/lib-install/usr/include' >>$CONFIG
-    echo 'BPF_CFLAGS += -I$(LIB_DIR)/lib-install/usr/include' >>$CONFIG
-    echo 'LDFLAGS += -L$(LIB_DIR)/libbpf/src' >>$CONFIG
     echo 'LDLIBS += -l:libbpf.a' >>$CONFIG
-    echo 'OBJECT_LIBBPF = $(LIB_DIR)/libbpf/src/libbpf.a' >>$CONFIG
+    echo 'OBJECT_LIBBPF = $(LIB_DIR)/install/lib/libbpf.a' >>$CONFIG
     if ! [ -d "lib/libbpf/src" ] && [ -f ".gitmodules" ] && [ -e ".git" ]; then
         git submodule init && git submodule update
     fi
@@ -195,18 +192,15 @@ check_libxdp()
     echo "SYSTEM_LIBXDP:=n" >> $CONFIG
     if [ "$SUBMODULE_LIBBPF" -eq "1" ]; then
         echo "Configuring libxdp to use our libbpf submodule"
-        (export LIBBPF_DIR="$(readlink -m lib/libbpf)" LIBBPF_INCLUDE_DIR="$(readlink -m lib/lib-install/usr/include)";
+        (export LIBBPF_DIR="$(readlink -m lib/libbpf)" LIBBPF_INCLUDE_DIR="$(readlink -m lib/install/include)";
          cd lib/xdp-tools; ./configure)
     else
         echo "Configuring libxdp without our libbpf"
         (cd lib/xdp-tools; ./configure)
-        # these are already set if using libbpf as a submodule
-        echo 'CFLAGS += -I$(LIB_DIR)/lib-install/usr/include' >>$CONFIG
-        echo 'BPF_CFLAGS += -I$(LIB_DIR)/lib-install/usr/include' >>$CONFIG
     fi
-    echo 'LDFLAGS += -L$(LIB_DIR)/lib-install/usr/lib' >>$CONFIG
+    echo 'LDFLAGS += -L$(LIB_DIR)/install/lib' >>$CONFIG
     echo 'LDLIBS += -l:libxdp.a' >>$CONFIG
-    echo 'OBJECT_LIBXDP = $(LIB_DIR)/lib-install/usr/lib/libxdp.a' >>$CONFIG
+    echo 'OBJECT_LIBXDP = $(LIB_DIR)/install/lib/libxdp.a' >>$CONFIG
     if ! [ -d "lib/xdp-tools/lib" ] && [ -f ".gitmodules" ] && [ -e ".git" ]; then
         git submodule init && git submodule update
     fi
