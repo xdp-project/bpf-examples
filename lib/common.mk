@@ -56,7 +56,7 @@ all: $(USER_TARGETS) $(BPF_OBJ) $(EXTRA_TARGETS) $(BPF_SKEL)
 
 .PHONY: clean
 clean::
-	$(Q)rm -f $(USER_TARGETS) $(BPF_OBJ) $(USER_OBJ) $(USER_GEN) *.ll
+	$(Q)rm -f $(USER_TARGETS) $(BPF_OBJ) $(USER_OBJ) $(USER_GEN) $(USER_TARGETS_OBJS) *.ll
 
 $(OBJECT_LIBBPF): $(LIBBPF_SOURCES)
 	$(Q)$(MAKE) -C $(LIB_DIR) libbpf
@@ -71,8 +71,12 @@ LIB_H := ${LIB_OBJS:.o=.h}
 $(LIB_OBJS): %.o: %.c %.h $(LIB_H)
 	$(Q)$(MAKE) -C $(dir $@) $(notdir $@)
 
-$(USER_TARGETS): %: %.c  $(OBJECT_LIBBPF) $(OBJECT_LIBXDP) $(LIBMK) $(LIB_OBJS) $(KERN_USER_H) $(EXTRA_DEPS) $(EXTRA_USER_DEPS) $(BPF_SKEL)
-	$(QUIET_CC)$(CC) -Wall $(CFLAGS) $(LDFLAGS) -o $@ $(LIB_OBJS) \
+# Allows including Makefile to define USER_TARGETS_OBJS to compile and link with
+$(USER_TARGETS_OBJS): %.o: %.c %.h
+	$(QUIET_CC)$(CC) $(CFLAGS) -c -o $@ $<
+
+$(USER_TARGETS): %: %.c  $(OBJECT_LIBBPF) $(OBJECT_LIBXDP) $(LIBMK) $(LIB_OBJS) $(KERN_USER_H) $(EXTRA_DEPS) $(EXTRA_USER_DEPS) $(BPF_SKEL) $(USER_TARGETS_OBJS)
+	$(QUIET_CC)$(CC) -Wall $(CFLAGS) $(LDFLAGS) -o $@ $(LIB_OBJS) $(USER_TARGETS_OBJS) \
 	 $< $(LDLIBS)
 
 $(BPF_OBJ): %.o: %.c $(KERN_USER_H) $(EXTRA_DEPS) $(BPF_HEADERS) $(LIBMK)
