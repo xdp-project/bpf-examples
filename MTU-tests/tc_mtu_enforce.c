@@ -3,13 +3,14 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
-/* Testing BPF-helper that is not upstream yet, requires us to define
+/* When testing a BPF-helper not upstream yet, it is possible to define
  * its call signature manually, which will only match our devel kernel.
  *
  * Generated signatur via command in kernel devel tree:
- *   ./scripts/bpf_helpers_doc.py --header | grep bpf_check_mtu
+ *   ./scripts/bpf_doc.py --header | grep bpf_check_mtu
  */
-static int (*bpf_check_mtu)(void *ctx, __u32 ifindex, __u32 *mtu_len, __s32 len_diff, __u64 flags) = (void *) 163;
+// Example:
+// static long (*bpf_check_mtu)(void *ctx, __u32 ifindex, __u32 *mtu_len, __s32 len_diff, __u64 flags) = (void *) 163;
 
 enum  bpf_check_mtu_flags {
         BPF_MTU_CHK_SEGS  = (1U << 0),
