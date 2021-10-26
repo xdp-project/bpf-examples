@@ -3,6 +3,9 @@
 USER_TARGETS   := af_xdp_user
 BPF_TARGETS    := af_xdp_kern
 
+# Define C-code objects USER_TARGETS needs
+USER_TARGETS_OBJS := common_params.o common_user_bpf_xdp.o
+
 LDLIBS     += -pthread
 
 LIB_DIR = ../lib
