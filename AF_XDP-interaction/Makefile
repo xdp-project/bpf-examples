@@ -6,6 +6,9 @@ BPF_TARGETS    := af_xdp_kern
 # Define C-code objects USER_TARGETS needs
 USER_TARGETS_OBJS := common_params.o common_user_bpf_xdp.o
 
+# The USER_TARGETS_OBJS have a dependency of this header file
+USER_TARGETS_OBJS_DEPS += common_defines.h
+
 LDLIBS     += -pthread
 
 LIB_DIR = ../lib
