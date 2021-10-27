@@ -508,7 +508,7 @@ int main(int argc, char **argv)
 	struct config cfg = {
 		.ifindex   = -1,
 		.do_unload = false,
-		.filename = "",
+		.filename = "af_xdp_kern.o",
 		.progsec = "xdp_sock"
 	};
 	struct xsk_umem_info *umem;
