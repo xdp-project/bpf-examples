@@ -35,6 +35,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
 	int index = ctx->rx_queue_index;
 	struct meta_info *meta;
 	__u32 *pkt_count;
+	void *data;
 	int err;
 
 	/* Reserve space in-front of data pointer for our meta info.
@@ -43,6 +44,20 @@ int xdp_sock_prog(struct xdp_md *ctx)
 	err = bpf_xdp_adjust_meta(ctx, -(int)sizeof(*meta));
 	if (err)
 		return XDP_ABORTED;
+
+	/* Notice: Kernel-side verifier requires that loading of
+	 * ctx->data MUST happen _after_ helper bpf_xdp_adjust_meta(),
+	 * as pkt-data pointers are invalidated.  Helpers that require
+	 * this are determined/marked by bpf_helper_changes_pkt_data()
+	 */
+	data = (void *)(unsigned long)ctx->data;
+
+	/* Check data_meta have room for meta_info struct */
+	meta = (void *)(unsigned long)ctx->data_meta;
+	if (meta + 1 > data)
+		return XDP_ABORTED;
+
+	meta->mark = 42;
 
 	pkt_count = bpf_map_lookup_elem(&xdp_stats_map, &index);
 	if (pkt_count) {
