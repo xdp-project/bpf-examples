@@ -64,7 +64,7 @@ def normalize_timestamps(timestamps):
         
     return normed
 
-def trim_only_under_load(per_cpu_dfs, load_thresh=10, neighbours=1, norm_timestamps="auto"):
+def trim_only_under_load(per_cpu_dfs, load_thresh=1, neighbours=0, norm_timestamps="auto"):
     cpu_load = per_cpu_dfs["all"]
     if norm_timestamps == "auto":
         norm_timestamps = not np.issubdtype(util.get_first_dict_entry(per_cpu_dfs)["timestamp"].dtype,
@@ -163,7 +163,7 @@ def main():
     parser.add_argument("-o", "--output", type=str, help="image output file", required=False)
     parser.add_argument("-T", "--title", type=str, help="figure title", required=False)
     parser.add_argument("-t", "--trim", nargs='?', type=float, help="trim to section under load",
-                        required=False, default=None, const=10)
+                        required=False, default=None, const=1)
     args = parser.parse_args()
 
     mpstat_json = load_mpstat_json(args.input)

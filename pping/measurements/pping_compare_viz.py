@@ -23,7 +23,7 @@ def load_cpu_data(root_folder):
     load_dict = dict()
     for label, folder in label_folder_map.items():
         j_data = mpstat_viz.load_mpstat_json(find_file_startswith(os.path.join(
-            root_folder, folder, "VM2"), "VM2_mpstat"))
+            root_folder, folder, "M2"), "M2_mpstat"))
         data = mpstat_viz.trim_only_under_load(mpstat_viz.to_percpu_df(j_data))
         load_dict[label] = data["all"].copy()
     return load_dict
@@ -31,7 +31,7 @@ def load_cpu_data(root_folder):
 def load_iperf_data(root_folder):
     net_dict = dict()
     for label, folder in label_folder_map.items():
-        dpath = os.path.join(root_folder, folder, "VM1")
+        dpath = os.path.join(root_folder, folder, "M1")
         iperf_data = []
 
         for iperf_file in os.listdir(dpath):
@@ -123,21 +123,22 @@ def count_kpping_messages(filename, src_ip="172.16.24.31"):
 
     return pd.DataFrame(count)
 
-def plot_pping_output(kpping_data, epping_data, axes=None, grid=True):
+def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=True):
     if axes is None:
         axes = plt.gca()
 
-    axes.plot(kpping_data["ts"], kpping_data["rtt_events"], c="C1", ls="-", label="PPing")
-    axes.plot(kpping_data["ts"], kpping_data["filtered_rtt_events"], c="C1", ls="--", label="PPing filtered")
+    axes.plot(kpping_data["ts"].values, kpping_data["rtt_events"].values, c="C1", ls="-", label="PPing")
+    axes.plot(kpping_data["ts"].values, kpping_data["filtered_rtt_events"].values, c="C1", ls="--", label="PPing filtered")
 
-    axes.plot(epping_data["ts"], epping_data["rtt_events"], c="C2", ls="-", label="ePPing")
-    axes.plot(epping_data["ts"], epping_data["filtered_rtt_events"], c="C2", ls="--", label="ePPing filtered")
+    axes.plot(epping_data["ts"].values, epping_data["rtt_events"].values, c="C2", ls="-", label="ePPing")
+    axes.plot(epping_data["ts"].values, epping_data["filtered_rtt_events"].values, c="C2", ls="--", label="ePPing filtered")
 
     axes.set_ylim(0)
     axes.set_xlabel("Time (s)")
     axes.set_ylabel("Events per second")
     axes.grid(grid)
-    axes.legend()
+    if legend:
+    	axes.legend()
 
     return axes
 
@@ -150,8 +151,8 @@ def main():
     cpu_data = load_cpu_data(args.input)
     iperf_data = load_iperf_data(args.input)
 
-    epping_messages = count_epping_messages(find_file_startswith(os.path.join(args.input, "e_pping", "VM2"), "pping.out"))
-    kpping_messages = count_kpping_messages(find_file_startswith(os.path.join(args.input, "k_pping", "VM2"), "pping.out"))
+    epping_messages = count_epping_messages(find_file_startswith(os.path.join(args.input, "e_pping", "M2"), "pping.out"))
+    kpping_messages = count_kpping_messages(find_file_startswith(os.path.join(args.input, "k_pping", "M2"), "pping.out"))
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 

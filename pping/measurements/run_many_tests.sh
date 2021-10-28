@@ -6,9 +6,9 @@ INTERTEST_INTERVAL=120 #sec
 # $1 = path to save results in
 # $2 = number of times to repeat the tests
 
-if [[ -z "$VM_PASSWORD" ]]; then
-    read -p "VM2 password:" -s VM_PASSWORD
-    export VM_PASSWORD
+if [[ -z "$M2_PASSWORD" ]]; then
+    read -p "M2 password: " -s M2_PASSWORD
+    export M2_PASSWORD
 fi
 
 echo -e "\n"
@@ -21,7 +21,6 @@ for (( i = 1; i <= $2; i++ )); do
 
 	SPATH="${1}/run_${i}/${flows}_streams"
 	./run_tests.sh $SPATH $flows
-	./plot_results.sh $SPATH
 	sleep $INTERTEST_INTERVAL
     done
 done
