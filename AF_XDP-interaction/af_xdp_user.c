@@ -128,12 +128,30 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	struct xsk_umem_info *umem;
 	int ret;
 
+	struct xsk_umem_config xsk_umem_cfg = {
+		/* We recommend that you set the fill ring size >= HW RX ring size +
+		 * AF_XDP RX ring size. Make sure you fill up the fill ring
+		 * with buffers at regular intervals, and you will with this setting
+		 * avoid allocation failures in the driver. These are usually quite
+		 * expensive since drivers have not been written to assume that
+		 * allocation failures are common. For regular sockets, kernel
+		 * allocated memory is used that only runs out in OOM situations
+		 * that should be rare.
+		 */
+		.fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS * 2,
+		.comp_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
+		.frame_size = FRAME_SIZE,
+		/* Notice XSK_UMEM__DEFAULT_FRAME_HEADROOM is zero */
+		.frame_headroom = 256,
+		.flags = 0
+	};
+
 	umem = calloc(1, sizeof(*umem));
 	if (!umem)
 		return NULL;
 
 	ret = xsk_umem__create(&umem->umem, buffer, size, &umem->fq, &umem->cq,
-			       NULL);
+			       &xsk_umem_cfg);
 	if (ret) {
 		errno = -ret;
 		return NULL;
