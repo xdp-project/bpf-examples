@@ -18,11 +18,31 @@ struct {
 	__uint(max_entries, 64);
 } xdp_stats_map SEC(".maps");
 
+/*
+ * This struct is stored in the XDP 'data_meta' area, which is located
+ * just in-front-of the raw packet payload data.
+ *
+ * The struct must be 4 byte aligned, which here is enforced by the
+ * struct __attribute__((aligned(4))).
+ */
+struct meta_info {
+	__u32 mark;
+} __attribute__((aligned(4)));
+
 SEC("xdp_sock")
 int xdp_sock_prog(struct xdp_md *ctx)
 {
 	int index = ctx->rx_queue_index;
+	struct meta_info *meta;
 	__u32 *pkt_count;
+	int err;
+
+	/* Reserve space in-front of data pointer for our meta info.
+	 * (Notice drivers not supporting data_meta will fail here!)
+	 */
+	err = bpf_xdp_adjust_meta(ctx, -(int)sizeof(*meta));
+	if (err)
+		return XDP_ABORTED;
 
 	pkt_count = bpf_map_lookup_elem(&xdp_stats_map, &index);
 	if (pkt_count) {
