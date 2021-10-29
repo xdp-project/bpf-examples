@@ -15,6 +15,7 @@ def load_iperf3_json(filename, compression="auto"):
         data = json.load(file)
     return data
 
+
 def socket_to_stream_map(iperf_json, shortnames=False):
     socket_map = dict()
     for con in iperf_json["start"]["connected"]:
@@ -28,10 +29,11 @@ def socket_to_stream_map(iperf_json, shortnames=False):
 
     return socket_map
 
+
 def to_perstream_df(iperf_json, norm_timestamps=True, shortnames=True, include_total=True):
     t_off = iperf_json["start"]["timestamp"]["timesecs"]
     sock_map = socket_to_stream_map(iperf_json, shortnames=shortnames)
-    
+
     per_stream = dict()
     for interval in iperf_json["intervals"]:
         for stream in interval["streams"]:
@@ -39,26 +41,28 @@ def to_perstream_df(iperf_json, norm_timestamps=True, shortnames=True, include_t
                 continue
 
             stream_name = sock_map[stream["socket"]]
-            
+
             if stream_name not in per_stream:
-                per_stream[stream_name] = {"timestamp":[], "throughput":[], "retrans":[], "rtt":[]}
+                per_stream[stream_name] = {"timestamp": [], "throughput": [],
+                                           "retrans": [], "rtt": []}
 
             entry = per_stream[stream_name]
             entry["timestamp"].append(stream["end"])
             entry["throughput"].append(stream["bits_per_second"])
             entry["retrans"].append(stream["retransmits"])
             entry["rtt"].append(stream["rtt"] / 1000)
-            
+
     for stream, data in per_stream.items():
         if not norm_timestamps:
             data["timestamp"] = pd.to_datetime(np.add(data["timestamp"], t_off), unit="s")
 
         per_stream[stream] = pd.DataFrame(data)
-            
+
     if include_total:
         per_stream["all"] = sum_streams(per_stream)
-        
+
     return per_stream
+
 
 def sum_streams(stream_dfs):
     # Should correspond to the "sum" entries in the JSON, but can flexibly be used for any set of streams
@@ -74,10 +78,11 @@ def sum_streams(stream_dfs):
             ss = df.copy()
         else:
             ss[add_cols] += df[add_cols]
-            
+
     ss["rtt"] /= n
-    
+
     return ss
+
 
 def merge_iperf_data(*args, compute_total=True):
     stream_dfs = dict()
@@ -85,47 +90,50 @@ def merge_iperf_data(*args, compute_total=True):
         for stream, df in arg.items():
             if stream != "all":
                 stream_dfs[stream] = df
-                
+
     if compute_total:
         stream_dfs["all"] = sum_streams(stream_dfs)
-        
+
     return stream_dfs
+
 
 # Plotting
 def plot_throughput_timeseries(stream_dfs, axes=None, plot_retrans=True, **kwargs):
-    stat_kwargs = {"fmt":"{:.3e}"}
-    axes = complot.plot_pergroup_timeseries(stream_dfs, "throughput", axes=axes, 
+    stat_kwargs = {"fmt": "{:.3e}"}
+    axes = complot.plot_pergroup_timeseries(stream_dfs, "throughput", axes=axes,
                                             stat_kwargs=stat_kwargs, **kwargs)
-    
+
     axes.set_ylabel("Throughput (bits/s)")
     axes.set_ylim(0)
-    
+
     if plot_retrans and "all" in stream_dfs:
         ax2 = axes.twinx()
         ax2.plot(stream_dfs["all"]["timestamp"].values, stream_dfs["all"]["retrans"].values,
                  color="k", linestyle="--", zorder=2.5)
         ax2.set_ylabel("Retransmissions")
         ax2.set_ylim(0)
-    
+
     return axes
 
+
 def plot_rtt_timeseries(stream_dfs, axes=None, **kwargs):
-    stat_kwargs = {"fmt":"{:.2f}"}
+    stat_kwargs = {"fmt": "{:.2f}"}
     axes = complot.plot_pergroup_timeseries(stream_dfs, "rtt", axes=axes, 
                                             normalize_all=False, 
                                             stat_kwargs=stat_kwargs, **kwargs)
-    
+
     axes.set_ylabel("RTT (ms)")
     axes.set_ylim(0)
-    
+
     return axes
+
 
 def plot_iperf(stream_dfs, title=None):
     fig, axes = plt.subplots(2, 1, figsize=(8, 12), constrained_layout=True)
-    
+
     plot_throughput_timeseries(stream_dfs, axes=axes[0])
     plot_rtt_timeseries(stream_dfs, axes=axes[1])
-    
+
     if title is not None:
         fig.suptitle(title)
 
@@ -133,8 +141,9 @@ def plot_iperf(stream_dfs, title=None):
     # https://stackoverflow.com/a/59341086
     fig.canvas.draw()
     fig.canvas.draw()
-    
+
     return fig
+
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize iperf3 JSON output")
@@ -153,6 +162,7 @@ def main():
         plt.show()
 
     return
+
 
 if __name__ == "__main__":
     main()

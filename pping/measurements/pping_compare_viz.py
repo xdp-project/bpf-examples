@@ -13,17 +13,12 @@ import util
 
 label_folder_map = {"baseline":"no_pping", "PPing":"k_pping", "ePPing":"e_pping"}
 
-def find_file_startswith(dir, name):
-    for file in os.listdir(dir):
-        if file.startswith(name):
-            return os.path.join(dir, file)
-    return ""
-
 def load_cpu_data(root_folder):
     load_dict = dict()
     for label, folder in label_folder_map.items():
-        j_data = mpstat_viz.load_mpstat_json(find_file_startswith(os.path.join(
-            root_folder, folder, "M2"), "M2_mpstat"))
+        m_name = "VM2" if "VM2" in os.listdir(os.path.join(root_folder, folder)) else "M2"
+        j_data = mpstat_viz.load_mpstat_json(util.find_file_startswith(os.path.join(
+            root_folder, folder, m_name), m_name + "_mpstat.json"))
         data = mpstat_viz.trim_only_under_load(mpstat_viz.to_percpu_df(j_data))
         load_dict[label] = data["all"].copy()
     return load_dict
@@ -31,7 +26,8 @@ def load_cpu_data(root_folder):
 def load_iperf_data(root_folder):
     net_dict = dict()
     for label, folder in label_folder_map.items():
-        dpath = os.path.join(root_folder, folder, "M1")
+        m_name = "VM1" if "VM1" in os.listdir(os.path.join(root_folder, folder)) else "M1"
+        dpath = os.path.join(root_folder, folder, m_name)
         iperf_data = []
 
         for iperf_file in os.listdir(dpath):
@@ -151,8 +147,10 @@ def main():
     cpu_data = load_cpu_data(args.input)
     iperf_data = load_iperf_data(args.input)
 
-    epping_messages = count_epping_messages(find_file_startswith(os.path.join(args.input, "e_pping", "M2"), "pping.out"))
-    kpping_messages = count_kpping_messages(find_file_startswith(os.path.join(args.input, "k_pping", "M2"), "pping.out"))
+    epping_messages = count_epping_messages(util.find_file_startswith(os.path.join(
+        args.input, "e_pping", "M2"), "pping.out"))
+    kpping_messages = count_kpping_messages(util.find_file_startswith(os.path.join(
+        args.input, "k_pping", "M2"), "pping.out"))
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 

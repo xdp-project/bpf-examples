@@ -16,18 +16,20 @@ def load_mpstat_json(filename, compression="auto"):
         stats = json.load(file)
     return stats["sysstat"]["hosts"][0]
 
+
 def get_timestamps(cpu_stats):
     date = cpu_stats["date"]
     timestamps = [date + " " + entry["timestamp"] 
                   for entry in cpu_stats["statistics"]]
     return pd.to_datetime(timestamps)
 
+
 def to_percpu_df(cpu_stats, norm_timestamps=True):
     n_cpus = cpu_stats["number-of-cpus"]
     ts = get_timestamps(cpu_stats)
     if norm_timestamps:
         ts = normalize_timestamps(ts)
-        
+
     per_cpu = dict()
     for period in cpu_stats["statistics"]:
         for entry in period["cpu-load"]:
@@ -43,37 +45,37 @@ def to_percpu_df(cpu_stats, norm_timestamps=True):
                     loadtype = "total"
                 if loadtype not in per_cpu[cpu]:
                     per_cpu[cpu][loadtype] = []
-                    
+
                 if loadtype == "total":
                     per_cpu[cpu]["total"].append((100 - load) * mult)
                 else:
                     per_cpu[cpu][loadtype].append(load * mult)
-                    
+
     for cpu, data in per_cpu.items():
         per_cpu[cpu] = pd.DataFrame(data)
         per_cpu[cpu].insert(0, "timestamp", ts)
-        
+
     return per_cpu
 
 
 def normalize_timestamps(timestamps):
     normed = timestamps - timestamps.min()
-    
+
     if np.issubdtype(normed.dtype, np.timedelta64):
         normed = normed.astype("timedelta64[s]").astype("float64")
-        
+
     return normed
 
+
 def trim_only_under_load(per_cpu_dfs, load_thresh=1, neighbours=0, norm_timestamps="auto"):
-    cpu_load = per_cpu_dfs["all"]
     if norm_timestamps == "auto":
         norm_timestamps = not np.issubdtype(util.get_first_dict_entry(per_cpu_dfs)["timestamp"].dtype,
                                             np.datetime64)
-        
+
     loaded_mask = per_cpu_dfs["all"]["total"].values >= load_thresh
     start = max(0, np.min(np.nonzero(loaded_mask)) - neighbours)
     end = min(len(loaded_mask), np.max(np.nonzero(loaded_mask)) + neighbours)
-    
+
     trimmed = dict()
     for cpu, df in per_cpu_dfs.items():
         trimmed[cpu] = df.iloc[start:end+1].copy()
@@ -82,70 +84,75 @@ def trim_only_under_load(per_cpu_dfs, load_thresh=1, neighbours=0, norm_timestam
 
     return trimmed
 
+
 # Plotting
 def plot_percpu_timeseries(per_cpu_dfs, axes=None):
-    stat_kwargs = {"fmt":"{:.2f}"}
-    axes = complot.plot_pergroup_timeseries(per_cpu_dfs, col="total", axes=axes, 
+    stat_kwargs = {"fmt": "{:.2f}"}
+    axes = complot.plot_pergroup_timeseries(per_cpu_dfs, col="total", axes=axes,
                                             stat_kwargs=stat_kwargs)
     axes.set_ylabel("CPU load (%)")
     axes.set_ylim(0)
     return axes
 
+
 def plot_percpu_cdf(per_cpu_dfs, axes=None):
-    stat_kwargs = {"fmt":"{:.2f}"}
+    stat_kwargs = {"fmt": "{:.2f}"}
     axes = complot.plot_pergroup_cdf(per_cpu_dfs, col="total", axes=axes, 
                                      stat_kwargs=stat_kwargs)
     axes.set_xlabel("CPU load (%)")
     return axes
 
+
 def plot_perclass_timeseries(per_cpu_dfs, axes=None, print_stats=True, **kwargs):
     if axes is None:
         axes = plt.gca()
-        
+
     load = per_cpu_dfs["all"]
     load_cols = [col for col in load.columns if col not in ("timestamp", "total")]
     x = load["timestamp"].values
     ys = load[load_cols].values.transpose()
-    
+
     axes.stackplot(x, ys, labels=load_cols, **kwargs)
-    
+
     axes.legend()
     axes.set_ylabel("CPU load (%)")
     axes.set_xlabel("Time")
     axes.grid()
-    
+
     if print_stats:
         plot_perclass_table(per_cpu_dfs, axes=axes, loc="top")
-        
+
     return axes
+
 
 def plot_perclass_table(per_cpu_dfs, axes=None, **kwargs):
     if axes is None:
         axes = plt.gca()
-        
+
     cols = ["min", "median", "mean", "max"]
     rows = []
     cells = []
-    
+
     totload = per_cpu_dfs["all"]
     for loadclass in totload.columns:
         if loadclass == "timestamp":
             continue
-        
+
         rows.append(loadclass)
         cells.append(["{:.2f}".format(func(totload[loadclass].values))
                       for func in (np.amin, np.median, np.mean, np.max)])
-        
+
     axes.table(cells, rowLabels=rows, colLabels=cols, **kwargs)
     return axes
 
+
 def plot_cpu_load(per_cpu_dfs, title=None):
     fig, axes = plt.subplots(3, 1, figsize=(8, 16), constrained_layout=True)
-    
+
     plot_percpu_timeseries(per_cpu_dfs, axes=axes[0])
     plot_percpu_cdf(per_cpu_dfs, axes=axes[1])
     plot_perclass_timeseries(per_cpu_dfs, axes=axes[2])
-    
+
     if title is not None:
         fig.suptitle(title)
 
@@ -154,8 +161,8 @@ def plot_cpu_load(per_cpu_dfs, title=None):
     fig.canvas.draw()
     fig.canvas.draw()
 
-
     return fig
+
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize CPU-load from mpstat JSON file")
@@ -179,6 +186,6 @@ def main():
 
     return
 
+
 if __name__ == "__main__":
     main()
-
