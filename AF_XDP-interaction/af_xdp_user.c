@@ -303,6 +303,7 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 
 struct meta_info {
 	__u32 mark;
+	__u32 btf_id;
 } __attribute__((aligned(4)));
 
 static void print_meta_info(uint8_t *pkt, uint32_t len)
@@ -314,7 +315,7 @@ static void print_meta_info(uint8_t *pkt, uint32_t len)
 	 */
 	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
 
-	printf("DEBUG-meta %d\n", meta->mark);
+	printf("DEBUG-meta btf_id:%d mark:%d\n", meta->btf_id, meta->mark);
 
 }
 

@@ -4,6 +4,8 @@
 
 #include <bpf/bpf_helpers.h>
 
+#include <bpf/bpf_core_read.h> /* */
+
 struct {
 	__uint(type, BPF_MAP_TYPE_XSKMAP);
 	__uint(max_entries, 64); /* Assume netdev has no more than 64 queues */
@@ -27,7 +29,14 @@ struct {
  */
 struct meta_info {
 	__u32 mark;
+	__u32 btf_id;
 } __attribute__((aligned(4)));
+/*
+ * NOTICE: Do NOT define __attribute__((preserve_access_index)) here,
+ * as libbpf will try to find a matching kernel data-structure,
+ * e.g. it will cause BPF-prog loading step to fail (with invalid func
+ * unknown#195896080 which is 0xbad2310 in hex for "bad relo").
+ */
 
 SEC("xdp_sock")
 int xdp_sock_prog(struct xdp_md *ctx)
@@ -58,10 +67,10 @@ int xdp_sock_prog(struct xdp_md *ctx)
 		return XDP_ABORTED;
 
 	meta->mark = 42;
+	meta->btf_id = bpf_core_type_id_local(struct xdp_hints_mark);
 
 	pkt_count = bpf_map_lookup_elem(&xdp_stats_map, &index);
 	if (pkt_count) {
-
 		/* We pass every other packet */
 		if ((*pkt_count)++ & 1)
 			return XDP_PASS;
