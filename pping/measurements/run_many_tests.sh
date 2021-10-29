@@ -24,3 +24,7 @@ for (( i = 1; i <= $2; i++ )); do
 	sleep $INTERTEST_INTERVAL
     done
 done
+
+echo -e "\nPlotting summarized statistics for all runs..."
+./pping_summarize_viz.py $1
+echo "Done!"
