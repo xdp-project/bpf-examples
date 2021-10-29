@@ -13,6 +13,7 @@
 #include "common_params.h"
 
 int verbose = 1;
+int debug_pkt = 0;
 
 #define BUFSIZE 30
 
@@ -156,6 +157,9 @@ void parse_cmdline_args(int argc, char **argv,
 			break;
 		case 'q':
 			verbose = false;
+			break;
+		case 'P':
+			debug_pkt = true;
 			break;
 		case 'Q':
 			cfg->xsk_if_queue = atoi(optarg);

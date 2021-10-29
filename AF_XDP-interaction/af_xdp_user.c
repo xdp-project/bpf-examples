@@ -22,6 +22,7 @@
 #include <net/if.h>
 #include <linux/if_link.h>
 #include <linux/if_ether.h>
+#include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/icmpv6.h>
 
@@ -111,6 +112,9 @@ static const struct option_wrapper long_options[] = {
 
 	{{"quiet",	 no_argument,		NULL, 'q' },
 	 "Quiet mode (no output)"},
+
+	{{"pktinfo",	 no_argument,		NULL, 'P' },
+	 "Print packet info output mode (debug)"},
 
 	{{"filename",    required_argument,	NULL,  1  },
 	 "Load program from <file>", "<file>"},
@@ -290,10 +294,41 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
 
+/* As debug tool print some info about packet */
+static void print_pkt_info(uint8_t *pkt, uint32_t len)
+{
+	struct ethhdr *eth = (struct ethhdr *) pkt;
+	__u16 proto = ntohs(eth->h_proto);
+
+	char *fmt = "DEBUG-pkt len=%04d Eth-proto:0x%X %s "
+		"src:%s -> dst:%s\n";
+	char src_str[128] = { 0 };
+	char dst_str[128] = { 0 };
+
+	if (proto == ETH_P_IP) {
+		struct iphdr *ipv4 = (struct iphdr *) (eth + 1);
+		inet_ntop(AF_INET, &ipv4->saddr, src_str, sizeof(src_str));
+		inet_ntop(AF_INET, &ipv4->daddr, dst_str, sizeof(dst_str));
+		printf(fmt, len, proto, "IPv4", src_str, dst_str);
+	} else if (proto == ETH_P_ARP) {
+		printf(fmt, len, proto, "ARP", "", "");
+	} else if (proto == ETH_P_IPV6) {
+		struct ipv6hdr *ipv6 = (struct ipv6hdr *) (eth + 1);
+		inet_ntop(AF_INET6, &ipv6->saddr, src_str, sizeof(src_str));
+		inet_ntop(AF_INET6, &ipv6->daddr, dst_str, sizeof(dst_str));
+		printf(fmt, len, proto, "IPv6", src_str, dst_str);
+	} else {
+		printf(fmt, len, proto, "Unknown", "", "");
+	}
+}
+
 static bool process_packet(struct xsk_socket_info *xsk,
 			   uint64_t addr, uint32_t len)
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
+
+	if (debug_pkt)
+		print_pkt_info(pkt, len);
 
         /* Lesson#3: Write an IPv6 ICMP ECHO parser to send responses
 	 *
