@@ -27,7 +27,9 @@ struct config {
 
 /* Defined in common_params.o */
 extern int verbose;
+extern int debug;
 extern int debug_pkt;
+extern int debug_meta;
 
 /* Exit return codes */
 #define EXIT_OK 		 0 /* == EXIT_SUCCESS (stdlib.h) man exit(3) */

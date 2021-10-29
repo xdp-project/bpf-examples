@@ -116,6 +116,12 @@ static const struct option_wrapper long_options[] = {
 	{{"pktinfo",	 no_argument,		NULL, 'P' },
 	 "Print packet info output mode (debug)"},
 
+	{{"metainfo",	 no_argument,		NULL, 'm' },
+	 "Print XDP metadata info output mode (debug)"},
+
+	{{"debug",	 no_argument,		NULL, 'D' },
+	 "Debug info output mode (debug)"},
+
 	{{"filename",    required_argument,	NULL,  1  },
 	 "Load program from <file>", "<file>"},
 
@@ -147,6 +153,7 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 		.frame_size = FRAME_SIZE,
 		/* Notice XSK_UMEM__DEFAULT_FRAME_HEADROOM is zero */
 		.frame_headroom = 256,
+		//.frame_headroom = 0,
 		.flags = 0
 	};
 
@@ -294,6 +301,23 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
 
+struct meta_info {
+	__u32 mark;
+} __attribute__((aligned(4)));
+
+static void print_meta_info(uint8_t *pkt, uint32_t len)
+{
+	/* XDP data_meta is stored just before packet data.
+	 * Thus, access this via a negative offset.
+	 *
+	 * REMEMBER: The real assignment is making this dynamic via using BTF.
+	 */
+	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
+
+	printf("DEBUG-meta %d\n", meta->mark);
+
+}
+
 /* As debug tool print some info about packet */
 static void print_pkt_info(uint8_t *pkt, uint32_t len)
 {
@@ -326,6 +350,12 @@ static bool process_packet(struct xsk_socket_info *xsk,
 			   uint64_t addr, uint32_t len)
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
+
+	if (debug_meta)
+		print_meta_info(pkt, len);
+
+	if (debug)
+		printf("XXX addr:0x%lX pkt_ptr:0x%p\n", addr, pkt);
 
 	if (debug_pkt)
 		print_pkt_info(pkt, len);
