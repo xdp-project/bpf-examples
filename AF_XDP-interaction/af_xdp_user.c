@@ -26,6 +26,7 @@
 #include <linux/ipv6.h>
 #include <linux/icmpv6.h>
 
+#include <bpf/btf.h> /* provided by libbpf */
 
 #include "common_params.h"
 #include "common_user_bpf_xdp.h"
@@ -589,6 +590,31 @@ static void exit_application(int signal)
 	global_exit = true;
 }
 
+__s32 btf_find_struct(struct btf *btf, char *name, __s64 *size)
+{
+	__s32 btf_id = btf__find_by_name_kind(btf, name, BTF_KIND_STRUCT);
+	__s64 sz = btf__resolve_size(btf, btf_id);
+
+	if (debug_meta)
+		printf("XXX bpf_id:%d struct name:%s size:%lld\n",
+		       btf_id, name, sz);
+	*size = sz;
+
+	return btf_id;
+}
+
+int btf_info_via_bpf_object(struct bpf_object *bpf_obj)
+{
+	struct btf *btf = bpf_object__btf(bpf_obj);
+	char *name1 = "xdp_hints_mark";
+	char *name2 = "xdp_hints_rx_time";
+	__s64 size;
+
+	btf_find_struct(btf, name1, &size);
+	btf_find_struct(btf, name2, &size);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int ret;
@@ -645,6 +671,10 @@ int main(int argc, char **argv)
 				strerror(xsks_map_fd));
 			exit(EXIT_FAILURE);
 		}
+	}
+
+	if (1) {
+		btf_info_via_bpf_object(bpf_obj);
 	}
 
 	/* Allow unlimited locking of memory, so all memory needed for packet
