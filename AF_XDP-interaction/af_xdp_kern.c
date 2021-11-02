@@ -21,22 +21,25 @@ struct {
 } xdp_stats_map SEC(".maps");
 
 /*
- * This struct is stored in the XDP 'data_meta' area, which is located
- * just in-front-of the raw packet payload data.
+ * The xdp_hints_xxx struct's are stored in the XDP 'data_meta' area,
+ * which is located just in-front-of the raw packet payload data.
  *
- * The struct must be 4 byte aligned, which here is enforced by the
- * struct __attribute__((aligned(4))).
- */
-struct xdp_hints_mark {
-	__u32 mark;
-	__u32 btf_id;
-} __attribute__((aligned(4))) __attribute__((packed));
-/*
+ * Explaining the struct attribute's:
+ * ----------------------------------
+ * The struct must be 4 byte aligned (kernel requirement), which here
+ * is enforced by the struct __attribute__((aligned(4))).
+ *
+ * To avoid any C-struct padding attribute "packed" is used.
+ *
  * NOTICE: Do NOT define __attribute__((preserve_access_index)) here,
  * as libbpf will try to find a matching kernel data-structure,
  * e.g. it will cause BPF-prog loading step to fail (with invalid func
  * unknown#195896080 which is 0xbad2310 in hex for "bad relo").
  */
+struct xdp_hints_mark {
+	__u32 mark;
+	__u32 btf_id;
+} __attribute__((aligned(4))) __attribute__((packed));
 
 struct xdp_hints_rx_time {
 	__u64 rx_ktime;
@@ -68,6 +71,7 @@ int meta_add_rx_time(struct xdp_md *ctx)
 		return -2;
 
 	meta->rx_ktime = bpf_ktime_get_ns();
+	/* Userspace can identify struct used by BTF id */
 	meta->btf_id = bpf_core_type_id_local(struct xdp_hints_rx_time);
 
 	return 0;
@@ -100,7 +104,6 @@ int xdp_sock_prog(struct xdp_md *ctx)
 {
 	int index = ctx->rx_queue_index;
 	__u32 *pkt_count;
-	void *data;
 	int err;
 
 	pkt_count = bpf_map_lookup_elem(&xdp_stats_map, &index);
@@ -108,6 +111,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
 		return XDP_ABORTED;
 	__u64 cnt = (*pkt_count)++;
 
+	/* Notice how two different xdp_hints meta-data are used */
 	if ((cnt % 2) == 0) {
 		err = meta_add_rx_time(ctx);
 		if (err < 0)
