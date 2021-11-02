@@ -590,6 +590,39 @@ static void exit_application(int signal)
 	global_exit = true;
 }
 
+int btf_walk_struct_members(struct btf *btf_obj, __s32 btf_id)
+{
+	const struct btf_member *m;
+	const struct btf_type *btype;
+	unsigned short vlen;
+	__u32 kind;
+	int i;
+
+	btype = btf__type_by_id(btf_obj, btf_id);
+
+	kind = btf_kind(btype);
+	if (kind != BTF_KIND_STRUCT) {
+		fprintf(stderr, "ERROR: %s() BTF must be BTF_KIND_STRUCT",
+			__func__);
+		return -1;
+	}
+	/* BTF_KIND_STRUCT and BTF_KIND_UNION are followed
+	 * by multiple "struct btf_member".  The exact number
+	 * of btf_member is stored in the vlen (of the info in
+	 * "struct btf_type").
+	 */
+	m = btf_members(btype);
+	vlen = BTF_INFO_VLEN(btype->info);
+
+	printf("XXX kind:%d members:%d\n", kind, vlen);
+
+	for (i = 0; i < vlen; i++, m++) {
+		printf("XXX [%d] member type:%d bit-offset:%u name_off:%u\n",
+		       i, m->type, m->offset, m->name_off);
+	}
+	return 0;
+}
+
 __s32 btf_find_struct(struct btf *btf, char *name, __s64 *size)
 {
 	__s32 btf_id = btf__find_by_name_kind(btf, name, BTF_KIND_STRUCT);
@@ -599,6 +632,7 @@ __s32 btf_find_struct(struct btf *btf, char *name, __s64 *size)
 		printf("XXX bpf_id:%d struct name:%s size:%lld\n",
 		       btf_id, name, sz);
 	*size = sz;
+	btf_walk_struct_members(btf, btf_id);
 
 	return btf_id;
 }
