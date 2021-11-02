@@ -4,7 +4,7 @@
 
 #include <bpf/bpf_helpers.h>
 
-#include <bpf/bpf_core_read.h> /* */
+#include <bpf/bpf_core_read.h> /* bpf_core_type_id_local */
 
 struct {
 	__uint(type, BPF_MAP_TYPE_XSKMAP);
@@ -27,10 +27,11 @@ struct {
  * The struct must be 4 byte aligned, which here is enforced by the
  * struct __attribute__((aligned(4))).
  */
-struct meta_info {
+struct xdp_hints_mark {
 	__u32 mark;
+	__u32 btf_type; /* Is this needed? */
 	__u32 btf_id;
-} __attribute__((aligned(4)));
+} __attribute__((aligned(4))) __attribute__((packed));
 /*
  * NOTICE: Do NOT define __attribute__((preserve_access_index)) here,
  * as libbpf will try to find a matching kernel data-structure,
@@ -38,12 +39,14 @@ struct meta_info {
  * unknown#195896080 which is 0xbad2310 in hex for "bad relo").
  */
 
-SEC("xdp_sock")
-int xdp_sock_prog(struct xdp_md *ctx)
+struct xdp_hints_rx_time {
+	__u64 rx_ktime;
+	__u32 btf_id;
+} __attribute__((aligned(4))) __attribute__((packed));
+
+int meta_add_rx_time(struct xdp_md *ctx)
 {
-	int index = ctx->rx_queue_index;
-	struct meta_info *meta;
-	__u32 *pkt_count;
+	struct xdp_hints_rx_time *meta;
 	void *data;
 	int err;
 
@@ -52,7 +55,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
 	 */
 	err = bpf_xdp_adjust_meta(ctx, -(int)sizeof(*meta));
 	if (err)
-		return XDP_ABORTED;
+		return -1;
 
 	/* Notice: Kernel-side verifier requires that loading of
 	 * ctx->data MUST happen _after_ helper bpf_xdp_adjust_meta(),
@@ -61,19 +64,60 @@ int xdp_sock_prog(struct xdp_md *ctx)
 	 */
 	data = (void *)(unsigned long)ctx->data;
 
-	/* Check data_meta have room for meta_info struct */
 	meta = (void *)(unsigned long)ctx->data_meta;
-	if (meta + 1 > data)
-		return XDP_ABORTED;
+	if (meta + 1 > data) /* Verify meta area is accessible */
+		return -2;
 
-	meta->mark = 42;
+	meta->rx_ktime = bpf_ktime_get_ns();
+	meta->btf_id = bpf_core_type_id_local(struct xdp_hints_rx_time);
+
+	return 0;
+}
+
+int meta_add_mark(struct xdp_md *ctx, __u32 mark)
+{
+	struct xdp_hints_mark *meta;
+	void *data;
+	int err;
+
+	/* Reserve space in-front of data pointer for our meta info */
+	err = bpf_xdp_adjust_meta(ctx, -(int)sizeof(*meta));
+	if (err)
+		return -1;
+
+	data = (void *)(unsigned long)ctx->data;
+	meta = (void *)(unsigned long)ctx->data_meta;
+	if (meta + 1 > data) /* Verify meta area is accessible */
+		return -2;
+
+	meta->mark = mark;
+	meta->btf_type = 0;
 	meta->btf_id = bpf_core_type_id_local(struct xdp_hints_mark);
 
+	return 0;
+}
+
+SEC("xdp_sock")
+int xdp_sock_prog(struct xdp_md *ctx)
+{
+	int index = ctx->rx_queue_index;
+	__u32 *pkt_count;
+	void *data;
+	int err;
+
 	pkt_count = bpf_map_lookup_elem(&xdp_stats_map, &index);
-	if (pkt_count) {
-		/* We pass every other packet */
-		if ((*pkt_count)++ & 1)
-			return XDP_PASS;
+	if (!pkt_count)
+		return XDP_ABORTED;
+	__u64 cnt = (*pkt_count)++;
+
+	if ((cnt % 2) == 0) {
+		err = meta_add_rx_time(ctx);
+		if (err < 0)
+			return XDP_ABORTED;
+	} else {
+		err = meta_add_mark(ctx, 42);
+		if (err < 0)
+			return XDP_DROP;
 	}
 
 	/* A set entry here means that the correspnding queue_id
