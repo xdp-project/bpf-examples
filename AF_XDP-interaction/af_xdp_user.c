@@ -604,8 +604,10 @@ int main(int argc, char **argv)
 	};
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
-	struct bpf_object *bpf_obj = NULL;
 	pthread_t stats_poll_thread;
+
+	struct bpf_object *bpf_obj = NULL;
+	struct bpf_map *map;
 
 	/* Global shutdown handler */
 	signal(SIGINT, exit_application);
@@ -624,10 +626,11 @@ int main(int argc, char **argv)
 	if (cfg.do_unload)
 		return xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
 
-	/* Load custom program if configured */
-	if (cfg.filename[0] != 0) {
-		struct bpf_map *map;
-
+	/* Require loading custom BPF program */
+	if (cfg.filename[0] == 0) {
+		fprintf(stderr, "ERROR: must load custom BPF-prog\n");
+		exit(EXIT_FAILURE);
+	} else {
 		bpf_obj = load_bpf_and_xdp_attach(&cfg);
 		if (!bpf_obj) {
 			/* Error handling done in load_bpf_and_xdp_attach() */
