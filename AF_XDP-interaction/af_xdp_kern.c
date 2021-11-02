@@ -29,7 +29,6 @@ struct {
  */
 struct xdp_hints_mark {
 	__u32 mark;
-	__u32 btf_type; /* Is this needed? */
 	__u32 btf_id;
 } __attribute__((aligned(4))) __attribute__((packed));
 /*
@@ -91,7 +90,6 @@ int meta_add_mark(struct xdp_md *ctx, __u32 mark)
 		return -2;
 
 	meta->mark = mark;
-	meta->btf_type = 0;
 	meta->btf_id = bpf_core_type_id_local(struct xdp_hints_mark);
 
 	return 0;

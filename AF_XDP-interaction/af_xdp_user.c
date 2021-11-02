@@ -304,8 +304,8 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 struct meta_info {
 	union {
 		struct {
+			__u32 pad;
 			__u32 mark;
-			__u32 btf_type;
 		};
 		__u64 rx_ktime;
 	};
@@ -321,8 +321,8 @@ static void print_meta_info(uint8_t *pkt, uint32_t len)
 	 */
 	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
 
-	printf("DEBUG-meta btf_id:%d (t:%u) mark:%d or rx_time:%llu\n",
-	       meta->btf_id, meta->btf_type, meta->mark, meta->rx_ktime);
+	printf("DEBUG-meta btf_id:%d mark:%d (p:%u) or rx_time:%llu\n",
+	       meta->btf_id, meta->mark, meta->pad, meta->rx_ktime);
 
 }
 
