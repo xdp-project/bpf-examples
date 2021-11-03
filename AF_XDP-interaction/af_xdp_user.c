@@ -402,7 +402,7 @@ static void print_meta_info_time(uint8_t *pkt)
 	int err;
 	struct meta_info *m;
 
-	
+	/* Notice how rx_ktime_ptr becomes a pointer into struct memory  */
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 			    "rx_ktime", xbi, pkt);
 	if (err) {
@@ -410,8 +410,7 @@ static void print_meta_info_time(uint8_t *pkt)
 		return;
 	}
 	rx_ktime = *rx_ktime_ptr;
-	
-//	XSK_BTF_READ_INTO(rx_ktime, "rx_ktime", xbi, pkt);
+	/* Above same as XSK_BTF_READ_INTO(rx_ktime, rx_ktime, xbi, pkt); */
 
 	diff = time_now - rx_ktime;
 

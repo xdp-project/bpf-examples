@@ -21,6 +21,7 @@ LIBBPF_API int xsk_btf__read(void **dest, size_t size, const char *field, struct
 			     const void *addr);
 LIBBPF_API bool xsk_btf__has_field(const char *field, struct xsk_btf_info *xbi);
 
+/* Notice: that field must NOT be a C-string as macro will stringify it */
 #define XSK_BTF_READ_INTO(dest, field, xbi, addr) ({ \
 	typeof(dest) *_d; \
 	xsk_btf__read((void **)&_d, sizeof(dest), #field, xbi, addr); \
