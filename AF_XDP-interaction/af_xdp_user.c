@@ -303,6 +303,55 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
 
+struct xdp_hints {
+	struct xsk_btf_info *xbi;
+	const char *struct_name;
+};
+
+static struct xdp_hints xdp_meta_with_time = {
+	.struct_name = "xdp_hints_rx_time",
+};
+
+static struct xdp_hints xdp_meta_with_mark = {
+	.struct_name = "xdp_hints_mark",
+};
+
+int init_xdp_hints(struct btf *btf_obj, struct xdp_hints *xh)
+{
+	int err;
+
+	err = xsk_btf__init_xdp_hint(btf_obj, xh->struct_name, &(xh->xbi));
+	if (err) {
+		fprintf(stderr, "ERR(%d): Cannot BTF find struct:%s\n",
+			err, xh->struct_name);
+		return err;
+	}
+
+	if (!xsk_btf__has_field("btf_id", xh->xbi)) {
+		fprintf(stderr, "ERR: %s doesn't contain member btf_id\n",
+			xh->struct_name);
+		return -ENOENT;
+	}
+	return 0;
+}
+
+int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
+{
+	struct btf *btf = bpf_object__btf(bpf_obj);
+	int err;
+
+	if ((err = init_xdp_hints(btf, &xdp_meta_with_time)))
+		return err;
+
+	if ((err = init_xdp_hints(btf, &xdp_meta_with_mark)))
+		return err;
+
+	/* Check member with "rx_time" exist */
+	if (!xsk_btf__has_field("rx_time", xdp_meta_with_time.xbi)) {
+		return -EBADSLT;
+	}
+}
+
 struct meta_info {
 	union {
 		struct {
@@ -326,6 +375,17 @@ static void print_meta_info(uint8_t *pkt, uint32_t len)
 	printf("DEBUG-meta btf_id:%d mark:%d (p:%u) or rx_time:%llu\n",
 	       meta->btf_id, meta->mark, meta->pad, meta->rx_ktime);
 
+}
+
+static void print_meta_info_via_btf(uint8_t *pkt)
+{
+	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
+	__u32 btf_id = xsk_umem__btf_id(pkt);
+
+	if (btf_id == xsk_btf__btf_type_id(xdp_meta_with_time.xbi)) {
+		printf("DEBUG-meta btf_id:%d rx_time:%llu\n",
+		       meta->btf_id, meta->rx_ktime);
+	}
 }
 
 /* As debug tool print some info about packet */
@@ -361,8 +421,10 @@ static bool process_packet(struct xsk_socket_info *xsk,
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
-	if (debug_meta)
-		print_meta_info(pkt, len);
+	if (debug_meta) {
+		// print_meta_info(pkt, len);
+		print_meta_info_via_btf(pkt);
+	}
 
 	if (debug)
 		printf("XXX addr:0x%lX pkt_ptr:0x%p\n", addr, pkt);
@@ -640,9 +702,6 @@ __s32 btf_find_struct(struct btf *btf, const char *name, __s64 *size)
 	return btf_id;
 }
 
-static const char *name1 = "xdp_hints_mark";
-static const char *name2 = "xdp_hints_rx_time";
-
 int btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 {
 	struct btf *btf = bpf_object__btf(bpf_obj);
@@ -650,6 +709,9 @@ int btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	int err;
 
 	struct xsk_btf_info *xdp_hint_rx_time = NULL;
+
+	static const char *name1 = "xdp_hints_mark";
+	static const char *name2 = "xdp_hints_rx_time";
 
 	btf_find_struct(btf, name1, &size);
 	btf_find_struct(btf, name2, &size);
@@ -726,9 +788,10 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (1) {
+	if (0) {
 		btf_info_via_bpf_object(bpf_obj);
 	}
+	init_btf_info_via_bpf_object(bpf_obj);
 
 	/* Allow unlimited locking of memory, so all memory needed for packet
 	 * buffers can be locked.

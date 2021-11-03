@@ -12,10 +12,11 @@
 
 #include <bpf/btf.h> /* provided by libbpf */
 
-int xsk_umem__btf_id(void *umem_pkt_data, const struct xsk_umem *umem)
+int xsk_umem__btf_id(void *umem_pkt_data) // , const struct xsk_umem *umem)
 {
 //	if (umem->config.xdp_headroom < sizeof(int))
 //		return -EINVAL;
+	// TODO: Need some check that know of metadata is enabled for frame
 
 	return *(int *)(umem_pkt_data - sizeof(int));
 }
@@ -25,13 +26,19 @@ struct xsk_btf_info {
 	struct hashmap map;
 	struct btf *btf;
 	const struct btf_type *type;
-	//__u32 btf_id;
+	__u32 btf_type_id;
 };
 
 struct xsk_btf_entry {
 	__u32 offset;
 	__u32 size;
 };
+
+
+__u32 xsk_btf__btf_type_id(struct xsk_btf_info *xbi)
+{
+	return xbi->btf_type_id;
+}
 
 static void __xsk_btf_free_hash(struct xsk_btf_info *xbi)
 {
@@ -113,7 +120,7 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 
 	(*xbi)->btf = btf_obj;
 	(*xbi)->type = t;
-	// (*xbi)->btf_id = id;
+	(*xbi)->btf_type_id = id;
 
 	return ret;
 
