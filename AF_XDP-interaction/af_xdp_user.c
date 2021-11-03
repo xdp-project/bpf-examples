@@ -406,7 +406,7 @@ static void print_meta_info_time(uint8_t *pkt)
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 			    "rx_ktime", xbi, pkt);
 	if (err) {
-		printf("DEBUG-meta-time ERROR(%d) no rx_ktime?!\n", err);
+		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
 		return;
 	}
 	rx_ktime = *rx_ktime_ptr;
@@ -414,10 +414,8 @@ static void print_meta_info_time(uint8_t *pkt)
 
 	diff = time_now - rx_ktime;
 
-	m = (pkt - 12);
-
-	printf("DEBUG-meta-time rx_ktime:%llu time_now:%llu diff:%llu ns t:%llu\n",
-	       rx_ktime, time_now, diff, m->rx_ktime);
+	printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+	       rx_ktime, time_now, diff);
 }
 
 static void print_meta_info_via_btf( uint8_t *pkt)
@@ -467,8 +465,8 @@ static bool process_packet(struct xsk_socket_info *xsk,
 
 	if (debug_meta) {
 		print_meta_info(pkt, len);
-		print_meta_info_via_btf(pkt);
 	}
+	print_meta_info_via_btf(pkt);
 
 	if (debug)
 		printf("XXX addr:0x%lX pkt_ptr:0x%p\n", addr, pkt);
@@ -818,7 +816,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (1) {
+	if (debug_meta) {
 		btf_info_via_bpf_object(bpf_obj);
 	}
 	err = init_btf_info_via_bpf_object(bpf_obj);

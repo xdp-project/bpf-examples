@@ -207,9 +207,6 @@ int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_in
 	if (entry->size != size)
 		return -EFAULT;
 
-//	printf("XXX DEBUG xbi->type->size:%u off:%u\n",
-//	       xbi->type->size, entry->offset);
-	
 	// XXX should we cache size for main xdp_hints struct?
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
 	return 0;
