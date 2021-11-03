@@ -159,6 +159,9 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 			 * be no entries whose offset is not a multiple of byte */
 			(*entry)->offset = BTF_MEMBER_BIT_OFFSET(m->offset) / 8;
 			(*entry)->size = btf__resolve_size(xbi->btf, m->type);
+
+			printf("XXX size:%d offset:%u\n",
+			       (*entry)->size, (*entry)->offset);
 		}
 		return 0;
 	}
@@ -204,6 +207,9 @@ int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_in
 	if (entry->size != size)
 		return -EFAULT;
 
+//	printf("XXX DEBUG xbi->type->size:%u off:%u\n",
+//	       xbi->type->size, entry->offset);
+	
 	// XXX should we cache size for main xdp_hints struct?
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
 	return 0;

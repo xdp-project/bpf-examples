@@ -69,6 +69,20 @@ struct xsk_socket_info {
 	struct stats_record prev_stats;
 };
 
+#define NANOSEC_PER_SEC 1000000000 /* 10^9 */
+static uint64_t gettime(void)
+{
+	struct timespec t;
+	int res;
+
+	res = clock_gettime(CLOCK_MONOTONIC, &t);
+	if (res < 0) {
+		fprintf(stderr, "Error with gettimeofday! (%i)\n", res);
+		exit(EXIT_FAIL);
+	}
+	return (uint64_t) t.tv_sec * NANOSEC_PER_SEC + t.tv_nsec;
+}
+
 static inline __u32 xsk_ring_prod__free(struct xsk_ring_prod *r)
 {
 	r->cached_cons = *r->consumer + r->size;
@@ -381,22 +395,34 @@ static void print_meta_info(uint8_t *pkt, uint32_t len)
 static void print_meta_info_time(uint8_t *pkt)
 {
 	struct xsk_btf_info *xbi = xdp_meta_with_time.xbi;
+	__u64 time_now = gettime();
+	__u64 *rx_ktime_ptr; /* Points directly to member memory */
 	__u64 rx_ktime;
+	__u64 diff;
 	int err;
+	struct meta_info *m;
 
-	err = xsk_btf__read(&rx_ktime, sizeof(rx_ktime),
+	
+	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 			    "rx_ktime", xbi, pkt);
 	if (err) {
-		printf("DEBUG-meta-time ERROR(%d) no rx_ktime?! sz:%d\n", err, sizeof(rx_ktime));
+		printf("DEBUG-meta-time ERROR(%d) no rx_ktime?!\n", err);
 		return;
 	}
+	rx_ktime = *rx_ktime_ptr;
+	
+//	XSK_BTF_READ_INTO(rx_ktime, "rx_ktime", xbi, pkt);
 
-	printf("DEBUG-meta-time rx_ktime:%llu\n", rx_ktime);
+	diff = time_now - rx_ktime;
+
+	m = (pkt - 12);
+
+	printf("DEBUG-meta-time rx_ktime:%llu time_now:%llu diff:%llu ns t:%llu\n",
+	       rx_ktime, time_now, diff, m->rx_ktime);
 }
 
 static void print_meta_info_via_btf( uint8_t *pkt)
 {
-	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
 	__u32 btf_id = xsk_umem__btf_id(pkt);
 
 	__u32 meta_time = xsk_btf__btf_type_id(xdp_meta_with_time.xbi);
@@ -441,7 +467,7 @@ static bool process_packet(struct xsk_socket_info *xsk,
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
 	if (debug_meta) {
-		// print_meta_info(pkt, len);
+		print_meta_info(pkt, len);
 		print_meta_info_via_btf(pkt);
 	}
 
@@ -579,20 +605,6 @@ static void rx_and_process(struct config *cfg,
 		}
 		handle_receive_packets(xsk_socket);
 	}
-}
-
-#define NANOSEC_PER_SEC 1000000000 /* 10^9 */
-static uint64_t gettime(void)
-{
-	struct timespec t;
-	int res;
-
-	res = clock_gettime(CLOCK_MONOTONIC, &t);
-	if (res < 0) {
-		fprintf(stderr, "Error with gettimeofday! (%i)\n", res);
-		exit(EXIT_FAIL);
-	}
-	return (uint64_t) t.tv_sec * NANOSEC_PER_SEC + t.tv_nsec;
 }
 
 static double calc_period(struct stats_record *r, struct stats_record *p)
