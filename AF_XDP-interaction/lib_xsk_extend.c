@@ -143,7 +143,6 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 	m = btf_members(xbi->type);
 	vlen = BTF_INFO_VLEN(xbi->type->info);
 	for (i = 0; i < vlen; i++, m++) {
-		const struct btf_type *member_type;
 		const char *name = btf__name_by_offset(xbi->btf, m->name_off);
 		printf("XXX %s() i:%d name:%s\n", __func__, i, name);
 
@@ -151,7 +150,6 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 			continue;
 
 		if (entry) {
-			member_type = btf__type_by_id(xbi->btf, m->type);
 			*entry = malloc(sizeof(*entry));
 			if (!entry) {
 				return -ENOMEM;
@@ -160,7 +158,7 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 			/* As we bail out at init for bit fields, there should
 			 * be no entries whose offset is not a multiple of byte */
 			(*entry)->offset = BTF_MEMBER_BIT_OFFSET(m->offset) / 8;
-			(*entry)->size = member_type->size;
+			(*entry)->size = btf__resolve_size(xbi->btf, m->type);
 		}
 		return 0;
 	}
@@ -203,10 +201,8 @@ int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_in
 		hashmap__add(&(xbi->map), field, entry);
 	}
 
-	if (entry->size != size) {
-		printf("XXX entry->size(%ld) != size (%ld)\n", entry->size, size); 
+	if (entry->size != size)
 		return -EFAULT;
-	}
 
 	// XXX should we cache size for main xdp_hints struct?
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
