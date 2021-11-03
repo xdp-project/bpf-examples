@@ -346,10 +346,11 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	if ((err = init_xdp_hints(btf, &xdp_meta_with_mark)))
 		return err;
 
-	/* Check member with "rx_time" exist */
-	if (!xsk_btf__has_field("rx_time", xdp_meta_with_time.xbi)) {
+	/* Check member with "rx_ktime" exist */
+	if (!xsk_btf__has_field("rx_ktime", xdp_meta_with_time.xbi)) {
 		return -EBADSLT;
 	}
+	return 0;
 }
 
 struct meta_info {
@@ -377,14 +378,32 @@ static void print_meta_info(uint8_t *pkt, uint32_t len)
 
 }
 
-static void print_meta_info_via_btf(uint8_t *pkt)
+static void print_meta_info_time(uint8_t *pkt)
+{
+	struct xsk_btf_info *xbi = xdp_meta_with_time.xbi;
+	__u64 rx_ktime;
+	int err;
+
+	err = xsk_btf__read(&rx_ktime, sizeof(rx_ktime),
+			    "rx_ktime", xbi, pkt);
+	if (err) {
+		printf("DEBUG-meta-time ERROR(%d) no rx_ktime?! sz:%d\n", err, sizeof(rx_ktime));
+		return;
+	}
+
+	printf("DEBUG-meta-time rx_ktime:%llu\n", rx_ktime);
+}
+
+static void print_meta_info_via_btf( uint8_t *pkt)
 {
 	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
 	__u32 btf_id = xsk_umem__btf_id(pkt);
 
-	if (btf_id == xsk_btf__btf_type_id(xdp_meta_with_time.xbi)) {
-		printf("DEBUG-meta btf_id:%d rx_time:%llu\n",
-		       meta->btf_id, meta->rx_ktime);
+	__u32 meta_time = xsk_btf__btf_type_id(xdp_meta_with_time.xbi);
+	// __u32 meta_mark = xsk_btf__btf_type_id(xdp_meta_with_mark.xbi);
+
+	if (btf_id == meta_time) {
+		print_meta_info_time(pkt);
 	}
 }
 
@@ -732,7 +751,7 @@ int btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 
 int main(int argc, char **argv)
 {
-	int ret;
+	int ret, err;
 	int xsks_map_fd;
 	void *packet_buffer;
 	uint64_t packet_buffer_size;
@@ -788,10 +807,15 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (0) {
+	if (1) {
 		btf_info_via_bpf_object(bpf_obj);
 	}
-	init_btf_info_via_bpf_object(bpf_obj);
+	err = init_btf_info_via_bpf_object(bpf_obj);
+	if (err) {
+		fprintf(stderr, "ERROR(%d): Invalid BTF info: errno:%s\n",
+			err, strerror(errno));
+		return EXIT_FAILURE;
+	}
 
 	/* Allow unlimited locking of memory, so all memory needed for packet
 	 * buffers can be locked.

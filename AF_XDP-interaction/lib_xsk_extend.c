@@ -203,8 +203,10 @@ int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_in
 		hashmap__add(&(xbi->map), field, entry);
 	}
 
-	if (entry->size != size)
-		return -EINVAL;
+	if (entry->size != size) {
+		printf("XXX entry->size(%ld) != size (%ld)\n", entry->size, size); 
+		return -EFAULT;
+	}
 
 	// XXX should we cache size for main xdp_hints struct?
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
