@@ -32,6 +32,7 @@
 #include "common_user_bpf_xdp.h"
 // #include "common_libbpf.h"
 
+#include "lib_xsk_extend.h"
 
 #define NUM_FRAMES         4096
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
@@ -625,7 +626,7 @@ int btf_walk_struct_members(struct btf *btf_obj, __s32 btf_id)
 	return 0;
 }
 
-__s32 btf_find_struct(struct btf *btf, char *name, __s64 *size)
+__s32 btf_find_struct(struct btf *btf, const char *name, __s64 *size)
 {
 	__s32 btf_id = btf__find_by_name_kind(btf, name, BTF_KIND_STRUCT);
 	__s64 sz = btf__resolve_size(btf, btf_id);
@@ -639,15 +640,31 @@ __s32 btf_find_struct(struct btf *btf, char *name, __s64 *size)
 	return btf_id;
 }
 
+static const char *name1 = "xdp_hints_mark";
+static const char *name2 = "xdp_hints_rx_time";
+
 int btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 {
 	struct btf *btf = bpf_object__btf(bpf_obj);
-	char *name1 = "xdp_hints_mark";
-	char *name2 = "xdp_hints_rx_time";
 	__s64 size;
+	int err;
+
+	struct xsk_btf_info *xdp_hint_rx_time = NULL;
 
 	btf_find_struct(btf, name1, &size);
 	btf_find_struct(btf, name2, &size);
+
+	err = xsk_btf__init_xdp_hint(btf, name2, &xdp_hint_rx_time);
+	if (err) {
+		fprintf(stderr, "WARN(%d): Cannot xsk_btf__init_xdp_hint\n", err);
+		return err;
+	}
+	if (!xsk_btf__has_field("rx_ktime", xdp_hint_rx_time)) {
+		fprintf(stderr, "WARN: %s doesn't contain member rx_ktime\n",
+			name2);
+		return 1;
+	}
+
 	return 0;
 }
 

@@ -1,18 +1,23 @@
 /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
 
+/*
+ * Prototyping new API for userspace xsk/AF_XDP to access XDP-hints, which is
+ * BTF typed info in XDP metadata area (located just before packets headers).
+ */
 #include "hashmap.h"
 
 #include <errno.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include <bpf/btf.h> /* provided by libbpf */
 
-int xsk_umem__btf_id(void *umem_data, const struct xsk_umem *umem)
+int xsk_umem__btf_id(void *umem_pkt_data, const struct xsk_umem *umem)
 {
 //	if (umem->config.xdp_headroom < sizeof(int))
 //		return -EINVAL;
 
-	return *(int *)(umem_data - sizeof(int));
+	return *(int *)(umem_pkt_data - sizeof(int));
 }
 
 
@@ -20,6 +25,7 @@ struct xsk_btf_info {
 	struct hashmap map;
 	struct btf *btf;
 	const struct btf_type *type;
+	//__u32 btf_id;
 };
 
 struct xsk_btf_entry {
@@ -56,33 +62,36 @@ static bool __xsk_equal_fn(const void *k1, const void *k2, void *ctx)
 	return k1 == k2;
 }
 
-int xsk_btf__init(__u32 btf_id, struct xsk_btf_info **xbi)
+int xsk_btf__init_xdp_hint(struct btf *btf_obj,
+			   const char *xdp_hints_name,
+			   struct xsk_btf_info **xbi)
 {
 	const struct btf_member *m;
 	const struct btf_type *t;
 	unsigned short vlen;
-	struct btf *btf;
 	int i, id, ret = 0;
 
 	if (!xbi)
 		return -EINVAL;
 
-	ret = btf__get_from_id(btf_id, &btf);
-	if (ret < 0)
-		return ret;
+//	ret = btf__get_from_id(btf_id, &btf); // Limits lookups to kernel BTF
+//	if (ret < 0)
+//		return ret;
 
-	id = btf__find_by_name(btf, "xdp_hints");
+	/* Require XDP-hints is defined as a struct */
+	id = btf__find_by_name_kind(btf_obj, xdp_hints_name, BTF_KIND_STRUCT);
 	if (id < 0) {
 		ret = id;
 		goto error_btf;
 	}
+	printf("XXX %s() id:%d\n", __func__, id);
 
-	t = btf__type_by_id(btf, id);
+	t = btf__type_by_id(btf_obj, id);
 
-	if (!BTF_INFO_KFLAG(t->info)) {
-		ret = -EINVAL;
-		goto error_btf;
-	}
+//	if (!BTF_INFO_KFLAG(t->info)) {
+//		ret = -EINVAL;
+//		goto error_btf;
+//	}
 
 	*xbi = malloc(sizeof(**xbi));
 	if (!*xbi) {
@@ -102,8 +111,9 @@ int xsk_btf__init(__u32 btf_id, struct xsk_btf_info **xbi)
 		}
 	}
 
-	(*xbi)->btf = btf;
+	(*xbi)->btf = btf_obj;
 	(*xbi)->type = t;
+	// (*xbi)->btf_id = id;
 
 	return ret;
 
@@ -112,7 +122,7 @@ error_entry:
 	free(*xbi);
 
 error_btf:
-	btf__free(btf);
+//	btf__free(btf);
 	return ret;
 }
 
@@ -128,6 +138,7 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 	for (i = 0; i < vlen; i++, m++) {
 		const struct btf_type *member_type;
 		const char *name = btf__name_by_offset(xbi->btf, m->name_off);
+		printf("XXX %s() i:%d name:%s\n", __func__, i, name);
 
 		if (strcmp(name, field))
 			continue;
@@ -155,10 +166,10 @@ bool xsk_btf__has_field(const char *field, struct xsk_btf_info *xbi)
 	if (!xbi)
 		return false;
 
-	return __xsk_btf_field_entry(xbi, field, NULL);
+	return __xsk_btf_field_entry(xbi, field, NULL) ? false : true;
 }
 
-void xsk_btf__free(struct xsk_btf_info *xbi)
+void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi)
 {
 	if (!xbi)
 		return;
@@ -188,6 +199,7 @@ int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_in
 	if (entry->size != size)
 		return -EINVAL;
 
+	// XXX should we cache size for main xdp_hints struct?
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
 	return 0;
 }
