@@ -617,8 +617,10 @@ int btf_walk_struct_members(struct btf *btf_obj, __s32 btf_id)
 	printf("XXX kind:%d members:%d\n", kind, vlen);
 
 	for (i = 0; i < vlen; i++, m++) {
-		printf("XXX [%d] member type:%d bit-offset:%u name_off:%u\n",
-		       i, m->type, m->offset, m->name_off);
+		__s64 sz = btf__resolve_size(btf_obj, m->type);
+
+		printf("XXX [%d] member type:%d bit-offset:%u name_off:%u sz:%lld\n",
+		       i, m->type, m->offset, m->name_off, sz);
 	}
 	return 0;
 }
