@@ -364,6 +364,12 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	if (!xsk_btf__has_field("rx_ktime", xdp_meta_with_time.xbi)) {
 		return -EBADSLT;
 	}
+
+	/* Check member with "mark" exist */
+	if (!xsk_btf__has_field("mark", xdp_meta_with_mark.xbi)) {
+		return -EBADSLT;
+	}
+
 	return 0;
 }
 
@@ -392,7 +398,16 @@ static void print_meta_info(uint8_t *pkt, uint32_t len)
 
 }
 
-static void print_meta_info_time(uint8_t *pkt)
+static void print_meta_info_mark(uint8_t *pkt)
+{
+	struct xsk_btf_info *xbi = xdp_meta_with_mark.xbi;
+	__u32 mark;
+
+	XSK_BTF_READ_INTO(mark, mark, xbi, pkt);
+	printf("meta-mark mark:%u\n", mark);
+}
+
+static int print_meta_info_time(uint8_t *pkt)
 {
 	struct xsk_btf_info *xbi = xdp_meta_with_time.xbi;
 	__u64 time_now = gettime();
@@ -400,14 +415,13 @@ static void print_meta_info_time(uint8_t *pkt)
 	__u64 rx_ktime;
 	__u64 diff;
 	int err;
-	struct meta_info *m;
 
 	/* Notice how rx_ktime_ptr becomes a pointer into struct memory  */
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 			    "rx_ktime", xbi, pkt);
 	if (err) {
 		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
-		return;
+		return err;
 	}
 	rx_ktime = *rx_ktime_ptr;
 	/* Above same as XSK_BTF_READ_INTO(rx_ktime, rx_ktime, xbi, pkt); */
@@ -416,6 +430,8 @@ static void print_meta_info_time(uint8_t *pkt)
 
 	printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
 	       rx_ktime, time_now, diff);
+
+	return 0;
 }
 
 static void print_meta_info_via_btf( uint8_t *pkt)
@@ -423,11 +439,14 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 	__u32 btf_id = xsk_umem__btf_id(pkt);
 
 	__u32 meta_time = xsk_btf__btf_type_id(xdp_meta_with_time.xbi);
-	// __u32 meta_mark = xsk_btf__btf_type_id(xdp_meta_with_mark.xbi);
+	__u32 meta_mark = xsk_btf__btf_type_id(xdp_meta_with_mark.xbi);
 
 	if (btf_id == meta_time) {
 		print_meta_info_time(pkt);
+	} else if (btf_id == meta_mark) {
+		print_meta_info_mark(pkt);
 	}
+
 }
 
 /* As debug tool print some info about packet */
