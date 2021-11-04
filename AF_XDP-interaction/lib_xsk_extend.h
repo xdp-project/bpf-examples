@@ -22,9 +22,17 @@ LIBBPF_API void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi);
 
 LIBBPF_API __u32 xsk_btf__btf_type_id(struct xsk_btf_info *xbi);
 
-LIBBPF_API int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_info *xbi,
-			     const void *addr);
-LIBBPF_API bool xsk_btf__has_field(const char *field, struct xsk_btf_info *xbi);
+LIBBPF_API int xsk_btf__read(void **dest, size_t size,
+			     const char *field,
+			     struct xsk_btf_info *xbi,  const void *addr);
+
+LIBBPF_API int xsk_btf__read_member(void **dest, size_t size,
+				    struct xsk_btf_member *entry,
+				    struct xsk_btf_info *xbi, const void *addr);
+
+LIBBPF_API bool xsk_btf__has_field   (const char *field, struct xsk_btf_info *xbi);
+LIBBPF_API bool xsk_btf__field_member(const char *field, struct xsk_btf_info *xbi,
+				      struct xsk_btf_member *entry);
 
 /* Notice: that field must NOT be a C-string as macro will stringify it */
 #define XSK_BTF_READ_INTO(dest, field, xbi, addr) ({ \
