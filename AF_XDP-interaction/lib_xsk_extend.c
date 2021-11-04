@@ -8,7 +8,6 @@
 
 #include <errno.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 #include <bpf/btf.h> /* provided by libbpf */
 
@@ -81,24 +80,14 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 	if (!xbi)
 		return -EINVAL;
 
-//	ret = btf__get_from_id(btf_id, &btf); // Limits lookups to kernel BTF
-//	if (ret < 0)
-//		return ret;
-
-	/* Require XDP-hints is defined as a struct */
+	/* Require XDP-hints are defined as a struct */
 	id = btf__find_by_name_kind(btf_obj, xdp_hints_name, BTF_KIND_STRUCT);
 	if (id < 0) {
 		ret = id;
 		goto error_btf;
 	}
-	printf("XXX %s() id:%d\n", __func__, id);
 
 	t = btf__type_by_id(btf_obj, id);
-
-//	if (!BTF_INFO_KFLAG(t->info)) {
-//		ret = -EINVAL;
-//		goto error_btf;
-//	}
 
 	*xbi = malloc(sizeof(**xbi));
 	if (!*xbi) {
@@ -129,7 +118,6 @@ error_entry:
 	free(*xbi);
 
 error_btf:
-//	btf__free(btf);
 	return ret;
 }
 
@@ -144,7 +132,6 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 	vlen = BTF_INFO_VLEN(xbi->type->info);
 	for (i = 0; i < vlen; i++, m++) {
 		const char *name = btf__name_by_offset(xbi->btf, m->name_off);
-		printf("XXX %s() i:%d name:%s\n", __func__, i, name);
 
 		if (strcmp(name, field))
 			continue;
@@ -159,9 +146,6 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 			 * be no entries whose offset is not a multiple of byte */
 			(*entry)->offset = BTF_MEMBER_BIT_OFFSET(m->offset) / 8;
 			(*entry)->size = btf__resolve_size(xbi->btf, m->type);
-
-			printf("XXX size:%d offset:%u\n",
-			       (*entry)->size, (*entry)->offset);
 		}
 		return 0;
 	}
@@ -187,8 +171,8 @@ void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi)
 	free(xbi);
 }
 
-int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_info *xbi,
-		  const void *addr)
+int xsk_btf__read(void **dest, size_t size, const char *field,
+		  struct xsk_btf_info *xbi, const void *addr)
 {
 	struct xsk_btf_entry *entry;
 	int err;
@@ -207,7 +191,6 @@ int xsk_btf__read(void **dest, size_t size, const char *field, struct xsk_btf_in
 	if (entry->size != size)
 		return -EFAULT;
 
-	// XXX should we cache size for main xdp_hints struct?
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
 	return 0;
 }
