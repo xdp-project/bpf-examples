@@ -110,6 +110,11 @@ int xdp_sock_prog(struct xdp_md *ctx)
 	if (!pkt_count)
 		return XDP_ABORTED;
 	__u64 cnt = (*pkt_count)++;
+//	if (cnt == 0) {
+//		if (bpf_ktime_get_ns() == 42)
+//			return XDP_ABORTED;
+//		cnt++;
+//	}
 
 	/* Notice how two different xdp_hints meta-data are used */
 	if ((cnt % 2) == 0) {
