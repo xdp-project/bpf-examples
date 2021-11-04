@@ -101,9 +101,7 @@ int meta_add_mark(struct xdp_md *ctx, __u32 mark)
 	return 0;
 }
 
-/* FIXME: Use proper standard defines
- * Neighbor Discovery in IPv6 - RFC4861
- */
+/* Neighbor Discovery in IPv6 - Values taken from RFC4861 */
 #define NDP_R_SOL	133 /* Router Solicitation */
 #define NDP_R_ADV	134 /* Router Advertisement */
 #define NDP_SOL 	135 /* Neighbor Solicitation */
