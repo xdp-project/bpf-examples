@@ -122,7 +122,7 @@ error_btf:
 }
 
 static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
-			  struct xsk_btf_entry **entry)
+			  struct xsk_btf_entry *entry)
 {
 	const struct btf_member *m;
 	unsigned short vlen;
@@ -137,15 +137,10 @@ static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 			continue;
 
 		if (entry) {
-			*entry = malloc(sizeof(*entry));
-			if (!entry) {
-				return -ENOMEM;
-			}
-
 			/* As we bail out at init for bit fields, there should
 			 * be no entries whose offset is not a multiple of byte */
-			(*entry)->offset = BTF_MEMBER_BIT_OFFSET(m->offset) / 8;
-			(*entry)->size = btf__resolve_size(xbi->btf, m->type);
+			entry->offset = BTF_MEMBER_BIT_OFFSET(m->offset) / 8;
+			entry->size = btf__resolve_size(xbi->btf, m->type);
 		}
 		return 0;
 	}
@@ -181,9 +176,16 @@ int xsk_btf__read(void **dest, size_t size, const char *field,
 		return -EINVAL;
 
 	if (!hashmap__find(&(xbi->map), field, (void **)&entry)) {
-		err = __xsk_btf_field_entry(xbi, field, &entry);
+		struct xsk_btf_entry e;
+
+		err = __xsk_btf_field_entry(xbi, field, &e);
 		if (err)
 			return err;
+
+		entry = malloc(sizeof(*entry));
+		if (!entry)
+			return -ENOMEM;
+		*entry = e;
 
 		hashmap__add(&(xbi->map), field, entry);
 	}
