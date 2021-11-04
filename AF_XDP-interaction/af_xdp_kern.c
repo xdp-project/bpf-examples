@@ -6,6 +6,8 @@
 
 #include <bpf/bpf_core_read.h> /* bpf_core_type_id_local */
 
+#include "xdp/parsing_helpers.h"
+
 struct {
 	__uint(type, BPF_MAP_TYPE_XSKMAP);
 	__uint(max_entries, 64); /* Assume netdev has no more than 64 queues */
@@ -99,12 +101,57 @@ int meta_add_mark(struct xdp_md *ctx, __u32 mark)
 	return 0;
 }
 
+/* FIXME: Use proper standard defines
+ * Neighbor Discovery in IPv6 - RFC4861
+ */
+#define NDP_R_SOL	133 /* Router Solicitation */
+#define NDP_R_ADV	134 /* Router Advertisement */
+#define NDP_SOL 	135 /* Neighbor Solicitation */
+#define NDP_ADV 	136 /* Neighbor Advertisement */
+#define NDP_REDIR 	137 /* Redirect Message */
+
+int parse_pkt__is_ARP_or_NDP(struct xdp_md *ctx)
+{
+	void *data     = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+	struct hdr_cursor nh  = { .pos = data };
+	struct ethhdr *eth;
+	int eth_type;
+
+	eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type < 0)
+		return -1;
+
+	if (eth_type == bpf_htons(ETH_P_ARP))
+		return 1;
+
+	if (eth_type == bpf_htons(ETH_P_IPV6)) {
+		struct ipv6hdr *ip6h;
+		int ip_type = parse_ip6hdr(&nh, data_end, &ip6h);
+		if (ip_type < 0)
+			return -1;
+
+		if (ip_type == IPPROTO_ICMPV6) {
+			struct icmp6hdr *icmp6hdr;
+			int icmp6_type = parse_icmp6hdr(&nh, data_end, &icmp6hdr);
+
+			if (icmp6_type < 0)
+				return -1;
+			if (icmp6_type >= NDP_R_SOL &&
+			    icmp6_type <= NDP_REDIR)
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
 SEC("xdp_sock")
 int xdp_sock_prog(struct xdp_md *ctx)
 {
 	int index = ctx->rx_queue_index;
 	__u32 *pkt_count;
-	int err;
+	int err, ret;
 
 	pkt_count = bpf_map_lookup_elem(&xdp_stats_map, &index);
 	if (!pkt_count)
@@ -126,6 +173,13 @@ int xdp_sock_prog(struct xdp_md *ctx)
 		if (err < 0)
 			return XDP_DROP;
 	}
+
+	/* Let network stack handle ARP and IPv6 Neigh Solicitation */
+	ret = parse_pkt__is_ARP_or_NDP(ctx);
+	if (ret < 0)
+		return XDP_ABORTED;
+	if (ret == 1)
+		return XDP_PASS;
 
 	/* A set entry here means that the correspnding queue_id
 	 * has an active AF_XDP socket bound to it. */
