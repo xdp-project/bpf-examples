@@ -9,6 +9,11 @@ LIBBPF_API int xsk_umem__btf_id(void *umem_data);
 
 struct xsk_btf_info;
 
+struct xsk_btf_member {
+	__u32 offset;
+	__u32 size;
+};
+
 LIBBPF_API int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 				      const char *xdp_hints_name,
 				      struct xsk_btf_info **xbi);

@@ -11,6 +11,8 @@
 
 #include <bpf/btf.h> /* provided by libbpf */
 
+#include "lib_xsk_extend.h"
+
 int xsk_umem__btf_id(void *umem_pkt_data) // , const struct xsk_umem *umem)
 {
 //	if (umem->config.xdp_headroom < sizeof(int))
@@ -20,19 +22,12 @@ int xsk_umem__btf_id(void *umem_pkt_data) // , const struct xsk_umem *umem)
 	return *(int *)(umem_pkt_data - sizeof(int));
 }
 
-
 struct xsk_btf_info {
 	struct hashmap map;
 	struct btf *btf;
 	const struct btf_type *type;
 	__u32 btf_type_id;
 };
-
-struct xsk_btf_entry {
-	__u32 offset;
-	__u32 size;
-};
-
 
 __u32 xsk_btf__btf_type_id(struct xsk_btf_info *xbi)
 {
@@ -122,7 +117,7 @@ error_btf:
 }
 
 static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
-			  struct xsk_btf_entry *entry)
+			  struct xsk_btf_member *entry)
 {
 	const struct btf_member *m;
 	unsigned short vlen;
@@ -156,6 +151,15 @@ bool xsk_btf__has_field(const char *field, struct xsk_btf_info *xbi)
 	return __xsk_btf_field_entry(xbi, field, NULL) ? false : true;
 }
 
+bool xsk_btf__field_member(const char *field, struct xsk_btf_info *xbi,
+			  struct xsk_btf_member *entry)
+{
+	if (!xbi)
+		return false;
+
+	return __xsk_btf_field_entry(xbi, field, entry) ? false : true;
+}
+
 void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi)
 {
 	if (!xbi)
@@ -169,14 +173,14 @@ void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi)
 int xsk_btf__read(void **dest, size_t size, const char *field,
 		  struct xsk_btf_info *xbi, const void *addr)
 {
-	struct xsk_btf_entry *entry;
+	struct xsk_btf_member *entry;
 	int err;
 
 	if (!field || !xbi || !dest || !addr)
 		return -EINVAL;
 
 	if (!hashmap__find(&(xbi->map), field, (void **)&entry)) {
-		struct xsk_btf_entry e;
+		struct xsk_btf_member e;
 
 		err = __xsk_btf_field_entry(xbi, field, &e);
 		if (err)
