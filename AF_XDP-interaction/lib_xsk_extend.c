@@ -180,6 +180,11 @@ int xsk_btf__read_member(void **dest, size_t size,
 	if (entry->size != size)
 		return -EFAULT;
 
+	/* Remember XDP-hints are located in metadata (xdp_ctx->data_meta),
+	 * which is located just before packet data starts.  Thus, accessing BTF
+	 * described memory area via a negative offset, based on the size of the
+	 * BTF struct that XDP-prog used.
+	 */
 	*dest = (void *)((char *)addr - xbi->type->size + entry->offset);
 	return 0;
 }
