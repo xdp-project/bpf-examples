@@ -213,7 +213,8 @@ static uint64_t xsk_umem_free_frames(struct xsk_socket_info *xsk)
 }
 
 static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
-						    struct xsk_umem_info *umem)
+						    struct xsk_umem_info *umem,
+						    int xsks_map_fd)
 {
 	struct xsk_socket_config xsk_cfg;
 	struct xsk_socket_info *xsk_info;
@@ -229,7 +230,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	xsk_info->umem = umem;
 	xsk_cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
 	xsk_cfg.tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
-	xsk_cfg.libbpf_flags = 0;
+	xsk_cfg.libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD;
 	xsk_cfg.xdp_flags = cfg->xdp_flags;
 	xsk_cfg.bind_flags = cfg->xsk_bind_flags;
 	ret = xsk_socket__create(&xsk_info->xsk, cfg->ifname,
@@ -264,6 +265,9 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 
 	xsk_ring_prod__submit(&xsk_info->umem->fq,
 			      XSK_RING_PROD__DEFAULT_NUM_DESCS);
+
+	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
+	xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
 
 	return xsk_info;
 
@@ -929,7 +933,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Open and configure the AF_XDP (xsk) socket */
-	xsk_socket = xsk_configure_socket(&cfg, umem);
+	xsk_socket = xsk_configure_socket(&cfg, umem, xsks_map_fd);
 	if (xsk_socket == NULL) {
 		fprintf(stderr, "ERROR: Can't setup AF_XDP socket \"%s\"\n",
 			strerror(errno));
