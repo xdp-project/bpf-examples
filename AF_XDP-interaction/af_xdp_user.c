@@ -418,8 +418,9 @@ static int print_meta_info_time(uint8_t *pkt)
 	time_now = gettime();
 	diff = time_now - rx_ktime;
 
-	printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-	       rx_ktime, time_now, diff);
+	if (debug_meta)
+		printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       rx_ktime, time_now, diff);
 
 	return 0;
 }
@@ -445,8 +446,9 @@ static int print_meta_info_time_faster(uint8_t *pkt)
 	time_now = gettime();
 	diff = time_now - rx_ktime;
 
-	printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-	       rx_ktime, time_now, diff);
+	if (debug_meta)
+		printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       rx_ktime, time_now, diff);
 
 	return 0;
 }
@@ -730,83 +732,6 @@ static void exit_application(int signal)
 	global_exit = true;
 }
 
-int btf_walk_struct_members(struct btf *btf_obj, __s32 btf_id)
-{
-	const struct btf_member *m;
-	const struct btf_type *btype;
-	unsigned short vlen;
-	__u32 kind;
-	int i;
-
-	btype = btf__type_by_id(btf_obj, btf_id);
-
-	kind = btf_kind(btype);
-	if (kind != BTF_KIND_STRUCT) {
-		fprintf(stderr, "ERROR: %s() BTF must be BTF_KIND_STRUCT",
-			__func__);
-		return -1;
-	}
-	/* BTF_KIND_STRUCT and BTF_KIND_UNION are followed
-	 * by multiple "struct btf_member".  The exact number
-	 * of btf_member is stored in the vlen (of the info in
-	 * "struct btf_type").
-	 */
-	m = btf_members(btype);
-	vlen = BTF_INFO_VLEN(btype->info);
-
-	printf("XXX kind:%d members:%d\n", kind, vlen);
-
-	for (i = 0; i < vlen; i++, m++) {
-		__s64 sz = btf__resolve_size(btf_obj, m->type);
-
-		printf("XXX [%d] member type:%d bit-offset:%u name_off:%u sz:%lld\n",
-		       i, m->type, m->offset, m->name_off, sz);
-	}
-	return 0;
-}
-
-__s32 btf_find_struct(struct btf *btf, const char *name, __s64 *size)
-{
-	__s32 btf_id = btf__find_by_name_kind(btf, name, BTF_KIND_STRUCT);
-	__s64 sz = btf__resolve_size(btf, btf_id);
-
-	if (debug_meta)
-		printf("XXX bpf_id:%d struct name:%s size:%lld\n",
-		       btf_id, name, sz);
-	*size = sz;
-	btf_walk_struct_members(btf, btf_id);
-
-	return btf_id;
-}
-
-int btf_info_via_bpf_object(struct bpf_object *bpf_obj)
-{
-	struct btf *btf = bpf_object__btf(bpf_obj);
-	__s64 size;
-	int err;
-
-	struct xsk_btf_info *xdp_hint_rx_time = NULL;
-
-	static const char *name1 = "xdp_hints_mark";
-	static const char *name2 = "xdp_hints_rx_time";
-
-	btf_find_struct(btf, name1, &size);
-	btf_find_struct(btf, name2, &size);
-
-	err = xsk_btf__init_xdp_hint(btf, name2, &xdp_hint_rx_time);
-	if (err) {
-		fprintf(stderr, "WARN(%d): Cannot xsk_btf__init_xdp_hint\n", err);
-		return err;
-	}
-	if (!xsk_btf__has_field("rx_ktime", xdp_hint_rx_time)) {
-		fprintf(stderr, "WARN: %s doesn't contain member rx_ktime\n",
-			name2);
-		return 1;
-	}
-
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
 	int ret, err;
@@ -865,9 +790,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (debug_meta) {
-		btf_info_via_bpf_object(bpf_obj);
-	}
 	err = init_btf_info_via_bpf_object(bpf_obj);
 	if (err) {
 		fprintf(stderr, "ERROR(%d): Invalid BTF info: errno:%s\n",
