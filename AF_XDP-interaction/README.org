@@ -1,0 +1,13 @@
+#+Title: How to transfer info from XDP-prog to AF_XDP
+
+This BPF-example show how use BTF to create a communication channel
+between XDP-prog (running kernel-side) and AF_XDP user-space process.
+
+* AF_XDP documentation
+
+In kernel [[https://www.kernel.org/doc/html/latest/networking/af_xdp.html][documentation for AF_XDP]].
+
+XDP-tools also contain documentation in [[https://github.com/xdp-project/xdp-tools/blob/master/lib/libxdp/README.org#using-af_xdp-sockets][libxdp for AF_XDP]], explaining
+how to use the API, and the difference between the control-path and
+data-path APIs.
+
