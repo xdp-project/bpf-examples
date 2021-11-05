@@ -16,10 +16,10 @@ IFACE=${IFACE:-"ens192"}
 
 PORT_START=8000
 CPU_CORES=4
-IPERF_FLAGS="-Z -t 100"
+IPERF_FLAGS="-Z -t 120 -O 60"
 KPPING_FLAGS=""
 EPPING_FLAGS="-r 0 -I tc -f"
-INTERTEST_INTERVAL=120 #sec
+INTERTEST_INTERVAL=${INTERTEST_INTERVAL:-10} #sec
 
 # $1 = path to save results in
 # $2 = number of flows

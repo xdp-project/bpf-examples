@@ -76,18 +76,11 @@ def read_all_rtt_reports(root_folder):
                     if n_streams not in all_data:
                         all_data[n_streams] = {"PPing": list(), "ePPing": list()}
 
-                    m_name = "VM2" if os.path.exists(os.path.join(
-                        path, "k_pping", "VM2")) else "M2"
-
-                    kfile = util.find_file_startswith(os.path.join(
-                        path, "k_pping", m_name), "pping.out")
                     all_data[n_streams]["PPing"].append(
-                        pping_comp.count_kpping_messages(kfile))
+                        pping_comp.count_kpping_messages(path))
 
-                    efile = util.find_file_startswith(os.path.join(
-                        path, "e_pping", m_name), "pping.out")
                     all_data[n_streams]["ePPing"].append(
-                        pping_comp.count_epping_messages(efile))
+                        pping_comp.count_epping_messages(path))
 
     for stream_data in all_data.values():
         for setup in stream_data.keys():

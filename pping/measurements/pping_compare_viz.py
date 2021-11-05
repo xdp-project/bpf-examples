@@ -2,122 +2,176 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import math
 import os
+import pathlib
 import argparse
+import time
 
-import common_plotting as complot
 import mpstat_viz
 import iperf_viz
 import util
 
-label_folder_map = {"baseline":"no_pping", "PPing":"k_pping", "ePPing":"e_pping"}
+label_folder_map = {"baseline": "no_pping",
+                    "PPing": "k_pping", "ePPing": "e_pping"}
+
+
+def get_test_interval(sub_folder, skip_omitted=True):
+    ref_file = list(pathlib.Path(sub_folder).glob("*M1/iperf_*.json*"))[0]
+    return iperf_viz.get_test_interval(ref_file, skip_omitted=skip_omitted)
+
 
 def load_cpu_data(root_folder):
     load_dict = dict()
     for label, folder in label_folder_map.items():
-        m_name = "VM2" if "VM2" in os.listdir(os.path.join(root_folder, folder)) else "M2"
-        j_data = mpstat_viz.load_mpstat_json(util.find_file_startswith(os.path.join(
-            root_folder, folder, m_name), m_name + "_mpstat.json"))
-        data = mpstat_viz.trim_only_under_load(mpstat_viz.to_percpu_df(j_data))
+        test_interval = get_test_interval(os.path.join(root_folder, folder))
+        j_data = mpstat_viz.load_mpstat_json(list(
+            pathlib.Path(root_folder, folder).glob("*M2/*M2_mpstat.json*"))[0])
+        data = mpstat_viz.to_percpu_df(j_data, filter_timerange=test_interval)
         load_dict[label] = data["all"].copy()
     return load_dict
+
 
 def load_iperf_data(root_folder):
     net_dict = dict()
     for label, folder in label_folder_map.items():
-        m_name = "VM1" if "VM1" in os.listdir(os.path.join(root_folder, folder)) else "M1"
-        dpath = os.path.join(root_folder, folder, m_name)
         iperf_data = []
 
-        for iperf_file in os.listdir(dpath):
-            if iperf_file.startswith("iperf") and ".json" in iperf_file:
-                j_data = iperf_viz.load_iperf3_json(os.path.join(dpath, iperf_file))
-                iperf_data.append(iperf_viz.to_perstream_df(j_data, include_total=False))
+        for iperf_file in pathlib.Path(root_folder, folder).glob("*M1/iperf_*json*"):
+            j_data = iperf_viz.load_iperf3_json(iperf_file)
+            iperf_data.append(iperf_viz.to_perstream_df(
+                j_data, include_total=False))
 
         net_dict[label] = iperf_viz.merge_iperf_data(*iperf_data)["all"].copy()
 
     return net_dict
 
-def parse_timestamp(t_str):
-    """
-    Returns seconds since start of day
-    """
-    h_m_s = t_str.split(":")
-    return float(h_m_s[0]) * 3600 + float(h_m_s[1]) * 60 + float(h_m_s[2])
 
-def count_epping_messages(filename, src_ip="172.16.24.31"):
+def parse_timestamp(date, t_str):
+    """
+    Returns a datetime from combining the timestring date like dateTHH:MM:SS
+    """
+    return np.datetime64(date + "T" + t_str, "ns")
+
+
+def datetime64_truncate(dt, unit):
+    return dt.astype("datetime64[{}]".format(unit)).astype(dt.dtype)
+
+
+def __count_pping_messages(filename, parsing_func, keys, date=None,
+                           norm_timestamps=True, filter_timerange=None,
+                           **kwargs):
+    """
+    Count nr of rtt-events per second from some line-based output from pping.
+    If passed, date should be string in YYYY-MM-DD format.
+    """
+    if date is None:
+        date = time.strftime("%Y-%m-%d", time.gmtime())
+
+    step_size = np.timedelta64(1, "s")
+    midnight_gap_tresh = np.timedelta64(-1, "h")
+
+    count = {"ts": list()}
+    for key in keys:
+        count[key] = [0]
+
+    with util.open_compressed_file(filename, mode="rt") as file:
+        for line in file:
+            t, increments = parsing_func(line, date, **kwargs)
+            if t is None:
+                continue
+
+            if len(count["ts"]) == 0:
+                count["ts"].append(datetime64_truncate(t, "s"))
+
+            t_diff = t - count["ts"][-1]
+            if t_diff < midnight_gap_tresh:
+                t += np.timedelta64(1, "D")
+                t_diff = t - count["ts"][-1]
+
+            if t_diff >= step_size:
+                for missing_t in np.arange(count["ts"][-1], t+1, step_size)[1:]:
+                    count["ts"].append(missing_t)
+                    for key in keys:
+                        count[key].append(0)
+
+            for key in increments:
+                count[key][-1] += 1
+
+    count = pd.DataFrame(count)
+    ref = None
+    if filter_timerange is not None:
+        count = count.loc[count["ts"].between(*filter_timerange)]
+        count.reset_index(drop=True, inplace=True)
+        ref = filter_timerange[0]
+    if norm_timestamps:
+        count["ts"] = util.normalize_timestamps(count["ts"], reference=ref)
+
+    return count
+
+
+def parse_epping_message(line, date, src_ip="172.16.24.31"):
+    words = line.split()
+    if len(words) < 7:
+        return None, None
+
+    t = parse_timestamp(date, words[0])
+
+    increments = ["all_events"]
+    if words[2] == "ms":
+        increments.append("rtt_events")
+        if words[-1].split(":")[0] == src_ip:
+            increments.append("filtered_rtt_events")
+
+    return t, increments
+
+
+def parse_kpping_message(line, date, src_ip="172.16.24.31"):
+    words = line.split()
+    if len(words) != 4:
+        return None, None
+
+    t = parse_timestamp(date, words[0])
+
+    increments = ["rtt_events"]
+    if words[-1].split(":")[0] == src_ip:
+        increments.append("filtered_rtt_events")
+
+    return t, increments
+
+
+def count_epping_messages(root_folder):
     """
     Count nr of rtt-events per second from the standard output of eBPF pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
     The column "all_events" includes both rtt-events and flow-events
-
-    NOTE: Assumes all events in filename are from the same day
     """
-    t_off = None
 
-    count = {"ts":[0], "rtt_events":[0], "filtered_rtt_events":[0], "all_events":[0]}
+    sub_path = pathlib.Path(root_folder, "e_pping")
+    test_interval = get_test_interval(sub_path)
+    date = str(get_test_interval(sub_path, skip_omitted=False)[0])[:10]
+    file = list(sub_path.glob("*M2/pping.out*"))[0]
 
-    with util.open_compressed_file(filename, mode="rt") as file:
-        for line in file:
-            words = line.split()
-            if len(words) < 7:
-                continue
+    return __count_pping_messages(file, parse_epping_message,
+                                  ("all_events", "rtt_events",
+                                   "filtered_rtt_events"), date=date,
+                                  filter_timerange=test_interval)
 
-            if t_off is None:
-                t_off = parse_timestamp(words[0])
 
-            t = max(0, math.floor(parse_timestamp(words[0]) - t_off))
-
-            if t > count["ts"][-1]:
-                for missing_t in range(count["ts"][-1], t):
-                    count["ts"].append(missing_t+1)
-                    for key, count_vals in count.items():
-                        if key != "ts":
-                            count_vals.append(0)
-
-            count["all_events"][t] += 1
-            if words[2] == "ms":
-                count["rtt_events"][t] += 1
-                if words[-1].split(":")[0] == src_ip:
-                    count["filtered_rtt_events"][t] += 1
-
-    return pd.DataFrame(count)
-
-def count_kpping_messages(filename, src_ip="172.16.24.31"):
+def count_kpping_messages(root_folder):
     """
     Count nr of rtt-events per second from the standard output of Kathie's pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
-
-    NOTE: Assumes all events in filename are from the same day
     """
-    t_off = None
 
-    count = {"ts":[0], "rtt_events":[0], "filtered_rtt_events":[0]}
+    sub_path = pathlib.Path(root_folder, "k_pping")
+    test_interval = get_test_interval(sub_path)
+    date = str(get_test_interval(sub_path, skip_omitted=False)[0])[:10]
+    file = list(sub_path.glob("*M2/pping.out*"))[0]
 
-    with util.open_compressed_file(filename, mode="rt") as file:
-        for i, line in enumerate(file):
-            words = line.split()
-            if len(words) != 4:
-                continue
+    return __count_pping_messages(file, parse_kpping_message,
+                                  ("rtt_events", "filtered_rtt_events"),
+                                  date=date, filter_timerange=test_interval)
 
-            if t_off is None:
-                t_off = parse_timestamp(words[0])
-
-            t = max(0, math.floor(parse_timestamp(words[0]) - t_off))
-
-            if t > count["ts"][-1]:
-                for missing_t in range(count["ts"][-1], t):
-                    count["ts"].append(missing_t+1)
-                    for key, count_vals in count.items():
-                        if key != "ts":
-                            count_vals.append(0)
-
-            count["rtt_events"][t] += 1
-            if words[-1].split(":")[0] == src_ip:
-                count["filtered_rtt_events"][t] += 1
-
-    return pd.DataFrame(count)
 
 def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=True):
     if axes is None:
@@ -134,9 +188,10 @@ def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=Tru
     axes.set_ylabel("Events per second")
     axes.grid(grid)
     if legend:
-    	axes.legend()
+        axes.legend()
 
     return axes
+
 
 def main():
     parser = argparse.ArgumentParser("Plot graphs comparing the performance overhead of pping versions")
@@ -147,10 +202,8 @@ def main():
     cpu_data = load_cpu_data(args.input)
     iperf_data = load_iperf_data(args.input)
 
-    epping_messages = count_epping_messages(util.find_file_startswith(os.path.join(
-        args.input, "e_pping", "M2"), "pping.out"))
-    kpping_messages = count_kpping_messages(util.find_file_startswith(os.path.join(
-        args.input, "k_pping", "M2"), "pping.out"))
+    epping_messages = count_epping_messages(args.input)
+    kpping_messages = count_kpping_messages(args.input)
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 
@@ -166,13 +219,13 @@ def main():
     fig.canvas.draw()
     fig.canvas.draw()
 
-
     if args.output is not None:
-        fig.savefig(args.output, bbox_inches="tight");
+        fig.savefig(args.output, bbox_inches="tight")
     else:
         plt.show()
 
     return
+
 
 if __name__ == "__main__":
     main()

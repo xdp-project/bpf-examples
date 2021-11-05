@@ -1,12 +1,12 @@
-import os
+import numpy as np
 import gzip
 import lzma
 
 
 def guess_compression(filename):
-    if filename.endswith(".gz"):
+    if str(filename).endswith(".gz"):
         return "gzip"
-    elif filename.endswith(".xz"):
+    elif str(filename).endswith(".xz"):
         return "xz"
     else:
         return "none"
@@ -20,11 +20,15 @@ def open_compressed_file(filename, compression="auto", **kwargs):
     return open_funcs[compression](filename, **kwargs)
 
 
-def find_file_startswith(dir, name):
-    for file in os.listdir(dir):
-        if file.startswith(name):
-            return os.path.join(dir, file)
-    return ""
+def normalize_timestamps(timestamps, reference=None):
+    if reference is None:
+        reference = np.min(timestamps)
+    normed = np.subtract(timestamps, reference)
+
+    if np.issubdtype(normed.dtype, np.timedelta64):
+        normed = np.divide(normed, np.timedelta64(1, "s"))
+
+    return normed
 
 
 def get_first_dict_entry(dictionary):

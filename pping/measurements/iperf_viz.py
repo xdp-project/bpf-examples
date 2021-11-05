@@ -30,14 +30,26 @@ def socket_to_stream_map(iperf_json, shortnames=False):
     return socket_map
 
 
-def to_perstream_df(iperf_json, norm_timestamps=True, shortnames=True, include_total=True):
-    t_off = iperf_json["start"]["timestamp"]["timesecs"]
+def get_test_interval(iperf_file, skip_omitted=True):
+    jdata = load_iperf3_json(iperf_file)
+
+    start = jdata["start"]["timestamp"]["timesecs"]
+    if skip_omitted:
+        start += jdata["start"]["test_start"]["omit"]
+    end = start + jdata["end"]["sum_sent"]["end"]
+    return pd.to_datetime([start, end], unit="s").values
+
+
+def to_perstream_df(iperf_json, skip_omitted=True, norm_timestamps=True,
+                    shortnames=True, include_total=True):
+    t_start = iperf_json["start"]["timestamp"]["timesecs"]
+    omit_sec = iperf_json["start"]["test_start"]["omit"]
     sock_map = socket_to_stream_map(iperf_json, shortnames=shortnames)
 
     per_stream = dict()
     for interval in iperf_json["intervals"]:
         for stream in interval["streams"]:
-            if stream["omitted"]:
+            if skip_omitted and stream["omitted"]:
                 continue
 
             stream_name = sock_map[stream["socket"]]
@@ -47,14 +59,18 @@ def to_perstream_df(iperf_json, norm_timestamps=True, shortnames=True, include_t
                                            "retrans": [], "rtt": []}
 
             entry = per_stream[stream_name]
-            entry["timestamp"].append(stream["end"])
+            entry["timestamp"].append(
+                stream["end"] + (0 if stream["omitted"] else omit_sec))
             entry["throughput"].append(stream["bits_per_second"])
             entry["retrans"].append(stream["retransmits"])
             entry["rtt"].append(stream["rtt"] / 1000)
 
     for stream, data in per_stream.items():
         if not norm_timestamps:
-            data["timestamp"] = pd.to_datetime(np.add(data["timestamp"], t_off), unit="s")
+            data["timestamp"] = pd.to_datetime(
+                np.add(data["timestamp"], t_start), unit="s")
+        elif skip_omitted:
+            data["timestamp"] = np.subtract(data["timestamp"], omit_sec)
 
         per_stream[stream] = pd.DataFrame(data)
 

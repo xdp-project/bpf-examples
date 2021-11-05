@@ -8,6 +8,7 @@ import argparse
 
 import common_plotting as complot
 import util
+import iperf_viz
 
 # Data mangling
 
@@ -17,21 +18,24 @@ def load_mpstat_json(filename, compression="auto"):
     return stats["sysstat"]["hosts"][0]
 
 
-def get_timestamps(cpu_stats):
-    date = cpu_stats["date"]
-    timestamps = [date + " " + entry["timestamp"] 
-                  for entry in cpu_stats["statistics"]]
-    return pd.to_datetime(timestamps)
+def get_timestamps(mpstat_json):
+    date = mpstat_json["date"]
+    timestamps = [date + " " + entry["timestamp"]
+                  for entry in mpstat_json["statistics"]]
+    ts = pd.to_datetime(timestamps).values
+    for i in range(1, len(ts)):
+        if ts[i] < ts[i - 1]:
+            ts[i] += np.timedelta64(1, "D")
+    return ts
 
 
-def to_percpu_df(cpu_stats, norm_timestamps=True):
-    n_cpus = cpu_stats["number-of-cpus"]
-    ts = get_timestamps(cpu_stats)
-    if norm_timestamps:
-        ts = normalize_timestamps(ts)
+def to_percpu_df(mpstat_json, norm_timestamps=True, filter_timerange=None):
+    n_cpus = mpstat_json["number-of-cpus"]
+    ts = get_timestamps(mpstat_json)
+    time_ref = None if filter_timerange is None else filter_timerange[0]
 
     per_cpu = dict()
-    for period in cpu_stats["statistics"]:
+    for period in mpstat_json["statistics"]:
         for entry in period["cpu-load"]:
             cpu = entry["cpu"]
             mult = n_cpus if cpu == "all" else 1
@@ -52,19 +56,17 @@ def to_percpu_df(cpu_stats, norm_timestamps=True):
                     per_cpu[cpu][loadtype].append(load * mult)
 
     for cpu, data in per_cpu.items():
-        per_cpu[cpu] = pd.DataFrame(data)
-        per_cpu[cpu].insert(0, "timestamp", ts)
+        df = pd.DataFrame(data)
+        df.insert(0, "timestamp", ts)
+        if filter_timerange is not None:
+            df = df.loc[df["timestamp"].between(filter_timerange[0],
+                                                filter_timerange[1])]
+            df.reset_index(drop=True, inplace=True)
+        if norm_timestamps:
+            df["timestamp"] = util.normalize_timestamps(df["timestamp"], time_ref)
+        per_cpu[cpu] = df
 
     return per_cpu
-
-
-def normalize_timestamps(timestamps):
-    normed = timestamps - timestamps.min()
-
-    if np.issubdtype(normed.dtype, np.timedelta64):
-        normed = normed.astype("timedelta64[s]").astype("float64")
-
-    return normed
 
 
 def trim_only_under_load(per_cpu_dfs, load_thresh=1, neighbours=0, norm_timestamps="auto"):
@@ -80,7 +82,7 @@ def trim_only_under_load(per_cpu_dfs, load_thresh=1, neighbours=0, norm_timestam
     for cpu, df in per_cpu_dfs.items():
         trimmed[cpu] = df.iloc[start:end+1].copy()
         if norm_timestamps:
-            trimmed[cpu]["timestamp"] = normalize_timestamps(trimmed[cpu]["timestamp"])
+            trimmed[cpu]["timestamp"] = util.normalize_timestamps(trimmed[cpu]["timestamp"])
 
     return trimmed
 
@@ -171,10 +173,17 @@ def main():
     parser.add_argument("-T", "--title", type=str, help="figure title", required=False)
     parser.add_argument("-t", "--trim", nargs='?', type=float, help="trim to section under load",
                         required=False, default=None, const=1)
+    parser.add_argument("-s", "--sync-iperf", type=str,
+                        help="path to iperf-file to sync against", required=False)
     args = parser.parse_args()
 
+    if args.sync_iperf is not None:
+        time_range = iperf_viz.get_test_interval(args.sync_iperf)
+    else:
+        time_range = None
+
     mpstat_json = load_mpstat_json(args.input)
-    data = to_percpu_df(mpstat_json)
+    data = to_percpu_df(mpstat_json, filter_timerange=time_range)
     if args.trim is not None:
         data = trim_only_under_load(data, load_thresh=args.trim)
     fig = plot_cpu_load(data, title=args.title)

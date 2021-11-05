@@ -1,7 +1,7 @@
 #!/bin/bash
 
-N_FLOWS=(1 5 10 100 500)
-INTERTEST_INTERVAL=120 #sec
+N_FLOWS=(1 10 100 500)
+INTERTEST_INTERVAL=${INTERTEST_INTERVAL:-10} #sec
 
 # $1 = path to save results in
 # $2 = number of times to repeat the tests
