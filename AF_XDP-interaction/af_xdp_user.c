@@ -377,7 +377,6 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 				   &member_rx_ktime)) {
 		return -EBADSLT;
 	}
-	// xsk_btf__read(NULL, 0, NULL, NULL, NULL);
 
 	/* Check member with "mark" exist */
 	if (!xsk_btf__has_field("mark", xdp_meta_with_mark.xbi)) {
@@ -387,37 +386,13 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	return 0;
 }
 
-struct meta_info {
-	union {
-		struct {
-			__u32 pad;
-			__u32 mark;
-		};
-		__u64 rx_ktime;
-	};
-	__u32 btf_id;
-} __attribute__((aligned(4))) __attribute__((packed));
-
-static void print_meta_info(uint8_t *pkt, uint32_t len)
-{
-	/* XDP data_meta is stored just before packet data.
-	 * Thus, access this via a negative offset.
-	 *
-	 * REMEMBER: The real assignment is making this dynamic via using BTF.
-	 */
-	struct meta_info *meta = (void *)(pkt - sizeof(*meta));
-
-	printf("DEBUG-meta btf_id:%d mark:%d (p:%u) or rx_time:%llu\n",
-	       meta->btf_id, meta->mark, meta->pad, meta->rx_ktime);
-
-}
-
 static void print_meta_info_mark(uint8_t *pkt)
 {
 	struct xsk_btf_info *xbi = xdp_meta_with_mark.xbi;
 	__u32 mark;
 
 	XSK_BTF_READ_INTO(mark, mark, xbi, pkt);
+	/* Undefined behavior of "mark" member cannot be found */
 	printf("meta-mark mark:%u\n", mark);
 }
 
@@ -476,7 +451,6 @@ static int print_meta_info_time_faster(uint8_t *pkt)
 	return 0;
 }
 
-
 static void print_meta_info_via_btf( uint8_t *pkt)
 {
 	__u32 btf_id = xsk_umem__btf_id(pkt);
@@ -490,7 +464,6 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 	} else if (btf_id == meta_mark) {
 		print_meta_info_mark(pkt);
 	}
-
 }
 
 /* As debug tool print some info about packet */
@@ -526,9 +499,6 @@ static bool process_packet(struct xsk_socket_info *xsk,
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
-	if (debug_meta) {
-		print_meta_info(pkt, len);
-	}
 	print_meta_info_via_btf(pkt);
 
 	//if (debug)
