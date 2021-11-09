@@ -322,41 +322,19 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
 
-struct xdp_hints {
-	struct xsk_btf_info *xbi;
-	const char *struct_name;
-};
-
-static struct xdp_hints xdp_meta_with_mark = {
-	.struct_name = "xdp_hints_mark",
-};
-
-/* This struct BTF mirrors kernel-side struct xdp_hints_rx_time
- */
+/* This struct BTF mirrors kernel-side struct xdp_hints_rx_time */
 struct xdp_hints_rx_time {
 	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
 	struct xsk_btf_info *xbi;
 	struct xsk_btf_member rx_ktime;
 } xdp_hints_rx_time = { 0 };
 
-int init_xdp_hints(struct btf *btf_obj, struct xdp_hints *xh)
-{
-	int err;
-
-	err = xsk_btf__init_xdp_hint(btf_obj, xh->struct_name, &(xh->xbi));
-	if (err) {
-		fprintf(stderr, "ERR(%d): Cannot BTF find struct:%s\n",
-			err, xh->struct_name);
-		return err;
-	}
-
-	if (!xsk_btf__has_field("btf_id", xh->xbi)) {
-		fprintf(stderr, "ERR: %s doesn't contain member btf_id\n",
-			xh->struct_name);
-		return -ENOENT;
-	}
-	return 0;
-}
+/* This struct BTF mirrors kernel-side struct xdp_hints_mark */
+struct xdp_hints_mark {
+	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
+	struct xsk_btf_info *xbi;
+	struct xsk_btf_member mark;
+} xdp_hints_mark = { 0 };
 
 struct xsk_btf_info *setup_btf_info(struct btf *btf,
 				    const char *struct_name)
@@ -366,7 +344,7 @@ struct xsk_btf_info *setup_btf_info(struct btf *btf,
 
 	err = xsk_btf__init_xdp_hint(btf, struct_name, &xbi);
 	if (err) {
-		fprintf(stderr, "ERR(%d): Cannot BTF find struct:%s\n",
+		fprintf(stderr, "WARN(%d): Cannot BTF find struct:%s\n",
 			err, struct_name);
 		return NULL;
 	}
@@ -388,12 +366,11 @@ struct xsk_btf_info *setup_btf_info(struct btf *btf,
 int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 {
 	struct btf *btf = bpf_object__btf(bpf_obj);
-	struct xsk_btf_info *xbi = NULL;
-	int err;
+	struct xsk_btf_info *xbi;
 
 	xbi = setup_btf_info(btf, "xdp_hints_rx_time");
 	if (xbi) {
-		/* Lookup info on member "rx_ktime" */
+		/* Lookup info on required member "rx_ktime" */
 		if (!xsk_btf__field_member("rx_ktime", xbi,
 					   &xdp_hints_rx_time.rx_ktime))
 			return -EBADSLT;
@@ -401,20 +378,20 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 		xdp_hints_rx_time.xbi = xbi;
 	}
 
-	if ((err = init_xdp_hints(btf, &xdp_meta_with_mark)))
-		return err;
-
-	/* Check member with "mark" exist */
-	if (!xsk_btf__has_field("mark", xdp_meta_with_mark.xbi)) {
-		return -EBADSLT;
+	xbi = setup_btf_info(btf, "xdp_hints_mark");
+	if (xbi) {
+		if (!xsk_btf__field_member("mark", xbi, &xdp_hints_mark.mark))
+			return -EBADSLT;
+		xdp_hints_mark.btf_type_id = xsk_btf__btf_type_id(xbi);
+		xdp_hints_mark.xbi = xbi;
 	}
 
 	return 0;
 }
 
-static void print_meta_info_mark(uint8_t *pkt)
+static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 {
-	struct xsk_btf_info *xbi = xdp_meta_with_mark.xbi;
+	struct xsk_btf_info *xbi = meta->xbi;
 	__u32 mark;
 
 	XSK_BTF_READ_INTO(mark, mark, xbi, pkt);
@@ -482,8 +459,6 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 {
 	__u32 btf_id = xsk_umem__btf_id(pkt);
 
-	__u32 meta_mark = xsk_btf__btf_type_id(xdp_meta_with_mark.xbi);
-
 	if (btf_id == 0) {
 		if (debug_meta)
 			printf("No meta BTF info (btf_id zero)\n");
@@ -492,8 +467,9 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 
 	if (btf_id == xdp_hints_rx_time.btf_type_id) {
 		print_meta_info_time_faster(pkt, &xdp_hints_rx_time);
-	} else if (btf_id == meta_mark) {
-		print_meta_info_mark(pkt);
+
+	} else if (btf_id == xdp_hints_mark.btf_type_id) {
+		print_meta_info_mark(pkt, &xdp_hints_mark);
 	}
 }
 
