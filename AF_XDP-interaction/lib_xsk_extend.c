@@ -192,8 +192,8 @@ int xsk_btf__read_member(void **dest, size_t size,
 	return 0;
 }
 
-int xsk_btf__read(void **dest, size_t size, const char *field,
-		  struct xsk_btf_info *xbi, const void *addr)
+int xsk_btf__read_field(void **dest, size_t size, const char *field,
+			struct xsk_btf_info *xbi, const void *addr)
 {
 	struct xsk_btf_member *entry;
 	int err;

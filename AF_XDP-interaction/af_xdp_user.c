@@ -394,7 +394,7 @@ static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 	struct xsk_btf_info *xbi = meta->xbi;
 	__u32 mark;
 
-	XSK_BTF_READ_INTO(mark, mark, xbi, pkt);
+	XSK_BTF_READ_FIELD_INTO(mark, mark, xbi, pkt);
 	/* Undefined behavior of "mark" member cannot be found */
 	printf("meta-mark mark:%u\n", mark);
 }
@@ -409,14 +409,14 @@ static int print_meta_info_time(uint8_t *pkt)
 	int err;
 
 	/* Notice how rx_ktime_ptr becomes a pointer into struct memory  */
-	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
-			    "rx_ktime", xbi, pkt);
+	err = xsk_btf__read_field((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
+				  "rx_ktime", xbi, pkt);
 	if (err) {
 		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
 		return err;
 	}
 	rx_ktime = *rx_ktime_ptr;
-	/* Above same as XSK_BTF_READ_INTO(rx_ktime, rx_ktime, xbi, pkt); */
+	/* same as XSK_BTF_READ_FIELD_INTO(rx_ktime, rx_ktime, xbi, pkt); */
 
 	time_now = gettime();
 	diff = time_now - rx_ktime;
