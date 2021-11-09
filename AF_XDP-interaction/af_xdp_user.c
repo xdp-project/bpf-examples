@@ -337,7 +337,7 @@ struct xdp_hints_rx_time {
 	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
 	struct xsk_btf_info *xbi;
 	struct xsk_btf_member rx_ktime;
-} xdp_hints_rx_time;
+} xdp_hints_rx_time = { 0 };
 
 int init_xdp_hints(struct btf *btf_obj, struct xdp_hints *xh)
 {
@@ -392,7 +392,6 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	int err;
 
 	xbi = setup_btf_info(btf, "xdp_hints_rx_time");
-	xdp_hints_rx_time.btf_type_id = 0;
 	if (xbi) {
 		/* Lookup info on member "rx_ktime" */
 		if (!xsk_btf__field_member("rx_ktime", xbi,
@@ -484,6 +483,12 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 	__u32 btf_id = xsk_umem__btf_id(pkt);
 
 	__u32 meta_mark = xsk_btf__btf_type_id(xdp_meta_with_mark.xbi);
+
+	if (btf_id == 0) {
+		if (debug_meta)
+			printf("No meta BTF info (btf_id zero)\n");
+		return;
+	}
 
 	if (btf_id == xdp_hints_rx_time.btf_type_id) {
 		print_meta_info_time_faster(pkt, &xdp_hints_rx_time);

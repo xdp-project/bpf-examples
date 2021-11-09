@@ -19,6 +19,10 @@ int xsk_umem__btf_id(void *umem_pkt_data) // , const struct xsk_umem *umem)
 //		return -EINVAL;
 	// TODO: Need some check that know of metadata is enabled for frame
 
+	/* IDEA: Use retval 0 to indicate no-btf-id?
+	 * - This would simplify API users
+	 */
+
 	return *(int *)(umem_pkt_data - sizeof(int));
 }
 
