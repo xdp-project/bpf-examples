@@ -394,9 +394,9 @@ static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 	struct xsk_btf_info *xbi = meta->xbi;
 	__u32 mark;
 
-	XSK_BTF_READ_FIELD_INTO(mark, mark, xbi, pkt);
-	/* Undefined behavior of "mark" member cannot be found */
-	printf("meta-mark mark:%u\n", mark);
+	XSK_BTF_READ_INTO(mark, &meta->mark, xbi, pkt);
+	if (debug_meta)
+		printf("meta-mark mark:%u\n", mark);
 }
 
 static int print_meta_info_time(uint8_t *pkt)

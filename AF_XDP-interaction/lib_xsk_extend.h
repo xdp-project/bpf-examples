@@ -40,4 +40,9 @@ LIBBPF_API bool xsk_btf__field_member(const char *field, struct xsk_btf_info *xb
 	xsk_btf__read_field((void **)&_d, sizeof(dest), #field, xbi, addr); \
 	dest = *_d; })
 
+#define XSK_BTF_READ_INTO(dest, member, xbi, addr) ({ \
+	typeof(dest) *_d; \
+	xsk_btf__read_member((void **)&_d, sizeof(dest), member, xbi, addr); \
+	dest = *_d; })
+
 #endif /* __LIB_XSK_EXTEND_H */
