@@ -166,7 +166,6 @@ void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi)
 		return;
 
 	__xsk_btf_free_hash(xbi);
-	btf__free(xbi->btf);
 	free(xbi);
 }
 
