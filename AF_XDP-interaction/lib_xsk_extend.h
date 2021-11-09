@@ -22,6 +22,12 @@ LIBBPF_API void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi);
 
 LIBBPF_API __u32 xsk_btf__btf_type_id(struct xsk_btf_info *xbi);
 
+/* Reading a member via a field string, require walking BTF members
+ * and string comparing (strcmp).  To reduce overhead, the API will
+ * cache xsk_btf_member entries in a hashmap.  The field string must
+ * be a read-only constant for this to work, as the hashmap cache use
+ * the field pointer as the lookup key.
+ */
 LIBBPF_API int xsk_btf__read_field(void **dest, size_t size,
 				   const char *field,
 				   struct xsk_btf_info *xbi,  const void *addr);
@@ -30,7 +36,7 @@ LIBBPF_API int xsk_btf__read(void **dest, size_t size,
 			     struct xsk_btf_member *entry,
 			     struct xsk_btf_info *xbi, const void *addr);
 
-LIBBPF_API bool xsk_btf__has_field   (const char *field, struct xsk_btf_info *xbi);
+LIBBPF_API bool xsk_btf__has_field(const char *field, struct xsk_btf_info *xbi);
 LIBBPF_API bool xsk_btf__field_member(const char *field, struct xsk_btf_info *xbi,
 				      struct xsk_btf_member *entry);
 
