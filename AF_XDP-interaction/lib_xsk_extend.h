@@ -26,9 +26,9 @@ LIBBPF_API int xsk_btf__read_field(void **dest, size_t size,
 				   const char *field,
 				   struct xsk_btf_info *xbi,  const void *addr);
 
-LIBBPF_API int xsk_btf__read_member(void **dest, size_t size,
-				    struct xsk_btf_member *entry,
-				    struct xsk_btf_info *xbi, const void *addr);
+LIBBPF_API int xsk_btf__read(void **dest, size_t size,
+			     struct xsk_btf_member *entry,
+			     struct xsk_btf_info *xbi, const void *addr);
 
 LIBBPF_API bool xsk_btf__has_field   (const char *field, struct xsk_btf_info *xbi);
 LIBBPF_API bool xsk_btf__field_member(const char *field, struct xsk_btf_info *xbi,
@@ -42,7 +42,7 @@ LIBBPF_API bool xsk_btf__field_member(const char *field, struct xsk_btf_info *xb
 
 #define XSK_BTF_READ_INTO(dest, member, xbi, addr) ({ \
 	typeof(dest) *_d; \
-	xsk_btf__read_member((void **)&_d, sizeof(dest), member, xbi, addr); \
+	xsk_btf__read((void **)&_d, sizeof(dest), member, xbi, addr); \
 	dest = *_d; })
 
 #endif /* __LIB_XSK_EXTEND_H */

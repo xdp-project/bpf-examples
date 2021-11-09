@@ -437,8 +437,8 @@ static int print_meta_info_time_faster(uint8_t *pkt, struct xdp_hints_rx_time *m
 	int err;
 
 	/* Use API that doesn't involve allocations to access BTF struct member */
-	err = xsk_btf__read_member((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
-				   &meta->rx_ktime, meta->xbi, pkt);
+	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
+			    &meta->rx_ktime, meta->xbi, pkt);
 	if (err) {
 		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
 		return err;

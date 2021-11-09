@@ -173,9 +173,9 @@ void xsk_btf__free_xdp_hint(struct xsk_btf_info *xbi)
 	free(xbi);
 }
 
-int xsk_btf__read_member(void **dest, size_t size,
-			 struct xsk_btf_member *entry,
-			 struct xsk_btf_info *xbi, const void *addr)
+int xsk_btf__read(void **dest, size_t size,
+		  struct xsk_btf_member *entry,
+		  struct xsk_btf_info *xbi, const void *addr)
 {
 	if (!entry || !xbi || !dest || !addr)
 		return -EINVAL;
@@ -216,6 +216,6 @@ int xsk_btf__read_field(void **dest, size_t size, const char *field,
 		hashmap__add(&(xbi->map), field, entry);
 	}
 
-	xsk_btf__read_member(dest, size, entry, xbi,addr);
+	xsk_btf__read(dest, size, entry, xbi,addr);
 	return 0;
 }
