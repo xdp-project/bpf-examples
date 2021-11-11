@@ -399,7 +399,8 @@ static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 		printf("meta-mark mark:%u\n", mark);
 }
 
-static int print_meta_info_time(uint8_t *pkt)
+/* Demo API xsk_btf__read_field() that use string for BTF lookup */
+static int print_meta_info_time_api2(uint8_t *pkt)
 {
 	struct xsk_btf_info *xbi = xdp_hints_rx_time.xbi;
 	__u64 time_now; // = gettime();
@@ -408,7 +409,10 @@ static int print_meta_info_time(uint8_t *pkt)
 	__u64 diff;
 	int err;
 
-	/* Notice how rx_ktime_ptr becomes a pointer into struct memory  */
+	/* This API cache string lookup (in hashmap), which cause an
+	 * allocation first time this is called. Something to consider
+	 * for real-time use-cases.
+	 */
 	err = xsk_btf__read_field((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 				  "rx_ktime", xbi, pkt);
 	if (err) {
@@ -428,7 +432,7 @@ static int print_meta_info_time(uint8_t *pkt)
 	return 0;
 }
 
-static int print_meta_info_time_faster(uint8_t *pkt, struct xdp_hints_rx_time *meta)
+static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta)
 {
 	__u64 time_now; // = gettime();
 	__u64 *rx_ktime_ptr; /* Points directly to member memory */
@@ -436,13 +440,14 @@ static int print_meta_info_time_faster(uint8_t *pkt, struct xdp_hints_rx_time *m
 	__u64 diff;
 	int err;
 
-	/* Use API that doesn't involve allocations to access BTF struct member */
+	/* API doesn't involve allocations to access BTF struct member */
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 			    &meta->rx_ktime, meta->xbi, pkt);
 	if (err) {
 		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
 		return err;
 	}
+	/* Notice how rx_ktime_ptr becomes a pointer into struct memory */
 	rx_ktime = *rx_ktime_ptr;
 
 	time_now = gettime();
