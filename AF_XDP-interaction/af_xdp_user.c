@@ -69,6 +69,81 @@ struct xsk_socket_info {
 	struct stats_record prev_stats;
 };
 
+/**
+ * BTF setup XDP-hints
+ * -------------------
+ * Setup the data structures for accessing the XDP-hints provided by
+ * kernel side BPF-prog via decoding BTF-info provided in BPF
+ * ELF-object file.
+ */
+
+/* This struct BTF mirrors kernel-side struct xdp_hints_rx_time */
+struct xdp_hints_rx_time {
+	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
+	struct xsk_btf_info *xbi;
+	struct xsk_btf_member rx_ktime;
+} xdp_hints_rx_time = { 0 };
+
+/* This struct BTF mirrors kernel-side struct xdp_hints_mark */
+struct xdp_hints_mark {
+	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
+	struct xsk_btf_info *xbi;
+	struct xsk_btf_member mark;
+} xdp_hints_mark = { 0 };
+
+struct xsk_btf_info *setup_btf_info(struct btf *btf,
+				    const char *struct_name)
+{
+	struct xsk_btf_info *xbi = NULL;
+	int err;
+
+	err = xsk_btf__init_xdp_hint(btf, struct_name, &xbi);
+	if (err) {
+		fprintf(stderr, "WARN(%d): Cannot BTF find struct:%s\n",
+			err, struct_name);
+		return NULL;
+	}
+
+	if (!xsk_btf__has_field("btf_id", xbi)) {
+		fprintf(stderr, "ERR: %s doesn't contain member btf_id\n",
+			struct_name);
+		xsk_btf__free_xdp_hint(xbi);
+		return NULL;
+	}
+
+	if (debug_meta)
+		printf("Setup BTF based XDP hints for struct: %s\n",
+		       struct_name);
+
+	return xbi;
+}
+
+int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
+{
+	struct btf *btf = bpf_object__btf(bpf_obj);
+	struct xsk_btf_info *xbi;
+
+	xbi = setup_btf_info(btf, "xdp_hints_rx_time");
+	if (xbi) {
+		/* Lookup info on required member "rx_ktime" */
+		if (!xsk_btf__field_member("rx_ktime", xbi,
+					   &xdp_hints_rx_time.rx_ktime))
+			return -EBADSLT;
+		xdp_hints_rx_time.btf_type_id = xsk_btf__btf_type_id(xbi);
+		xdp_hints_rx_time.xbi = xbi;
+	}
+
+	xbi = setup_btf_info(btf, "xdp_hints_mark");
+	if (xbi) {
+		if (!xsk_btf__field_member("mark", xbi, &xdp_hints_mark.mark))
+			return -EBADSLT;
+		xdp_hints_mark.btf_type_id = xsk_btf__btf_type_id(xbi);
+		xdp_hints_mark.xbi = xbi;
+	}
+
+	return 0;
+}
+
 #define NANOSEC_PER_SEC 1000000000 /* 10^9 */
 static uint64_t gettime(void)
 {
@@ -322,72 +397,14 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
 
-/* This struct BTF mirrors kernel-side struct xdp_hints_rx_time */
-struct xdp_hints_rx_time {
-	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
-	struct xsk_btf_info *xbi;
-	struct xsk_btf_member rx_ktime;
-} xdp_hints_rx_time = { 0 };
-
-/* This struct BTF mirrors kernel-side struct xdp_hints_mark */
-struct xdp_hints_mark {
-	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
-	struct xsk_btf_info *xbi;
-	struct xsk_btf_member mark;
-} xdp_hints_mark = { 0 };
-
-struct xsk_btf_info *setup_btf_info(struct btf *btf,
-				    const char *struct_name)
-{
-	struct xsk_btf_info *xbi = NULL;
-	int err;
-
-	err = xsk_btf__init_xdp_hint(btf, struct_name, &xbi);
-	if (err) {
-		fprintf(stderr, "WARN(%d): Cannot BTF find struct:%s\n",
-			err, struct_name);
-		return NULL;
-	}
-
-	if (!xsk_btf__has_field("btf_id", xbi)) {
-		fprintf(stderr, "ERR: %s doesn't contain member btf_id\n",
-			struct_name);
-		xsk_btf__free_xdp_hint(xbi);
-		return NULL;
-	}
-
-	if (debug_meta)
-		printf("Setup BTF based XDP hints for struct: %s\n",
-		       struct_name);
-
-	return xbi;
-}
-
-int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
-{
-	struct btf *btf = bpf_object__btf(bpf_obj);
-	struct xsk_btf_info *xbi;
-
-	xbi = setup_btf_info(btf, "xdp_hints_rx_time");
-	if (xbi) {
-		/* Lookup info on required member "rx_ktime" */
-		if (!xsk_btf__field_member("rx_ktime", xbi,
-					   &xdp_hints_rx_time.rx_ktime))
-			return -EBADSLT;
-		xdp_hints_rx_time.btf_type_id = xsk_btf__btf_type_id(xbi);
-		xdp_hints_rx_time.xbi = xbi;
-	}
-
-	xbi = setup_btf_info(btf, "xdp_hints_mark");
-	if (xbi) {
-		if (!xsk_btf__field_member("mark", xbi, &xdp_hints_mark.mark))
-			return -EBADSLT;
-		xdp_hints_mark.btf_type_id = xsk_btf__btf_type_id(xbi);
-		xdp_hints_mark.xbi = xbi;
-	}
-
-	return 0;
-}
+/**
+ * BTF accessing XDP-hints
+ * -----------------------
+ * Accessing the XDP-hints via BTF requires setup done earlier.  As our target
+ * application have real-time requirements, it is preferred that the setup can
+ * happen outside the packet processing path.  E.g. avoid doing the setup first
+ * time a packet with a new BTF-ID is seen.
+ */
 
 static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 {
@@ -471,7 +488,7 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 	}
 
 	if (btf_id == xdp_hints_rx_time.btf_type_id) {
-		print_meta_info_time_faster(pkt, &xdp_hints_rx_time);
+		print_meta_info_time(pkt, &xdp_hints_rx_time);
 
 	} else if (btf_id == xdp_hints_mark.btf_type_id) {
 		print_meta_info_mark(pkt, &xdp_hints_mark);
