@@ -470,8 +470,9 @@ static int print_meta_info_time_api2(uint8_t *pkt)
 static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 {
 	struct xsk_btf_info *xbi = meta->xbi;
-	__u32 mark;
+	__u32 mark = 0;
 
+	/* The 'mark' value is not updated in case of errors */
 	XSK_BTF_READ_INTO(mark, &meta->mark, xbi, pkt);
 	if (debug_meta)
 		printf("meta-mark mark:%u\n", mark);
