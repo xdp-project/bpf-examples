@@ -154,8 +154,8 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'U':
 			cfg->do_unload = true;
 			break;
-		case 'p':
-			cfg->xsk_poll_mode = true;
+		case 'w':
+			cfg->xsk_wakeup_mode = true;
 			break;
 		case 'q':
 			verbose = false;

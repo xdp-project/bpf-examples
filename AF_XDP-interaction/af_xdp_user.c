@@ -195,8 +195,8 @@ static const struct option_wrapper long_options[] = {
 	{{"queue",	 required_argument,	NULL, 'Q' },
 	 "Configure interface receive queue for AF_XDP, default=0"},
 
-	{{"poll-mode",	 no_argument,		NULL, 'p' },
-	 "Use the poll() API waiting for packets to arrive"},
+	{{"wakeup-mode", no_argument,		NULL, 'w' },
+	 "Use poll() API waiting for packets to arrive via wakeup from kernel"},
 
 	{{"unload",      no_argument,		NULL, 'U' },
 	 "Unload XDP program instead of loading"},
@@ -674,7 +674,8 @@ static void rx_and_process(struct config *cfg,
 	fds[0].events = POLLIN;
 
 	while(!global_exit) {
-		if (cfg->xsk_poll_mode) {
+		if (cfg->xsk_wakeup_mode) {
+			/* poll will wait for events on file descriptors */
 			ret = poll(fds, nfds, -1);
 			if (ret <= 0 || ret > 1)
 				continue;

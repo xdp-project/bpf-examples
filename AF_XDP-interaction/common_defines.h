@@ -22,7 +22,7 @@ struct config {
 	char dest_mac[18];
 	__u16 xsk_bind_flags;
 	int xsk_if_queue;
-	bool xsk_poll_mode;
+	bool xsk_wakeup_mode;
 };
 
 /* Defined in common_params.o */
