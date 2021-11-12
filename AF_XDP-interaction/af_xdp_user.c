@@ -40,11 +40,17 @@
 #define RX_BATCH_SIZE      64
 #define INVALID_UMEM_FRAME UINT64_MAX
 
+struct mem_frame_allocator {
+	uint64_t umem_frame_addr[NUM_FRAMES];
+	uint32_t umem_frame_free;
+};
+
 struct xsk_umem_info {
 	struct xsk_ring_prod fq;
 	struct xsk_ring_cons cq;
 	struct xsk_umem *umem;
 	void *buffer;
+	struct mem_frame_allocator mem;
 };
 
 struct stats_record {
@@ -60,9 +66,6 @@ struct xsk_socket_info {
 	struct xsk_ring_prod tx;
 	struct xsk_umem_info *umem;
 	struct xsk_socket *xsk;
-
-	uint64_t umem_frame_addr[NUM_FRAMES];
-	uint32_t umem_frame_free;
 
 	uint32_t outstanding_tx;
 
@@ -228,6 +231,45 @@ static const struct option_wrapper long_options[] = {
 
 static bool global_exit;
 
+/**
+ * Simple memory allocator for umem frames
+ */
+
+static uint64_t mem_alloc_umem_frame(struct mem_frame_allocator *mem)
+{
+	uint64_t frame;
+	if (mem->umem_frame_free == 0)
+		return INVALID_UMEM_FRAME;
+
+	frame = mem->umem_frame_addr[--mem->umem_frame_free];
+	mem->umem_frame_addr[mem->umem_frame_free] = INVALID_UMEM_FRAME;
+	return frame;
+}
+
+static void mem_free_umem_frame(struct mem_frame_allocator *mem, uint64_t frame)
+{
+	assert(mem->umem_frame_free < NUM_FRAMES);
+
+	mem->umem_frame_addr[mem->umem_frame_free++] = frame;
+}
+
+static uint64_t mem_avail_umem_frames(struct mem_frame_allocator *mem)
+{
+	return mem->umem_frame_free;
+}
+
+static void mem_init_umem_frame_allocator(struct mem_frame_allocator *mem)
+{
+	/* Initialize umem frame allocator */
+	int i;
+
+	/* The umem_frame_addr is basically index into umem->buffer memory area */
+	for (i = 0; i < NUM_FRAMES; i++)
+		mem->umem_frame_addr[i] = i * FRAME_SIZE;
+
+	mem->umem_frame_free = NUM_FRAMES;
+}
+
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 {
 	struct xsk_umem_info *umem;
@@ -265,31 +307,37 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	}
 
 	umem->buffer = buffer;
+
+	/* Setup our own umem frame allocator system */
+	mem_init_umem_frame_allocator(&umem->mem);
+
 	return umem;
 }
 
-static uint64_t xsk_alloc_umem_frame(struct xsk_socket_info *xsk)
+static int xsk_populate_fill_ring(struct xsk_umem_info *umem)
 {
-	uint64_t frame;
-	if (xsk->umem_frame_free == 0)
-		return INVALID_UMEM_FRAME;
+	int ret, i;
+	uint32_t idx;
 
-	frame = xsk->umem_frame_addr[--xsk->umem_frame_free];
-	xsk->umem_frame_addr[xsk->umem_frame_free] = INVALID_UMEM_FRAME;
-	return frame;
+	/* Stuff the receive path with buffers, we assume we have enough */
+	ret = xsk_ring_prod__reserve(&umem->fq,
+				     XSK_RING_PROD__DEFAULT_NUM_DESCS,
+				     &idx);
+
+	if (ret != XSK_RING_PROD__DEFAULT_NUM_DESCS)
+		goto error_exit;
+
+	for (i = 0; i < XSK_RING_PROD__DEFAULT_NUM_DESCS; i++)
+		*xsk_ring_prod__fill_addr(&umem->fq, idx++) =
+			mem_alloc_umem_frame(&umem->mem);
+
+	xsk_ring_prod__submit(&umem->fq,
+			      XSK_RING_PROD__DEFAULT_NUM_DESCS);
+	return 0;
+error_exit:
+	return -EINVAL;
 }
 
-static void xsk_free_umem_frame(struct xsk_socket_info *xsk, uint64_t frame)
-{
-	assert(xsk->umem_frame_free < NUM_FRAMES);
-
-	xsk->umem_frame_addr[xsk->umem_frame_free++] = frame;
-}
-
-static uint64_t xsk_umem_free_frames(struct xsk_socket_info *xsk)
-{
-	return xsk->umem_frame_free;
-}
 
 static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 						    struct xsk_umem_info *umem,
@@ -297,9 +345,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 {
 	struct xsk_socket_config xsk_cfg;
 	struct xsk_socket_info *xsk_info;
-	uint32_t idx;
 	uint32_t prog_id = 0;
-	int i;
 	int ret;
 
 	xsk_info = calloc(1, sizeof(*xsk_info));
@@ -322,28 +368,6 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	ret = bpf_get_link_xdp_id(cfg->ifindex, &prog_id, cfg->xdp_flags);
 	if (ret)
 		goto error_exit;
-
-	/* Initialize umem frame allocation */
-
-	for (i = 0; i < NUM_FRAMES; i++)
-		xsk_info->umem_frame_addr[i] = i * FRAME_SIZE;
-
-	xsk_info->umem_frame_free = NUM_FRAMES;
-
-	/* Stuff the receive path with buffers, we assume we have enough */
-	ret = xsk_ring_prod__reserve(&xsk_info->umem->fq,
-				     XSK_RING_PROD__DEFAULT_NUM_DESCS,
-				     &idx);
-
-	if (ret != XSK_RING_PROD__DEFAULT_NUM_DESCS)
-		goto error_exit;
-
-	for (i = 0; i < XSK_RING_PROD__DEFAULT_NUM_DESCS; i ++)
-		*xsk_ring_prod__fill_addr(&xsk_info->umem->fq, idx++) =
-			xsk_alloc_umem_frame(xsk_info);
-
-	xsk_ring_prod__submit(&xsk_info->umem->fq,
-			      XSK_RING_PROD__DEFAULT_NUM_DESCS);
 
 	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
 	xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
@@ -373,7 +397,7 @@ static void complete_tx(struct xsk_socket_info *xsk)
 
 	if (completed > 0) {
 		for (int i = 0; i < completed; i++)
-			xsk_free_umem_frame(xsk,
+			mem_free_umem_frame(&xsk->umem->mem,
 					    *xsk_ring_cons__comp_addr(&xsk->umem->cq,
 								      idx_cq++));
 
@@ -608,12 +632,12 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 	uint32_t idx_fq = 0;
 	int ret;
 
-	int free_frames = xsk_umem_free_frames(xsk);
+	int free_frames = mem_avail_umem_frames(&xsk->umem->mem);
 	__u64 start = gettime();
 
 	/* Stuff the ring with as much frames as possible */
 	stock_frames = xsk_prod_nb_free(&xsk->umem->fq,
-					xsk_umem_free_frames(xsk));
+					mem_avail_umem_frames(&xsk->umem->mem));
 
 	if (stock_frames > 0) {
 
@@ -629,7 +653,7 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 
 		for (i = 0; i < stock_frames; i++)
 			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) =
-				xsk_alloc_umem_frame(xsk);
+				mem_alloc_umem_frame(&xsk->umem->mem);
 
 		xsk_ring_prod__submit(&xsk->umem->fq, stock_frames);
 	}
@@ -654,7 +678,7 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
 		if (!process_packet(xsk, addr, len))
-			xsk_free_umem_frame(xsk, addr);
+			mem_free_umem_frame(&xsk->umem->mem, addr);
 
 		xsk->stats.rx_bytes += len;
 	}
@@ -856,6 +880,10 @@ int main(int argc, char **argv)
 	if (umem == NULL) {
 		fprintf(stderr, "ERROR: Can't create umem \"%s\"\n",
 			strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	if (xsk_populate_fill_ring(umem)) {
+		fprintf(stderr, "ERROR: Can't populate fill ring\n");
 		exit(EXIT_FAILURE);
 	}
 
