@@ -406,14 +406,32 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
  * time a packet with a new BTF-ID is seen.
  */
 
-static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
+static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta)
 {
-	struct xsk_btf_info *xbi = meta->xbi;
-	__u32 mark;
+	__u64 time_now; // = gettime();
+	__u64 *rx_ktime_ptr; /* Points directly to member memory */
+	__u64 rx_ktime;
+	__u64 diff;
+	int err;
 
-	XSK_BTF_READ_INTO(mark, &meta->mark, xbi, pkt);
+	/* API doesn't involve allocations to access BTF struct member */
+	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
+			    &meta->rx_ktime, meta->xbi, pkt);
+	if (err) {
+		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
+		return err;
+	}
+	/* Notice how rx_ktime_ptr becomes a pointer into struct memory */
+	rx_ktime = *rx_ktime_ptr;
+
+	time_now = gettime();
+	diff = time_now - rx_ktime;
+
 	if (debug_meta)
-		printf("meta-mark mark:%u\n", mark);
+		printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       rx_ktime, time_now, diff);
+
+	return 0;
 }
 
 /* Demo API xsk_btf__read_field() that use string for BTF lookup */
@@ -449,32 +467,14 @@ static int print_meta_info_time_api2(uint8_t *pkt)
 	return 0;
 }
 
-static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta)
+static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 {
-	__u64 time_now; // = gettime();
-	__u64 *rx_ktime_ptr; /* Points directly to member memory */
-	__u64 rx_ktime;
-	__u64 diff;
-	int err;
+	struct xsk_btf_info *xbi = meta->xbi;
+	__u32 mark;
 
-	/* API doesn't involve allocations to access BTF struct member */
-	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
-			    &meta->rx_ktime, meta->xbi, pkt);
-	if (err) {
-		fprintf(stderr, "ERROR(%d) no rx_ktime?!\n", err);
-		return err;
-	}
-	/* Notice how rx_ktime_ptr becomes a pointer into struct memory */
-	rx_ktime = *rx_ktime_ptr;
-
-	time_now = gettime();
-	diff = time_now - rx_ktime;
-
+	XSK_BTF_READ_INTO(mark, &meta->mark, xbi, pkt);
 	if (debug_meta)
-		printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-		       rx_ktime, time_now, diff);
-
-	return 0;
+		printf("meta-mark mark:%u\n", mark);
 }
 
 static void print_meta_info_via_btf( uint8_t *pkt)
