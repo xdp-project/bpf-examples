@@ -157,6 +157,9 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'w':
 			cfg->xsk_wakeup_mode = true;
 			break;
+		case 's':
+			cfg->xsk_wakeup_mode = false;
+			break;
 		case 'q':
 			verbose = false;
 			break;

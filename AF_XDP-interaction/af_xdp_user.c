@@ -198,6 +198,9 @@ static const struct option_wrapper long_options[] = {
 	{{"wakeup-mode", no_argument,		NULL, 'w' },
 	 "Use poll() API waiting for packets to arrive via wakeup from kernel"},
 
+	{{"spin-mode", no_argument,		NULL, 's' },
+	 "Let userspace process spin checking for packets (disable --wakeup-mode)"},
+
 	{{"unload",      no_argument,		NULL, 'U' },
 	 "Unload XDP program instead of loading"},
 
@@ -772,7 +775,8 @@ int main(int argc, char **argv)
 		.ifindex   = -1,
 		.do_unload = false,
 		.filename = "af_xdp_kern.o",
-		.progsec = "xdp_sock"
+		.progsec = "xdp_sock",
+		.xsk_wakeup_mode = true, /* Default, change via --spin */
 	};
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
