@@ -365,6 +365,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	if (cfg->xsk_if_queue >= 0)
 		_queue_id = cfg->xsk_if_queue;
 	xsk_info->queue_id = _queue_id;
+	printf("XXX _queue_id:%d\n", _queue_id);
 
 	xsk_info->umem = umem;
 	xsk_cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
@@ -392,6 +393,8 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	if (ret)
 		goto error_exit;
 
+	int fd = xsk_socket__fd(xsk_info->xsk);
+	printf("XXX xsk_info->xsk->fd = %d\n", fd);
 	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
 	xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
 
@@ -717,22 +720,35 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 static void rx_and_process(struct config *cfg,
 			   struct xsk_container *xsks)
 {
-	struct pollfd fds[2];
-	int ret, nfds = 1;
-	struct xsk_socket_info *xsk_socket = xsks->sockets[0]; // FIXME
+	struct pollfd fds[MAX_AF_SOCKS] = { 0 };
+	int ret, n_fds, i;
+	// struct xsk_socket_info *xsk_socket = xsks->sockets[0]; // FIXME
 
-	memset(fds, 0, sizeof(fds));
-	fds[0].fd = xsk_socket__fd(xsk_socket->xsk);
-	fds[0].events = POLLIN;
+	n_fds = xsks->num;
+
+	for (i = 0; i < n_fds; i++) {
+		struct xsk_socket_info *xsk_info = xsks->sockets[i];
+
+		fds[i].fd = xsk_socket__fd(xsk_info->xsk);
+		fds[i].events = POLLIN;
+	}
 
 	while(!global_exit) {
 		if (cfg->xsk_wakeup_mode) {
 			/* poll will wait for events on file descriptors */
-			ret = poll(fds, nfds, -1);
+			ret = poll(fds, n_fds, -1);
 			if (ret <= 0 || ret > 1)
 				continue;
 		}
-		handle_receive_packets(xsk_socket);
+
+		for (i = 0; i < n_fds; i++) {
+			struct xsk_socket_info *xsk_info = xsks->sockets[i];
+
+			printf("XXX i[%d] queue:%d xsk_info:%p \n",
+			       i, xsk_info->queue_id, xsk_info);
+
+			handle_receive_packets(xsk_info);
+		}
 	}
 }
 
@@ -835,7 +851,7 @@ int main(int argc, char **argv)
 	int i;
 
 	xsks.num = 2;
-	// xsks.num = 1;
+	//xsks.num = 1;
 
 	struct bpf_object *bpf_obj = NULL;
 	struct bpf_map *map;
