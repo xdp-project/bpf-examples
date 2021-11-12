@@ -307,6 +307,7 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 
 	ret = xsk_umem__create(&umem->umem, buffer, size, &umem->fq, &umem->cq,
 			       &xsk_umem_cfg);
+
 	if (ret) {
 		errno = -ret;
 		return NULL;
@@ -372,9 +373,17 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	xsk_cfg.xdp_flags = cfg->xdp_flags;
 	xsk_cfg.bind_flags = cfg->xsk_bind_flags;
 
-	ret = xsk_socket__create(&xsk_info->xsk, cfg->ifname,
-				 _queue_id, umem->umem, &xsk_info->rx,
-				 &xsk_info->tx, &xsk_cfg);
+//	ret = xsk_socket__create(&xsk_info->xsk, cfg->ifname,
+//				 _queue_id, umem->umem, &xsk_info->rx,
+//				 &xsk_info->tx, &xsk_cfg);
+
+	ret = xsk_socket__create_shared(&xsk_info->xsk, cfg->ifname,
+					_queue_id, umem->umem,
+					&xsk_info->rx,
+					&xsk_info->tx,
+					&umem->fq,
+					&umem->cq,
+					&xsk_cfg);
 
 	if (ret)
 		goto error_exit;
@@ -825,7 +834,8 @@ int main(int argc, char **argv)
 	struct xsk_container xsks;
 	int i;
 
-	xsks.num = 1;
+	xsks.num = 2;
+	// xsks.num = 1;
 
 	struct bpf_object *bpf_obj = NULL;
 	struct bpf_map *map;
@@ -908,10 +918,11 @@ int main(int argc, char **argv)
 
 	/* Open and configure the AF_XDP (xsk) socket(s) */
 	for (i = 0; i < xsks.num; i++) {
+		printf("XXX i:%d\n", i);
 		xsks.sockets[i] = xsk_configure_socket(&cfg, umem, i, xsks_map_fd);
 		if (xsks.sockets[i] == NULL) {
-			fprintf(stderr, "ERROR: Can't setup AF_XDP socket \"%s\"\n",
-				strerror(errno));
+			fprintf(stderr, "ERROR(%d): Can't setup AF_XDP socket "
+				"\"%s\"\n", errno, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 	}
