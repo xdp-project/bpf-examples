@@ -68,6 +68,7 @@ struct xsk_socket_info {
 	struct xsk_socket *xsk;
 
 	uint32_t outstanding_tx;
+	int queue_id;
 
 	struct stats_record stats;
 	struct stats_record prev_stats;
@@ -202,7 +203,7 @@ static const struct option_wrapper long_options[] = {
 	 "Force zero-copy mode"},
 
 	{{"queue",	 required_argument,	NULL, 'Q' },
-	 "Configure interface receive queue for AF_XDP, default=0"},
+	 "Configure single interface receive queue for AF_XDP"},
 
 	{{"wakeup-mode", no_argument,		NULL, 'w' },
 	 "Use poll() API waiting for packets to arrive via wakeup from kernel"},
@@ -346,10 +347,12 @@ error_exit:
 
 static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 						    struct xsk_umem_info *umem,
+						    int queue_id,
 						    int xsks_map_fd)
 {
 	struct xsk_socket_config xsk_cfg;
 	struct xsk_socket_info *xsk_info;
+	int _queue_id = queue_id;
 	uint32_t prog_id = 0;
 	int ret;
 
@@ -357,14 +360,20 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	if (!xsk_info)
 		return NULL;
 
+	/* If user specified explicit --queue number then use that */
+	if (cfg->xsk_if_queue >= 0)
+		_queue_id = cfg->xsk_if_queue;
+	xsk_info->queue_id = _queue_id;
+
 	xsk_info->umem = umem;
 	xsk_cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
 	xsk_cfg.tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
 	xsk_cfg.libbpf_flags = XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD;
 	xsk_cfg.xdp_flags = cfg->xdp_flags;
 	xsk_cfg.bind_flags = cfg->xsk_bind_flags;
+
 	ret = xsk_socket__create(&xsk_info->xsk, cfg->ifname,
-				 cfg->xsk_if_queue, umem->umem, &xsk_info->rx,
+				 _queue_id, umem->umem, &xsk_info->rx,
 				 &xsk_info->tx, &xsk_cfg);
 
 	if (ret)
@@ -809,6 +818,7 @@ int main(int argc, char **argv)
 		.filename = "af_xdp_kern.o",
 		.progsec = "xdp_sock",
 		.xsk_wakeup_mode = true, /* Default, change via --spin */
+		.xsk_if_queue = -1,
 	};
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;
@@ -898,7 +908,7 @@ int main(int argc, char **argv)
 
 	/* Open and configure the AF_XDP (xsk) socket(s) */
 	for (i = 0; i < xsks.num; i++) {
-		xsks.sockets[i] = xsk_configure_socket(&cfg, umem, xsks_map_fd);
+		xsks.sockets[i] = xsk_configure_socket(&cfg, umem, i, xsks_map_fd);
 		if (xsks.sockets[i] == NULL) {
 			fprintf(stderr, "ERROR: Can't setup AF_XDP socket \"%s\"\n",
 				strerror(errno));
