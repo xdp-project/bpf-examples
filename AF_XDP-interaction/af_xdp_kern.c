@@ -7,10 +7,11 @@
 #include <bpf/bpf_core_read.h> /* bpf_core_type_id_local */
 
 #include "xdp/parsing_helpers.h"
+#include "af_xdp_kern_shared.h"
 
 struct {
 	__uint(type, BPF_MAP_TYPE_XSKMAP);
-	__uint(max_entries, 64); /* Assume netdev has no more than 64 queues */
+	__uint(max_entries, MAX_AF_SOCKS);
 	__uint(key_size, sizeof(int));
 	__uint(value_size, sizeof(int));
 } xsks_map SEC(".maps");
@@ -19,7 +20,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, __u32);
 	__type(value, __u32);
-	__uint(max_entries, 64);
+	__uint(max_entries, MAX_AF_SOCKS);
 } xdp_stats_map SEC(".maps");
 
 /*

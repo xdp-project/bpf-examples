@@ -31,6 +31,7 @@
 #include "common_params.h"
 #include "common_user_bpf_xdp.h"
 // #include "common_libbpf.h"
+#include "af_xdp_kern_shared.h"
 
 #include "lib_xsk_extend.h"
 
@@ -780,6 +781,7 @@ int main(int argc, char **argv)
 	};
 	struct xsk_umem_info *umem;
 	struct xsk_socket_info *xsk_socket;
+	struct xsk_socket_info *xsk_sockets[MAX_AF_SOCKS];
 	pthread_t stats_poll_thread;
 
 	struct bpf_object *bpf_obj = NULL;
