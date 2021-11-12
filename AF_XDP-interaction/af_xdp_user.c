@@ -366,6 +366,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 		_queue_id = cfg->xsk_if_queue;
 	xsk_info->queue_id = _queue_id;
 	printf("XXX _queue_id:%d\n", _queue_id);
+	/* BUG: Program only seems works if _queue_id is same for all XSK sockets */
 
 	xsk_info->umem = umem;
 	xsk_cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
@@ -396,7 +397,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	int fd = xsk_socket__fd(xsk_info->xsk);
 	printf("XXX xsk_info->xsk->fd = %d\n", fd);
 	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
-	xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
+//	xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
 
 	return xsk_info;
 
@@ -824,6 +825,32 @@ static void *stats_poll(void *arg)
 	return NULL;
 }
 
+static void enter_xsks_into_map(int xsks_map, struct xsk_container *xsks)
+{
+	int i;
+
+	if (xsks_map < 0) {
+		fprintf(stderr, "ERROR: no xsks map found: %s\n",
+			strerror(xsks_map));
+		exit(EXIT_FAILURE);
+	}
+
+	for (i = 0; i < xsks->num; i++) {
+		int fd = xsk_socket__fd(xsks->sockets[i]->xsk);
+		int key, ret;
+
+		key = i;
+		ret = bpf_map_update_elem(xsks_map, &key, &fd, 0);
+		if (ret) {
+			fprintf(stderr, "ERROR: bpf_map_update_elem %d\n", i);
+			exit(EXIT_FAILURE);
+		}
+		printf("XXX %s() xsks_map_fd:%d Key:%d fd:%d\n",
+		       __func__, xsks_map, key, fd);
+
+	}
+}
+
 static void exit_application(int signal)
 {
 	signal = signal;
@@ -942,6 +969,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 	}
+	enter_xsks_into_map(xsks_map_fd, &xsks);
 
 	/* Start thread to do statistics display */
 	if (verbose) {
