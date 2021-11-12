@@ -73,6 +73,11 @@ struct xsk_socket_info {
 	struct stats_record prev_stats;
 };
 
+struct xsk_container {
+	struct xsk_socket_info *sockets[MAX_AF_SOCKS];
+	int num; /* Number of xsk_sockets configured */
+};
+
 /**
  * BTF setup XDP-hints
  * -------------------
@@ -692,10 +697,11 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
   }
 
 static void rx_and_process(struct config *cfg,
-			   struct xsk_socket_info *xsk_socket)
+			   struct xsk_container *xsks)
 {
 	struct pollfd fds[2];
 	int ret, nfds = 1;
+	struct xsk_socket_info *xsk_socket = xsks->sockets[0]; // FIXME
 
 	memset(fds, 0, sizeof(fds));
 	fds[0].fd = xsk_socket__fd(xsk_socket->xsk);
@@ -766,7 +772,8 @@ static void stats_print(struct stats_record *stats_rec,
 static void *stats_poll(void *arg)
 {
 	unsigned int interval = 2;
-	struct xsk_socket_info *xsk = arg;
+	struct xsk_container *xsks = arg;
+	struct xsk_socket_info *xsk = xsks->sockets[0]; // FIXME
 	static struct stats_record previous_stats = { 0 };
 
 	previous_stats.timestamp = gettime();
@@ -805,8 +812,10 @@ int main(int argc, char **argv)
 	};
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;
-	struct xsk_socket_info *xsk_sockets[MAX_AF_SOCKS];
-	int i, num_socks = 1;
+	struct xsk_container xsks;
+	int i;
+
+	xsks.num = 1;
 
 	struct bpf_object *bpf_obj = NULL;
 	struct bpf_map *map;
@@ -888,9 +897,9 @@ int main(int argc, char **argv)
 	}
 
 	/* Open and configure the AF_XDP (xsk) socket(s) */
-	for (i = 0; i < num_socks; i++) {
-		xsk_sockets[i] = xsk_configure_socket(&cfg, umem, xsks_map_fd);
-		if (xsk_sockets[i] == NULL) {
+	for (i = 0; i < xsks.num; i++) {
+		xsks.sockets[i] = xsk_configure_socket(&cfg, umem, xsks_map_fd);
+		if (xsks.sockets[i] == NULL) {
 			fprintf(stderr, "ERROR: Can't setup AF_XDP socket \"%s\"\n",
 				strerror(errno));
 			exit(EXIT_FAILURE);
@@ -899,8 +908,8 @@ int main(int argc, char **argv)
 
 	/* Start thread to do statistics display */
 	if (verbose) {
-		ret = pthread_create(&stats_poll_thread, NULL, stats_poll,
-				     xsk_sockets[0]);
+		ret = pthread_create(&stats_poll_thread, NULL,
+				     stats_poll, &xsks);
 		if (ret) {
 			fprintf(stderr, "ERROR: Failed creating statistics thread "
 				"\"%s\"\n", strerror(errno));
@@ -909,11 +918,11 @@ int main(int argc, char **argv)
 	}
 
 	/* Receive and count packets than drop them */
-	rx_and_process(&cfg, xsk_sockets[0]);
+	rx_and_process(&cfg, &xsks);
 
 	/* Cleanup */
-	for (i = 0; i < num_socks; i++)
-		xsk_socket__delete(xsk_sockets[i]->xsk);
+	for (i = 0; i < xsks.num; i++)
+		xsk_socket__delete(xsks.sockets[i]->xsk);
 	xsk_umem__delete(umem->umem);
 	xdp_link_detach(cfg.ifindex, cfg.xdp_flags, 0);
 
