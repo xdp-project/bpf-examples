@@ -46,8 +46,8 @@ struct mem_frame_allocator {
 };
 
 struct xsk_umem_info {
-	struct xsk_ring_prod fq;
-	struct xsk_ring_cons cq;
+	struct xsk_ring_prod init_fq;
+	struct xsk_ring_cons init_cq;
 	struct xsk_umem *umem;
 	void *buffer;
 	struct mem_frame_allocator mem;
@@ -66,6 +66,8 @@ struct xsk_socket_info {
 	struct xsk_ring_prod tx;
 	struct xsk_umem_info *umem;
 	struct xsk_socket *xsk;
+	struct xsk_ring_prod fq;
+	struct xsk_ring_cons cq;
 
 	uint32_t outstanding_tx;
 	int queue_id;
@@ -305,7 +307,8 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	if (!umem)
 		return NULL;
 
-	ret = xsk_umem__create(&umem->umem, buffer, size, &umem->fq, &umem->cq,
+	ret = xsk_umem__create(&umem->umem, buffer, size,
+			       &umem->init_fq, &umem->init_cq,
 			       &xsk_umem_cfg);
 
 	if (ret) {
@@ -321,13 +324,14 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	return umem;
 }
 
-static int xsk_populate_fill_ring(struct xsk_umem_info *umem)
+static int xsk_populate_fill_ring(struct xsk_ring_prod *fq,
+				  struct xsk_umem_info *umem)
 {
 	int ret, i;
 	uint32_t idx;
 
 	/* Stuff the receive path with buffers, we assume we have enough */
-	ret = xsk_ring_prod__reserve(&umem->fq,
+	ret = xsk_ring_prod__reserve(fq,
 				     XSK_RING_PROD__DEFAULT_NUM_DESCS,
 				     &idx);
 
@@ -335,10 +339,10 @@ static int xsk_populate_fill_ring(struct xsk_umem_info *umem)
 		goto error_exit;
 
 	for (i = 0; i < XSK_RING_PROD__DEFAULT_NUM_DESCS; i++)
-		*xsk_ring_prod__fill_addr(&umem->fq, idx++) =
+		*xsk_ring_prod__fill_addr(fq, idx++) =
 			mem_alloc_umem_frame(&umem->mem);
 
-	xsk_ring_prod__submit(&umem->fq,
+	xsk_ring_prod__submit(fq,
 			      XSK_RING_PROD__DEFAULT_NUM_DESCS);
 	return 0;
 error_exit:
@@ -365,8 +369,6 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	if (cfg->xsk_if_queue >= 0)
 		_queue_id = cfg->xsk_if_queue;
 	xsk_info->queue_id = _queue_id;
-	printf("XXX _queue_id:%d\n", _queue_id);
-	/* BUG: Program only seems works if _queue_id is same for all XSK sockets */
 
 	xsk_info->umem = umem;
 	xsk_cfg.rx_size = XSK_RING_CONS__DEFAULT_NUM_DESCS;
@@ -383,8 +385,8 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 					_queue_id, umem->umem,
 					&xsk_info->rx,
 					&xsk_info->tx,
-					&umem->fq,
-					&umem->cq,
+					&xsk_info->fq,
+					&xsk_info->cq,
 					&xsk_cfg);
 
 	if (ret)
@@ -418,17 +420,17 @@ static void complete_tx(struct xsk_socket_info *xsk)
 
 
 	/* Collect/free completed TX buffers */
-	completed = xsk_ring_cons__peek(&xsk->umem->cq,
+	completed = xsk_ring_cons__peek(&xsk->cq,
 					XSK_RING_CONS__DEFAULT_NUM_DESCS,
 					&idx_cq);
 
 	if (completed > 0) {
 		for (int i = 0; i < completed; i++)
 			mem_free_umem_frame(&xsk->umem->mem,
-					    *xsk_ring_cons__comp_addr(&xsk->umem->cq,
+					    *xsk_ring_cons__comp_addr(&xsk->cq,
 								      idx_cq++));
 
-		xsk_ring_cons__release(&xsk->umem->cq, completed);
+		xsk_ring_cons__release(&xsk->cq, completed);
 		xsk->outstanding_tx -= completed < xsk->outstanding_tx ?
 			completed : xsk->outstanding_tx;
 	}
@@ -663,12 +665,12 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 	__u64 start = gettime();
 
 	/* Stuff the ring with as much frames as possible */
-	stock_frames = xsk_prod_nb_free(&xsk->umem->fq,
+	stock_frames = xsk_prod_nb_free(&xsk->fq,
 					mem_avail_umem_frames(&xsk->umem->mem));
 
 	if (stock_frames > 0) {
 
-		ret = xsk_ring_prod__reserve(&xsk->umem->fq, stock_frames,
+		ret = xsk_ring_prod__reserve(&xsk->fq, stock_frames,
 					     &idx_fq);
 
 		/* This should not happen, but just in case */
@@ -679,10 +681,10 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 		}
 
 		for (i = 0; i < stock_frames; i++)
-			*xsk_ring_prod__fill_addr(&xsk->umem->fq, idx_fq++) =
+			*xsk_ring_prod__fill_addr(&xsk->fq, idx_fq++) =
 				mem_alloc_umem_frame(&xsk->umem->mem);
 
-		xsk_ring_prod__submit(&xsk->umem->fq, stock_frames);
+		xsk_ring_prod__submit(&xsk->fq, stock_frames);
 	}
 	__u64 now = gettime();
 	if (debug && (stock_frames || free_frames))
@@ -954,18 +956,22 @@ int main(int argc, char **argv)
 			strerror(errno));
 		exit(EXIT_FAILURE);
 	}
-	if (xsk_populate_fill_ring(umem)) {
-		fprintf(stderr, "ERROR: Can't populate fill ring\n");
-		exit(EXIT_FAILURE);
-	}
 
 	/* Open and configure the AF_XDP (xsk) socket(s) */
 	for (i = 0; i < xsks.num; i++) {
+		struct xsk_socket_info *xski;
+
 		printf("XXX i:%d\n", i);
-		xsks.sockets[i] = xsk_configure_socket(&cfg, umem, i, xsks_map_fd);
-		if (xsks.sockets[i] == NULL) {
+		xski = xsk_configure_socket(&cfg, umem, i, xsks_map_fd);
+		if (xski == NULL) {
 			fprintf(stderr, "ERROR(%d): Can't setup AF_XDP socket "
 				"\"%s\"\n", errno, strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+		xsks.sockets[i] = xski;
+
+		if (xsk_populate_fill_ring(&xski->fq, umem)) {
+			fprintf(stderr, "ERROR: Can't populate fill ring\n");
 			exit(EXIT_FAILURE);
 		}
 	}
