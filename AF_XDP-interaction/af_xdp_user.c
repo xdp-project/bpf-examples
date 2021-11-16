@@ -879,6 +879,23 @@ int main(int argc, char **argv)
 	struct xsk_container xsks;
 	int i;
 
+	/* Default to AF_XDP copy mode.
+	 *
+	 * It seems counter intuitive to not-use Zero-Copy mode, but there is an
+	 * explaination.  Our application don't consume EVERY packet, e.g
+	 * letting netstack handle ARP/NDP packets via returning XDP_PASS in
+	 * bpf-prog.
+	 *
+	 * XDP_PASS in Zero-Copy mode results in the kernel allocating a new
+	 * memory page (and SKB) and copying over packet contents, before giving
+	 * packet to netstack.
+	 *
+	 * For our Real-Time use-case, we want to avoid allocations more than
+	 * cost of copying over packet data to our preallocated AF_XDP umem
+	 * area.
+	 */
+	cfg.xsk_bind_flags = XDP_COPY;
+
 	xsks.num = 2;
 	//xsks.num = 1;
 
