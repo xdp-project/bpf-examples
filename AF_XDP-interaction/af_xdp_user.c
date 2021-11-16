@@ -328,23 +328,21 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 static int xsk_populate_fill_ring(struct xsk_ring_prod *fq,
 				  struct xsk_umem_info *umem)
 {
+	int nr = XSK_RING_PROD__DEFAULT_NUM_DESCS; /* 2048 */
 	int ret, i;
 	uint32_t idx;
 
 	/* Stuff the receive path with buffers, we assume we have enough */
-	ret = xsk_ring_prod__reserve(fq,
-				     XSK_RING_PROD__DEFAULT_NUM_DESCS,
-				     &idx);
+	ret = xsk_ring_prod__reserve(fq, nr, &idx);
 
-	if (ret != XSK_RING_PROD__DEFAULT_NUM_DESCS)
+	if (ret != nr)
 		goto error_exit;
 
-	for (i = 0; i < XSK_RING_PROD__DEFAULT_NUM_DESCS; i++)
+	for (i = 0; i < nr; i++)
 		*xsk_ring_prod__fill_addr(fq, idx++) =
 			mem_alloc_umem_frame(&umem->mem);
 
-	xsk_ring_prod__submit(fq,
-			      XSK_RING_PROD__DEFAULT_NUM_DESCS);
+	xsk_ring_prod__submit(fq, nr);
 	return 0;
 error_exit:
 	return -EINVAL;
@@ -945,8 +943,7 @@ int main(int argc, char **argv)
 		printf("Interface: %s - queues max:%d set:%d\n",
 		       cfg.ifname, queues_max, queues_set);
 
-	xsks.num = 2;
-	//xsks.num = 1;
+	xsks.num = queues_set;
 
 	err = init_btf_info_via_bpf_object(bpf_obj);
 	if (err) {
