@@ -407,11 +407,8 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	if (ret)
 		goto error_exit;
 
-	int fd = xsk_socket__fd(xsk_info->xsk);
-	printf("XXX xsk_info->xsk->fd = %d\n", fd);
 	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
-//	xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
-
+	//  xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
 	return xsk_info;
 
 error_exit:
@@ -853,13 +850,15 @@ static void enter_xsks_into_map(int xsks_map, struct xsk_container *xsks)
 		int key, ret;
 
 		key = i;
+		/* When entering XSK socket into map redirect have effect */
 		ret = bpf_map_update_elem(xsks_map, &key, &fd, 0);
 		if (ret) {
 			fprintf(stderr, "ERROR: bpf_map_update_elem %d\n", i);
 			exit(EXIT_FAILURE);
 		}
-		printf("XXX %s() xsks_map_fd:%d Key:%d fd:%d\n",
-		       __func__, xsks_map, key, fd);
+		if (debug)
+			printf("%s() enable redir for xsks_map_fd:%d Key:%d fd:%d\n",
+			       __func__, xsks_map, key, fd);
 
 	}
 }
@@ -1003,7 +1002,6 @@ int main(int argc, char **argv)
 	for (i = 0; i < xsks.num; i++) {
 		struct xsk_socket_info *xski;
 
-		printf("XXX i:%d\n", i);
 		xski = xsk_configure_socket(&cfg, umem, i, xsks_map_fd);
 		if (xski == NULL) {
 			fprintf(stderr, "ERROR(%d): Can't setup AF_XDP socket "
