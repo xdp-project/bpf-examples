@@ -748,8 +748,8 @@ static void rx_and_process(struct config *cfg,
 		for (i = 0; i < n_fds; i++) {
 			struct xsk_socket_info *xsk_info = xsks->sockets[i];
 
-			printf("XXX i[%d] queue:%d xsk_info:%p \n",
-			       i, xsk_info->queue_id, xsk_info);
+			//printf("XXX i[%d] queue:%d xsk_info:%p \n",
+			//	i, xsk_info->queue_id, xsk_info);
 
 			handle_receive_packets(xsk_info);
 		}
@@ -878,6 +878,7 @@ int main(int argc, char **argv)
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;
 	struct xsk_container xsks;
+	int queues_max, queues_set;
 	int i;
 
 	/* Default to AF_XDP copy mode.
@@ -896,9 +897,6 @@ int main(int argc, char **argv)
 	 * area.
 	 */
 	cfg.xsk_bind_flags = XDP_COPY;
-
-	xsks.num = 2;
-	//xsks.num = 1;
 
 	struct bpf_object *bpf_obj = NULL;
 	struct bpf_map *map;
@@ -940,6 +938,15 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 	}
+
+	queues_max = ethtool_get_max_channels(cfg.ifname);
+	queues_set = ethtool_get_channels(cfg.ifname);
+	if (verbose || debug_meta)
+		printf("Interface: %s - queues max:%d set:%d\n",
+		       cfg.ifname, queues_max, queues_set);
+
+	xsks.num = 2;
+	//xsks.num = 1;
 
 	err = init_btf_info_via_bpf_object(bpf_obj);
 	if (err) {

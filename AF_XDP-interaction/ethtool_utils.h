@@ -3,6 +3,7 @@
 #ifndef __ETHTOOL_UTILS_H
 #define __ETHTOOL_UTILS_H
 
-int ethtool_get_max_queues(const char *ifname);
+int ethtool_get_max_channels(const char *ifname);
+int ethtool_get_channels(const char *ifname);
 
 #endif /* __ETHTOOL_UTILS_H */
