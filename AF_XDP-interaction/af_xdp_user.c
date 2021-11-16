@@ -36,8 +36,8 @@
 #include "lib_xsk_extend.h"
 #include "ethtool_utils.h"
 
-#define NUM_FRAMES         4096
-#define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
+#define NUM_FRAMES         4096 /* Frames per queue */
+#define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE /* 4096 */
 #define RX_BATCH_SIZE      64
 #define INVALID_UMEM_FRAME UINT64_MAX
 
@@ -338,23 +338,23 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size,
 }
 
 static int xsk_populate_fill_ring(struct xsk_ring_prod *fq,
-				  struct xsk_umem_info *umem)
+				  struct xsk_umem_info *umem,
+				  int nr_frames)
 {
-	int nr = XSK_RING_PROD__DEFAULT_NUM_DESCS; /* 2048 */
-	int ret, i;
 	uint32_t idx;
+	int ret, i;
 
 	/* Stuff the receive path with buffers, we assume we have enough */
-	ret = xsk_ring_prod__reserve(fq, nr, &idx);
+	ret = xsk_ring_prod__reserve(fq, nr_frames, &idx);
 
-	if (ret != nr)
+	if (ret != nr_frames)
 		goto error_exit;
 
-	for (i = 0; i < nr; i++)
+	for (i = 0; i < nr_frames; i++)
 		*xsk_ring_prod__fill_addr(fq, idx++) =
 			mem_alloc_umem_frame(&umem->mem);
 
-	xsk_ring_prod__submit(fq, nr);
+	xsk_ring_prod__submit(fq, nr_frames);
 	return 0;
 error_exit:
 	return -EINVAL;
@@ -889,6 +889,7 @@ int main(int argc, char **argv)
 	struct xsk_umem_info *umem;
 	struct xsk_container xsks;
 	int queues_max, queues_set;
+	int total_nr_frames, nr_frames;
 	int i;
 
 	/* Default to AF_XDP copy mode.
@@ -954,8 +955,14 @@ int main(int argc, char **argv)
 	if (verbose || debug_meta)
 		printf("Interface: %s - queues max:%d set:%d\n",
 		       cfg.ifname, queues_max, queues_set);
-
 	xsks.num = queues_set;
+
+	/* Allocate frames according to how many queues are handled */
+	nr_frames = NUM_FRAMES;
+	total_nr_frames = nr_frames * xsks.num;
+	if (verbose || debug_meta)
+		printf("For XSK queues:%d alloc total:%d frames (per-q:%d)\n",
+		       xsks.num, total_nr_frames, nr_frames);
 
 	err = init_btf_info_via_bpf_object(bpf_obj);
 	if (err) {
@@ -973,8 +980,8 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	/* Allocate memory for NUM_FRAMES of the default XDP frame size */
-	packet_buffer_size = NUM_FRAMES * FRAME_SIZE;
+	/* Allocate memory for total_nr_frames of the default XDP frame size */
+	packet_buffer_size = total_nr_frames * FRAME_SIZE;
 	if (posix_memalign(&packet_buffer,
 			   getpagesize(), /* PAGE_SIZE aligned */
 			   packet_buffer_size)) {
@@ -985,7 +992,7 @@ int main(int argc, char **argv)
 
 	/* Initialize shared packet_buffer for umem usage */
 	umem = configure_xsk_umem(packet_buffer, packet_buffer_size,
-				  FRAME_SIZE, NUM_FRAMES);
+				  FRAME_SIZE, total_nr_frames);
 	if (umem == NULL) {
 		fprintf(stderr, "ERROR: Can't create umem \"%s\"\n",
 			strerror(errno));
@@ -1005,7 +1012,7 @@ int main(int argc, char **argv)
 		}
 		xsks.sockets[i] = xski;
 
-		if (xsk_populate_fill_ring(&xski->fq, umem)) {
+		if (xsk_populate_fill_ring(&xski->fq, umem, nr_frames / 2)) {
 			fprintf(stderr, "ERROR: Can't populate fill ring\n");
 			exit(EXIT_FAILURE);
 		}
