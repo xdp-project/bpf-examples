@@ -12,6 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sched.h>
 
 #include <sys/resource.h>
 
@@ -208,6 +209,9 @@ static const struct option_wrapper long_options[] = {
 
 	{{"queue",	 required_argument,	NULL, 'Q' },
 	 "Configure single interface receive queue for AF_XDP"},
+
+	{{"priority",	 required_argument,	NULL, 'p' },
+	 "Setup real-time priority for process"},
 
 	{{"wakeup-mode", no_argument,		NULL, 'w' },
 	 "Use poll() API waiting for packets to arrive via wakeup from kernel"},
@@ -892,6 +896,7 @@ int main(int argc, char **argv)
 	struct xsk_container xsks;
 	int queues_max, queues_set;
 	int total_nr_frames, nr_frames;
+	struct sched_param schedp;
 	int i;
 
 	/* Default to AF_XDP copy mode.
@@ -1029,6 +1034,22 @@ int main(int argc, char **argv)
 				"\"%s\"\n", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+	}
+
+	if (cfg.sched_prio) {
+		/* Setup sched priority: Have impact on wakeup accuracy */
+		memset(&schedp, 0, sizeof(schedp));
+		schedp.sched_priority = cfg.sched_prio;
+		err = sched_setscheduler(0, cfg.sched_policy, &schedp);
+		if (err) {
+			fprintf(stderr, "ERROR(%d): failed to set priority(%d): %s\n",
+				errno, cfg.sched_prio, strerror(errno));
+			if (errno != EPERM)
+				return EXIT_FAILURE;
+		}
+		if (debug)
+			printf("Setup RT prio %d - policy SCHED_FIFO(%d)\n ",
+			       cfg.sched_prio, cfg.sched_policy);
 	}
 
 	/* Receive and count packets than drop them */

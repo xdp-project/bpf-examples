@@ -9,6 +9,7 @@
 #include <net/if.h>
 #include <linux/if_link.h> /* XDP_FLAGS_* depend on kernel-headers installed */
 #include <linux/if_xdp.h>
+#include <sched.h>
 
 #include "common_params.h"
 
@@ -95,7 +96,7 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:ASNFUMQ:czpq",
+	while ((opt = getopt_long(argc, argv, "hd:r:L:R:ASNFUMQ:czqp:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -168,6 +169,10 @@ void parse_cmdline_args(int argc, char **argv,
 			break;
 		case 'P':
 			debug_pkt = true;
+			break;
+		case 'p':
+			cfg->sched_prio = atoi(optarg);
+			cfg->sched_policy = SCHED_FIFO;
 			break;
 		case 'm':
 			debug_meta = true;

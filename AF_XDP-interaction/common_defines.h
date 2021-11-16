@@ -23,6 +23,9 @@ struct config {
 	__u16 xsk_bind_flags;
 	int xsk_if_queue;
 	bool xsk_wakeup_mode;
+	/* Real-Time scheduler setting */
+	int sched_prio;
+	int sched_policy;
 };
 
 /* Defined in common_params.o */

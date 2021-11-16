@@ -11,7 +11,8 @@ USER_TARGETS_OBJS += ethtool_utils.o
 # The USER_TARGETS_OBJS have a dependency of this header file
 USER_TARGETS_OBJS_DEPS += common_defines.h
 
-LDLIBS     += -pthread
+LDLIBS     += -lpthread
+LDLIBS     += -lrt
 
 LIB_DIR = ../lib
 
