@@ -42,8 +42,9 @@
 #define INVALID_UMEM_FRAME UINT64_MAX
 
 struct mem_frame_allocator {
-	uint64_t umem_frame_addr[NUM_FRAMES];
 	uint32_t umem_frame_free;
+	uint32_t umem_frame_max;
+	uint64_t *umem_frame_addr; /* array */
 };
 
 struct xsk_umem_info {
@@ -257,7 +258,7 @@ static uint64_t mem_alloc_umem_frame(struct mem_frame_allocator *mem)
 
 static void mem_free_umem_frame(struct mem_frame_allocator *mem, uint64_t frame)
 {
-	assert(mem->umem_frame_free < NUM_FRAMES);
+	assert(mem->umem_frame_free < mem->umem_frame_max);
 
 	mem->umem_frame_addr[mem->umem_frame_free++] = frame;
 }
@@ -267,19 +268,30 @@ static uint64_t mem_avail_umem_frames(struct mem_frame_allocator *mem)
 	return mem->umem_frame_free;
 }
 
-static void mem_init_umem_frame_allocator(struct mem_frame_allocator *mem)
+static void mem_init_umem_frame_allocator(struct mem_frame_allocator *mem,
+					  uint32_t nr_frames)
 {
 	/* Initialize umem frame allocator */
 	int i;
 
+	mem->umem_frame_addr = calloc(nr_frames, sizeof(*mem->umem_frame_addr));
+	if (!mem->umem_frame_addr) {
+		fprintf(stderr,
+			"ERROR: Cannot allocate umem_frame_addr array sz:%u\n",
+			nr_frames);
+		exit(EXIT_FAILURE);
+	}
+	mem->umem_frame_max = nr_frames;
+
 	/* The umem_frame_addr is basically index into umem->buffer memory area */
-	for (i = 0; i < NUM_FRAMES; i++)
+	for (i = 0; i < nr_frames; i++)
 		mem->umem_frame_addr[i] = i * FRAME_SIZE;
 
-	mem->umem_frame_free = NUM_FRAMES;
+	mem->umem_frame_free = nr_frames;
 }
 
-static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
+static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size,
+						uint32_t frame_size, uint32_t nr_frames)
 {
 	struct xsk_umem_info *umem;
 	int ret;
@@ -297,7 +309,7 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 //		.fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS * 2,
 		.fill_size = XSK_RING_PROD__DEFAULT_NUM_DESCS, /* Fix later */
 		.comp_size = XSK_RING_CONS__DEFAULT_NUM_DESCS,
-		.frame_size = FRAME_SIZE,
+		.frame_size = frame_size,
 		/* Notice XSK_UMEM__DEFAULT_FRAME_HEADROOM is zero */
 		.frame_headroom = 256,
 		//.frame_headroom = 0,
@@ -320,7 +332,7 @@ static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size)
 	umem->buffer = buffer;
 
 	/* Setup our own umem frame allocator system */
-	mem_init_umem_frame_allocator(&umem->mem);
+	mem_init_umem_frame_allocator(&umem->mem, nr_frames);
 
 	return umem;
 }
@@ -972,7 +984,8 @@ int main(int argc, char **argv)
 	}
 
 	/* Initialize shared packet_buffer for umem usage */
-	umem = configure_xsk_umem(packet_buffer, packet_buffer_size);
+	umem = configure_xsk_umem(packet_buffer, packet_buffer_size,
+				  FRAME_SIZE, NUM_FRAMES);
 	if (umem == NULL) {
 		fprintf(stderr, "ERROR: Can't create umem \"%s\"\n",
 			strerror(errno));
