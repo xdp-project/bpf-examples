@@ -471,7 +471,8 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
  * time a packet with a new BTF-ID is seen.
  */
 
-static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta)
+static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
+				__u32 qid)
 {
 	__u64 time_now; // = gettime();
 	__u64 *rx_ktime_ptr; /* Points directly to member memory */
@@ -493,14 +494,14 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta)
 	diff = time_now - rx_ktime;
 
 	if (debug_meta)
-		printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-		       rx_ktime, time_now, diff);
+		printf("Q[%u] meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       qid, rx_ktime, time_now, diff);
 
 	return 0;
 }
 
 /* Demo API xsk_btf__read_field() that use string for BTF lookup */
-static int print_meta_info_time_api2(uint8_t *pkt)
+static int print_meta_info_time_api2(uint8_t *pkt, __u32 qid)
 {
 	struct xsk_btf_info *xbi = xdp_hints_rx_time.xbi;
 	__u64 time_now; // = gettime();
@@ -526,13 +527,14 @@ static int print_meta_info_time_api2(uint8_t *pkt)
 	diff = time_now - rx_ktime;
 
 	if (debug_meta)
-		printf("meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-		       rx_ktime, time_now, diff);
+		printf("Q[%u] meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       qid, rx_ktime, time_now, diff);
 
 	return 0;
 }
 
-static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
+static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta,
+				 __u32 qid)
 {
 	struct xsk_btf_info *xbi = meta->xbi;
 	__u32 mark = 0;
@@ -540,12 +542,13 @@ static void print_meta_info_mark(uint8_t *pkt, struct xdp_hints_mark *meta)
 	/* The 'mark' value is not updated in case of errors */
 	XSK_BTF_READ_INTO(mark, &meta->mark, xbi, pkt);
 	if (debug_meta)
-		printf("meta-mark mark:%u\n", mark);
+		printf("Q[%u] meta-mark mark:%u\n", qid, mark);
 }
 
-static void print_meta_info_via_btf( uint8_t *pkt)
+static void print_meta_info_via_btf(uint8_t *pkt, struct xsk_socket_info *xsk)
 {
 	__u32 btf_id = xsk_umem__btf_id(pkt);
+	__u32 qid = xsk->queue_id;
 
 	if (btf_id == 0) {
 		if (debug_meta)
@@ -554,10 +557,10 @@ static void print_meta_info_via_btf( uint8_t *pkt)
 	}
 
 	if (btf_id == xdp_hints_rx_time.btf_type_id) {
-		print_meta_info_time(pkt, &xdp_hints_rx_time);
+		print_meta_info_time(pkt, &xdp_hints_rx_time, qid);
 
 	} else if (btf_id == xdp_hints_mark.btf_type_id) {
-		print_meta_info_mark(pkt, &xdp_hints_mark);
+		print_meta_info_mark(pkt, &xdp_hints_mark, qid);
 	}
 }
 
@@ -594,7 +597,7 @@ static bool process_packet(struct xsk_socket_info *xsk,
 {
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
-	print_meta_info_via_btf(pkt);
+	print_meta_info_via_btf(pkt, xsk);
 
 	//if (debug)
 	//	printf("XXX addr:0x%lX pkt_ptr:0x%p\n", addr, pkt);
