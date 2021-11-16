@@ -34,6 +34,7 @@
 #include "af_xdp_kern_shared.h"
 
 #include "lib_xsk_extend.h"
+#include "ethtool_utils.h"
 
 #define NUM_FRAMES         4096
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
