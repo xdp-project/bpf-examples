@@ -15,3 +15,22 @@ It is particularly important to understand the *four different
 ring-queues* which are all Single-Producer Single-Consumer (SPSC)
 ring-queues. A set of these four queues are needed *for each queue*
 on the network device (netdev).
+
+* Example bind to all queues
+
+Usually AF_XDP examples makes a point out-of forcing end-user to
+select a specific queue or channel ID, to show that AF_XDP sockets
+operates on a single queue ID.
+
+In this example, default behavior, is to setup AF_XDP sockets for
+*ALL* configured queues/channels available, and "listen" for packets
+on all of the queues.  This way we can ignore setting up hardware
+filters or reducing channels to 1 (as a popular workaround).
+
+This also means memory consumption increase as NIC have more queues
+available.  For AF_XDP all the "UMEM" memory is preallocated by
+userspace and registered with the kernel.  AF_XDP trade wasting memory
+for speedup. Each frame is a full memory-page 4K (4096 bytes).  For
+each channel/queue ID program allocates 4096 frames, which takes up
+16MB memory per channel.
+
