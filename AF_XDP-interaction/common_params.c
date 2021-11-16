@@ -134,8 +134,8 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'S':
 			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
 			cfg->xdp_flags |= XDP_FLAGS_SKB_MODE;  /* Set   flag */
-			cfg->xsk_bind_flags &= XDP_ZEROCOPY;
-			cfg->xsk_bind_flags |= XDP_COPY;
+			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY;  /* Clear flag */
+			cfg->xsk_bind_flags |= XDP_COPY;       /* Set   flag */
 			break;
 		case 'N':
 			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
@@ -192,12 +192,12 @@ void parse_cmdline_args(int argc, char **argv,
 			strncpy(dest, optarg, sizeof(cfg->dest_mac));
 			break;
 		case 'c':
-			cfg->xsk_bind_flags &= XDP_ZEROCOPY;
-			cfg->xsk_bind_flags |= XDP_COPY;
+			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY;	/* Clear flag */
+			cfg->xsk_bind_flags |= XDP_COPY;	/* Set   flag */
 			break;
 		case 'z':
-			cfg->xsk_bind_flags &= XDP_COPY;
-			cfg->xsk_bind_flags |= XDP_ZEROCOPY;
+			cfg->xsk_bind_flags &= ~XDP_COPY;	/* Clear flag */
+			cfg->xsk_bind_flags |= XDP_ZEROCOPY;	/* Set   flag */
 			break;
 		case 'h':
 			full_help = true;
