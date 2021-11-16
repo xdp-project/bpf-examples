@@ -5,9 +5,13 @@ between XDP-prog (running kernel-side) and AF_XDP user-space process.
 
 * AF_XDP documentation
 
-In kernel [[https://www.kernel.org/doc/html/latest/networking/af_xdp.html][documentation for AF_XDP]].
+When developing your AF_XDP application, we recommend familiarising
+yourself with the core AF_XDP concepts, by reading the kernel
+[[https://www.kernel.org/doc/html/latest/networking/af_xdp.html][documentation for AF_XDP]]. And XDP-tools also contain documentation in
+[[https://github.com/xdp-project/xdp-tools/blob/master/lib/libxdp/README.org#using-af_xdp-sockets][libxdp for AF_XDP]], explaining how to use the API, and the difference
+between the control-path and data-path APIs.
 
-XDP-tools also contain documentation in [[https://github.com/xdp-project/xdp-tools/blob/master/lib/libxdp/README.org#using-af_xdp-sockets][libxdp for AF_XDP]], explaining
-how to use the API, and the difference between the control-path and
-data-path APIs.
-
+It is particularly important to understand the *four different
+ring-queues* which are all Single-Producer Single-Consumer (SPSC)
+ring-queues. A set of these four queues are needed *for each queue*
+on the network device (netdev).
