@@ -1026,7 +1026,7 @@ int main(int argc, char **argv)
 	enter_xsks_into_map(xsks_map_fd, &xsks);
 
 	/* Start thread to do statistics display */
-	if (verbose) {
+	if (0 && verbose) { // FIXME disabled as currently broken
 		ret = pthread_create(&stats_poll_thread, NULL,
 				     stats_poll, &xsks);
 		if (ret) {
