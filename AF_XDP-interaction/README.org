@@ -1,0 +1,87 @@
+#+Title: How to transfer info from XDP-prog to AF_XDP
+
+This BPF-example show how use BTF to create a communication channel
+between XDP BPF-prog (running kernel-side) and AF_XDP user-space
+process, via XDP-hints in metadata area.
+
+* XDP-hints via local BTF info
+
+XDP-hints have been discussed as a facility where NIC drivers provide
+information in the metadata area (located just before packet header
+starts).  There have been little progress on kernel drivers adding
+XDP-hints, as end-users are unsure how to decode and consume the
+information (chicken-and-egg problem).
+
+In this example we let the BPF-object file define and contain the
+BTF-info about the XDP-hints data-structures.  Thus, no kernel or
+driver changes are needed as the BTF type-definitions are *locally
+defined*.  And XDP-hints are used as communication channel between XDP
+BPF-prog and AF_XDP userspace program.
+
+The API for decoding the BTF data-structures have been added to
+seperate files (in [[file:lib_xsk_extend.c]] and [[file:lib_xsk_extend.h]]) to
+make this reusable for other projects, with the goal of getting this
+included in libbpf or libxdp.  The API takes an =struct btf= pointer
+as input argument when searching for a struct-name.  This BTF pointer
+is obtained from opening the BPF-object ELF file, but it could also
+come from the kernel (e.g via =btf__load_vmlinux_btf()=) and even from
+a kernel module (e.g. via =btf__load_module_btf()=). See other
+[[https://github.com/xdp-project/bpf-examples/blob/master/BTF-playground/btf_module_read.c][btf_module_read]] example howto do this.
+
+The requirement for being a valid XDP-hints data-struct is that the
+last member in the struct is named =btf_id= and have size 4 bytes
+(32-bit).  See C code example below. This =btf_id= member is used for
+identifying what struct have been put into this metadata area.  The
+kernel-side BPF-prog stores the =btf_id= via using API
+=bpf_core_type_id_local()= to obtain the ID.  Userspace API reads the
+=btf_id= via reading -4 bytes from packet header start, and can check
+the ID against the IDs that was available via the =struct btf=
+pointer.
+
+#+begin_src C
+ struct xdp_hints_rx_time {
+	__u64 rx_ktime;
+	__u32 btf_id;
+ } __attribute__((aligned(4))) __attribute__((packed));
+#+end_src
+
+The location as the last member is because metadata area, located just
+before packet header starts, can only grow "backwards" (via BPF-helper
+=bpf_xdp_adjust_meta()=).  To store a larger struct, the metadata is
+grown by a larger negative offset.  The BTF type-information knows the
+size (and offsets) of all data-structures.  Thus, we can deduce the
+size of the metadata area, when knowing the =bpf_id=, which by placing
+it as the last member is in a known location.
+
+
+* AF_XDP documentation
+
+When developing your AF_XDP application, we recommend familiarising
+yourself with the core AF_XDP concepts, by reading the kernel
+[[https://www.kernel.org/doc/html/latest/networking/af_xdp.html][documentation for AF_XDP]]. And XDP-tools also contain documentation in
+[[https://github.com/xdp-project/xdp-tools/blob/master/lib/libxdp/README.org#using-af_xdp-sockets][libxdp for AF_XDP]], explaining how to use the API, and the difference
+between the control-path and data-path APIs.
+
+It is particularly important to understand the *four different
+ring-queues* which are all Single-Producer Single-Consumer (SPSC)
+ring-queues. A set of these four queues are needed *for each queue*
+on the network device (netdev).
+
+* Example bind to all queues
+
+Usually AF_XDP examples makes a point out-of forcing end-user to
+select a specific queue or channel ID, to show that AF_XDP sockets
+operates on a single queue ID.
+
+In this example, default behavior, is to setup AF_XDP sockets for
+*ALL* configured queues/channels available, and "listen" for packets
+on all of the queues.  This way we can ignore setting up hardware
+filters or reducing channels to 1 (as a popular workaround).
+
+This also means memory consumption increase as NIC have more queues
+available.  For AF_XDP all the "UMEM" memory is preallocated by
+userspace and registered with the kernel.  AF_XDP trade wasting memory
+for speedup. Each frame is a full memory-page 4K (4096 bytes).  For
+each channel/queue ID program allocates 4096 frames, which takes up
+16MB memory per channel.
+
