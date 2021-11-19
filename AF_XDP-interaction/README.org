@@ -53,6 +53,28 @@ size (and offsets) of all data-structures.  Thus, we can deduce the
 size of the metadata area, when knowing the =bpf_id=, which by placing
 it as the last member is in a known location.
 
+* Why is XDP RX-timestamp essential for AF_XDP
+
+In this example, the kernel-side XDP BPF-prog (file:af_xdp_kern.c)
+take a timestamp (=bpf_ktime_get_ns()=) and stores it in the metadata
+as an XDP-hint.  This make it possible to measure the time-delay from
+XDP softirq execution and when AF_XDP gets the packet out of its
+RX-ring.  It is some interesting data-points, as there is (obviously)
+big difference between waiting for a wakeup (via =poll= or =select=)
+or using the spin-mode, and effects of userspace running on same or a
+different CPU core, and effects of CPU sleep state modes and
+RT-patched kernels.
+
+The real value for the application use-case (in question) is that it
+doesn't need to waste so much CPU time spinning to get this accurate
+timestamps for packet arrival.  The application only need timestamps
+on the synchronization traffic ([[https://en.wikipedia.org/wiki/TTEthernet][PCF frames]]).
+The other Time-triggered traffic arrives at a deterministic time
+(according to established time schedule based on PCF).  The
+application prefers to bulk receive the Time-triggered traffic, which
+can be acheived by waking up at the right time (according to
+time-schedule).  Thus, it would be wasteful to busy-poll with the only
+purpose of getting better timing accuracy for the PCF frames.
 
 * AF_XDP documentation
 
