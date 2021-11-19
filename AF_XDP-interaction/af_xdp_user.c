@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
+#define _GNU_SOURCE  /* Needed by sched_getcpu */
+#include <sched.h>
+
 #include <assert.h>
 #include <errno.h>
 #include <getopt.h>
@@ -12,7 +15,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <sched.h>
+
 
 #include <sys/resource.h>
 
@@ -490,9 +493,12 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 	__u64 diff;
 	int err;
 
-	static boot first = true;
-	static int max;
-	static int min;
+	/* Quick stats */
+	static bool first = true;
+	static unsigned int max = 0;
+	static unsigned int min = -1;
+	static double tot = 0;
+	static __u64 cnt = 0;
 
 	/* API doesn't involve allocations to access BTF struct member */
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
@@ -507,15 +513,26 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 	time_now = gettime();
 	diff = time_now - rx_ktime;
 
+	/* Quick stats, exclude first measurement */
+	if (!first) {
+		min = (min < diff) ? min : diff;
+		max = (max > diff) ? max : diff;
+		cnt++;
+		tot += diff;
+	}
+	first = false;
+
 	cpu_running = sched_getcpu();
 	XSK_BTF_READ_INTO(xdp_rx_cpu,  &meta->xdp_rx_cpu, meta->xbi, pkt);
 
 	if (debug_meta)
 		printf("Q[%u] CPU[rx:%d/run:%d]:%s"
-		       " meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       " meta-time rx_ktime:%llu time_now:%llu diff:%llu ns"
+		       "(avg:%.0f min:%u max:%u )\n",
 		       qid, xdp_rx_cpu, cpu_running,
 		       (xdp_rx_cpu == cpu_running) ? "same" : "remote",
-		       rx_ktime, time_now, diff);
+		       rx_ktime, time_now, diff,
+		       tot / cnt, min , max);
 
 	return 0;
 }
