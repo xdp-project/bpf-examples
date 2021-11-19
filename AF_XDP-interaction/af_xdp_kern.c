@@ -46,6 +46,7 @@ struct xdp_hints_mark {
 
 struct xdp_hints_rx_time {
 	__u64 rx_ktime;
+	__u32 xdp_rx_cpu;
 	__u32 btf_id;
 } __attribute__((aligned(4))) __attribute__((packed));
 
@@ -74,6 +75,7 @@ int meta_add_rx_time(struct xdp_md *ctx)
 		return -2;
 
 	meta->rx_ktime = bpf_ktime_get_ns();
+	meta->xdp_rx_cpu = bpf_get_smp_processor_id();
 	/* Userspace can identify struct used by BTF id */
 	meta->btf_id = bpf_core_type_id_local(struct xdp_hints_rx_time);
 

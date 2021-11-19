@@ -97,6 +97,7 @@ struct xdp_hints_rx_time {
 	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
 	struct xsk_btf_info *xbi;
 	struct xsk_btf_member rx_ktime;
+	struct xsk_btf_member xdp_rx_cpu;
 } xdp_hints_rx_time = { 0 };
 
 /* This struct BTF mirrors kernel-side struct xdp_hints_mark */
@@ -143,6 +144,9 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 		/* Lookup info on required member "rx_ktime" */
 		if (!xsk_btf__field_member("rx_ktime", xbi,
 					   &xdp_hints_rx_time.rx_ktime))
+			return -EBADSLT;
+		if (!xsk_btf__field_member("xdp_rx_cpu", xbi,
+					   &xdp_hints_rx_time.xdp_rx_cpu))
 			return -EBADSLT;
 		xdp_hints_rx_time.btf_type_id = xsk_btf__btf_type_id(xbi);
 		xdp_hints_rx_time.xbi = xbi;
@@ -479,6 +483,8 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 				__u32 qid)
 {
 	__u64 time_now; // = gettime();
+	__u32 xdp_rx_cpu = 0xffff;
+	__u32 cpu_running;
 	__u64 *rx_ktime_ptr; /* Points directly to member memory */
 	__u64 rx_ktime;
 	__u64 diff;
@@ -497,9 +503,15 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 	time_now = gettime();
 	diff = time_now - rx_ktime;
 
+	cpu_running = sched_getcpu();
+	XSK_BTF_READ_INTO(xdp_rx_cpu,  &meta->xdp_rx_cpu, meta->xbi, pkt);
+
 	if (debug_meta)
-		printf("Q[%u] meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-		       qid, rx_ktime, time_now, diff);
+		printf("Q[%u] CPU[rx:%d/run:%d]:%s"
+		       " meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
+		       qid, xdp_rx_cpu, cpu_running,
+		       (xdp_rx_cpu == cpu_running) ? "same" : "remote",
+		       rx_ktime, time_now, diff);
 
 	return 0;
 }
