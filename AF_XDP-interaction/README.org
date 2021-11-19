@@ -93,6 +93,8 @@ kernels.
 |----------+--------+--------+----------------+----------+-------------+--------|
 | conf upd |        |        |                |          | no C-states | *B*    |
 |----------+--------+--------+----------------+----------+-------------+--------|
+| igc      | spin   | same   | 1402 ns        | 805 ns   | 2867 ns     | B      |
+| igc      | spin   | remote | 1056 ns        | 419 ns   | 2798 ns     | B      |
 | igc      | wakeup | same   | 3177 ns        | 2210 ns  | 9136 ns     | B      |
 | igc      | wakeup | remote | 4095 ns        | 3029 ns  | 10595 ns    | B      |
 |          |        |        |                |          |             |        |
@@ -105,11 +107,11 @@ doesn't use C-states. (Side-note: used tool =tuned-adm profile
 latency-performance= thus other tunings might also have happened)
 
 Systems table:
-| Name | CPU               | Kernel          | Kernel options | cpu_dma_latency      |
-|------+-------------------+-----------------+----------------+----------------------|
-| A    | E5-1650 v4 3.6GHz | 5.15.0-net-next | PREEMPT        | 2 ms (2000000000 ns) |
-| B    | E5-1650 v4 3.6GHz | 5.15.0-net-next | PREEMPT        | 2 ns                 |
-|      |                   |                 |                |                      |
+| Name | CPU @ GHz            | Kernel          | Kernel options | cpu_dma_latency      |
+|------+----------------------+-----------------+----------------+----------------------|
+| A    | E5-1650 v4 @ 3.60GHz | 5.15.0-net-next | PREEMPT        | 2 ms (2000000000 ns) |
+| B    | E5-1650 v4 @ 3.60GHz | 5.15.0-net-next | PREEMPT        | 2 ns                 |
+|      |                      |                 |                |                      |
 
 ** C-states wakeup time
 
