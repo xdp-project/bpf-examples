@@ -490,6 +490,10 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 	__u64 diff;
 	int err;
 
+	static boot first = true;
+	static int max;
+	static int min;
+
 	/* API doesn't involve allocations to access BTF struct member */
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
 			    &meta->rx_ktime, meta->xbi, pkt);

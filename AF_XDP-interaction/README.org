@@ -65,13 +65,19 @@ or using the spin-mode, and effects of userspace running on same or a
 different CPU core, and effects of CPU sleep state modes and
 RT-patched kernels.
 
-| Driver | Test   | time-delay       | core   | CPU/system     | kernel          |
-|--------+--------+------------------+--------+----------------+-----------------|
-| igc    | wakeup | 50652 ns         | remote | E5-1650 3.6GHz | 5.15.0-net-next |
-| igc    | wakeup | 22053 ns         | same   | E5-1650 3.6GHz | 5.15.0-net-next |
-| igc    | spin   | 2990 ns          | remote | E5-1650 3.6GHz | 5.15.0-net-next |
-| igc    | spin   | (jitter) 1582 ns | remote | E5-1650 3.6GHz | 5.15.0-net-next |
-|        |        |                  |        |                |                 |
+| Driver | Test   | core   | time-delay | min |   | System    |
+|--------+--------+--------+------------+-----+---+-----------|
+| igc    | wakeup | same   | 22053 ns   |     |   | broadwell |
+| igc    | wakeup | remote | 50652 ns   |     |   | broadwell |
+| igc    | spin   | same   | 1582 ns    |     |   | broadwell |
+| igc    | spin   | remote | 2990 ns    |     |   | broadwell |
+|        |        |        |            |     |   |           |
+
+Systems table
+| Name      | CPU               | Kernel          | Kernel options |
+|-----------+-------------------+-----------------+----------------|
+| broadwell | E5-1650 v4 3.6GHz | 5.15.0-net-next | PREEMPT        |
+|           |                   |                 |                |
 
 The real value for the application use-case (in question) is that it
 doesn't need to waste so much CPU time spinning to get this accurate
