@@ -29,7 +29,7 @@ start_mpstat() {
     # $2 save path
 
     echo "${MACHINE_NAMES[$1]}: Starting mpstat..."
-    ssh ${MACHINE_NAMES[$1]} "mkdir -p $2; mpstat -P ALL -o JSON 1 > ${2}/${1}_mpstat.json" 2> /dev/null &
+    ssh ${MACHINE_NAMES[$1]} "mkdir -p $2; TZ=UTC mpstat -P ALL -o JSON 1 > ${2}/${1}_mpstat.json" 2> /dev/null &
     sleep 1
 }
 
@@ -91,7 +91,7 @@ start_kpping() {
     echo "${M2}: Setting up Kathie's pping on ${IFACE}..."
 
     local CMD="mkdir -p $1; "
-    CMD+="echo '$M2_PASSWORD' | sudo -Skb ./pping/pping -i $IFACE $KPPING_FLAGS > ${1}/pping.out 2> ${1}/pping.err"
+    CMD+="echo '$M2_PASSWORD' | sudo -Skb TZ=UTC ./pping/pping -i $IFACE $KPPING_FLAGS > ${1}/pping.out 2> ${1}/pping.err"
     ssh $M2 "$CMD"
     sleep 2 # Give pping some time to set up
 }
@@ -103,7 +103,7 @@ start_epping() {
     echo "${M2}: Settig up eBPF pping on ${IFACE}..."
 
     local CMD="mkdir -p $1; cd bpf-examples/pping; "
-    CMD+="echo '$M2_PASSWORD' | sudo -Skb ./pping -i $IFACE $EPPING_FLAGS > ../../${1}/pping.out 2> ../../${1}/pping.err"
+    CMD+="echo '$M2_PASSWORD' | sudo -Skb TZ=UTC ./pping -i $IFACE $EPPING_FLAGS > ../../${1}/pping.out 2> ../../${1}/pping.err"
     ssh $M2 "$CMD"
     sleep 2 # Give pping some time to set up
 }
