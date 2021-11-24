@@ -84,20 +84,20 @@ using the spin-mode, and effects of userspace running on same or a
 different CPU core, and the CPU sleep state modes and RT-patched
 kernels.
 
-| Driver   | Test   | core   | time-delay avg | min      | max         | System |
-|----------+--------+--------+----------------+----------+-------------+--------|
-| igc      | spin   | same   | 1575 ns        | 849 ns   | 2123 ns     | A      |
-| igc      | spin   | remote | 2639 ns        | 2337 ns  | 4019 ns     | A      |
-| igc      | wakeup | same   | 22881 ns       | 21190 ns | 30619 ns    | A      |
-| igc      | wakeup | remote | 50353 ns       | 47420 ns | 56156 ns    | A      |
-|----------+--------+--------+----------------+----------+-------------+--------|
-| conf upd |        |        |                |          | no C-states | *B*    |
-|----------+--------+--------+----------------+----------+-------------+--------|
-| igc      | spin   | same   | 1402 ns        | 805 ns   | 2867 ns     | B      |
-| igc      | spin   | remote | 1056 ns        | 419 ns   | 2798 ns     | B      |
-| igc      | wakeup | same   | 3177 ns        | 2210 ns  | 9136 ns     | B      |
-| igc      | wakeup | remote | 4095 ns        | 3029 ns  | 10595 ns    | B      |
-|----------+--------+--------+----------------+----------+-------------+--------|
+| Driver/HW | Test   | core   | time-delay avg | min      | max         | System |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+| igc/i225  | spin   | same   | 1575 ns        | 849 ns   | 2123 ns     | A      |
+| igc/i225  | spin   | remote | 2639 ns        | 2337 ns  | 4019 ns     | A      |
+| igc/i225  | wakeup | same   | 22881 ns       | 21190 ns | 30619 ns    | A      |
+| igc/i225  | wakeup | remote | 50353 ns       | 47420 ns | 56156 ns    | A      |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+| conf upd  |        |        |                |          | no C-states | *B*    |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+| igc/i225  | spin   | same   | 1402 ns        | 805 ns   | 2867 ns     | B      |
+| igc/i225  | spin   | remote | 1056 ns        | 419 ns   | 2798 ns     | B      |
+| igc/i225  | wakeup | same   | 3177 ns        | 2210 ns  | 9136 ns     | B      |
+| igc/i225  | wakeup | remote | 4095 ns        | 3029 ns  | 10595 ns    | B      |
+|-----------+--------+--------+----------------+----------+-------------+--------|
 
 The latency is affected a lot by CPUs power-saving states, which can
 be limited globally by changing =/dev/cpu_dma_latency=. (See section
@@ -109,12 +109,12 @@ latency-performance= thus other tunings might also have happened)
 System *RT1* have a Real-Time patched kernel, and =cpu_dma_latency=
 have no effect (likely due to kernel config).
 
-| Driver   | Test   | core   | time-delay avg | min     | max     | System |
-|----------+--------+--------+----------------+---------+---------+--------|
-| igb/i210 | spin   | same   | 2577 ns        | 2129 ns | 4155 ns | RT1    |
-| igb/i210 | spin   | remote | 788 ns         | 551 ns  | 1473 ns | RT1    |
-| igb/i210 | wakeup | same   | 6209 ns        | 5644 ns | 8178 ns | RT1    |
-| igb/i210 | wakeup | remote | 5239 ns        | 4463 ns | 7390 ns | RT1    |
+| Driver/HW | Test   | core   | time-delay avg | min     | max     | System |
+|-----------+--------+--------+----------------+---------+---------+--------|
+| igb/i210  | spin   | same   | 2577 ns        | 2129 ns | 4155 ns | RT1    |
+| igb/i210  | spin   | remote | 788 ns         | 551 ns  | 1473 ns | RT1    |
+| igb/i210  | wakeup | same   | 6209 ns        | 5644 ns | 8178 ns | RT1    |
+| igb/i210  | wakeup | remote | 5239 ns        | 4463 ns | 7390 ns | RT1    |
 
 
 Systems table:
