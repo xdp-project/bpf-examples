@@ -53,6 +53,105 @@ size (and offsets) of all data-structures.  Thus, we can deduce the
 size of the metadata area, when knowing the =bpf_id=, which by placing
 it as the last member is in a known location.
 
+* Why is XDP RX-timestamp essential for AF_XDP
+
+In this example, the kernel-side XDP BPF-prog (file:af_xdp_kern.c)
+take a timestamp (=bpf_ktime_get_ns()=) and stores it in the metadata
+as an XDP-hint.  This make it possible to measure the time-delay from
+XDP softirq execution and when AF_XDP gets the packet out of its
+RX-ring. (See Interesting data-points below)
+
+The real value for the application use-case (in question) is that it
+doesn't need to waste so much CPU time spinning to get this accurate
+timestamps for packet arrival.  The application only need timestamps
+on the synchronization traffic ([[https://en.wikipedia.org/wiki/TTEthernet][PCF frames]]).
+The other Time-triggered traffic arrives at a deterministic time
+(according to established time schedule based on PCF).  The
+application prefers to bulk receive the Time-triggered traffic, which
+can be acheived by waking up at the right time (according to
+time-schedule).  Thus, it would be wasteful to busy-poll with the only
+purpose of getting better timing accuracy for the PCF frames.
+
+** Interesting data-points
+
+The time-delay from XDP softirq execution and to when AF_XDP gets the
+packet, give us some interesting data-points, and tell us about system
+latency and sleep behavior.
+
+The data-points are interesting, as there is (obviously) big
+difference between waiting for a wakeup (via =poll= or =select=) or
+using the spin-mode, and effects of userspace running on same or a
+different CPU core, and the CPU sleep state modes and RT-patched
+kernels.
+
+| Driver/HW | Test   | core   | time-delay avg | min      | max         | System |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+| igc/i225  | spin   | same   | 1575 ns        | 849 ns   | 2123 ns     | A      |
+| igc/i225  | spin   | remote | 2639 ns        | 2337 ns  | 4019 ns     | A      |
+| igc/i225  | wakeup | same   | 22881 ns       | 21190 ns | 30619 ns    | A      |
+| igc/i225  | wakeup | remote | 50353 ns       | 47420 ns | 56156 ns    | A      |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+| conf upd  |        |        |                |          | no C-states | *B*    |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+| igc/i225  | spin   | same   | 1402 ns        | 805 ns   | 2867 ns     | B      |
+| igc/i225  | spin   | remote | 1056 ns        | 419 ns   | 2798 ns     | B      |
+| igc/i225  | wakeup | same   | 3177 ns        | 2210 ns  | 9136 ns     | B      |
+| igc/i225  | wakeup | remote | 4095 ns        | 3029 ns  | 10595 ns    | B      |
+|-----------+--------+--------+----------------+----------+-------------+--------|
+
+The latency is affected a lot by CPUs power-saving states, which can
+be limited globally by changing =/dev/cpu_dma_latency=. (See section
+below). The main difference between system *A* and *B* is that
+'cpu_dma_latency' have been changed to such a low value that CPU
+doesn't use C-states. (Side-note: used tool =tuned-adm profile
+latency-performance= thus other tunings might also have happened)
+
+System *RT1* have a Real-Time patched kernel, and =cpu_dma_latency=
+have no effect (likely due to kernel config).
+
+| Driver/HW | Test   | core   | time-delay avg | min     | max     | System |
+|-----------+--------+--------+----------------+---------+---------+--------|
+| igb/i210  | spin   | same   | 2577 ns        | 2129 ns | 4155 ns | RT1    |
+| igb/i210  | spin   | remote | 788 ns         | 551 ns  | 1473 ns | RT1    |
+| igb/i210  | wakeup | same   | 6209 ns        | 5644 ns | 8178 ns | RT1    |
+| igb/i210  | wakeup | remote | 5239 ns        | 4463 ns | 7390 ns | RT1    |
+
+
+Systems table:
+| Name | CPU @ GHz            | Kernel          | Kernel options | cpu_dma_latency      |
+|------+----------------------+-----------------+----------------+----------------------|
+| A    | E5-1650 v4 @ 3.60GHz | 5.15.0-net-next | PREEMPT        | 2 ms (2000000000 ns) |
+| B    | E5-1650 v4 @ 3.60GHz | 5.15.0-net-next | PREEMPT        | 2 ns                 |
+| RT1  | i5-6500TE @ 2.30GHz  | 5.13.0-rt1+     | PREEMPT_RT     | 2ms, but no-effect   |
+|      |                      |                 |                |                      |
+
+** C-states wakeup time
+
+It is possible to view the systems time (in usec) to wakeup from a
+certain C-state, via below =grep= command:
+
+#+BEGIN_SRC sh
+# grep -H . /sys/devices/system/cpu/cpu0/cpuidle/*/latency
+/sys/devices/system/cpu/cpu0/cpuidle/state0/latency:0
+/sys/devices/system/cpu/cpu0/cpuidle/state1/latency:2
+/sys/devices/system/cpu/cpu0/cpuidle/state2/latency:10
+/sys/devices/system/cpu/cpu0/cpuidle/state3/latency:40
+/sys/devices/system/cpu/cpu0/cpuidle/state4/latency:133
+#+END_SRC
+
+** Meaning of cpu_dma_latency
+
+The global CPU latency limit is controlled via the file
+=/dev/cpu_dma_latency=, which contains a binary value (interpreted as
+a signed 32-bit integer).  Reading contents can be annoying from the
+command line, so lets provide a practical example:
+
+Reading =/dev/cpu_dma_latency=:
+#+begin_src sh
+$ sudo hexdump --format '"%d\n"' /dev/cpu_dma_latency
+2000000000
+#+end_src
+
 
 * AF_XDP documentation
 

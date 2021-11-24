@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
+#define _GNU_SOURCE  /* Needed by sched_getcpu */
+#include <sched.h>
+
 #include <assert.h>
 #include <errno.h>
 #include <getopt.h>
@@ -12,7 +15,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <sched.h>
+
 
 #include <sys/resource.h>
 
@@ -97,6 +100,7 @@ struct xdp_hints_rx_time {
 	__u32 btf_type_id; /* cached xsk_btf__btf_type_id(xbi) */
 	struct xsk_btf_info *xbi;
 	struct xsk_btf_member rx_ktime;
+	struct xsk_btf_member xdp_rx_cpu;
 } xdp_hints_rx_time = { 0 };
 
 /* This struct BTF mirrors kernel-side struct xdp_hints_mark */
@@ -143,6 +147,9 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 		/* Lookup info on required member "rx_ktime" */
 		if (!xsk_btf__field_member("rx_ktime", xbi,
 					   &xdp_hints_rx_time.rx_ktime))
+			return -EBADSLT;
+		if (!xsk_btf__field_member("xdp_rx_cpu", xbi,
+					   &xdp_hints_rx_time.xdp_rx_cpu))
 			return -EBADSLT;
 		xdp_hints_rx_time.btf_type_id = xsk_btf__btf_type_id(xbi);
 		xdp_hints_rx_time.xbi = xbi;
@@ -479,10 +486,19 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 				__u32 qid)
 {
 	__u64 time_now; // = gettime();
+	__u32 xdp_rx_cpu = 0xffff;
+	__u32 cpu_running;
 	__u64 *rx_ktime_ptr; /* Points directly to member memory */
 	__u64 rx_ktime;
 	__u64 diff;
 	int err;
+
+	/* Quick stats */
+	static bool first = true;
+	static unsigned int max = 0;
+	static unsigned int min = -1;
+	static double tot = 0;
+	static __u64 cnt = 0;
 
 	/* API doesn't involve allocations to access BTF struct member */
 	err = xsk_btf__read((void **)&rx_ktime_ptr, sizeof(*rx_ktime_ptr),
@@ -497,9 +513,26 @@ static int print_meta_info_time(uint8_t *pkt, struct xdp_hints_rx_time *meta,
 	time_now = gettime();
 	diff = time_now - rx_ktime;
 
+	/* Quick stats, exclude first measurement */
+	if (!first) {
+		min = (min < diff) ? min : diff;
+		max = (max > diff) ? max : diff;
+		cnt++;
+		tot += diff;
+	}
+	first = false;
+
+	cpu_running = sched_getcpu();
+	XSK_BTF_READ_INTO(xdp_rx_cpu,  &meta->xdp_rx_cpu, meta->xbi, pkt);
+
 	if (debug_meta)
-		printf("Q[%u] meta-time rx_ktime:%llu time_now:%llu diff:%llu ns\n",
-		       qid, rx_ktime, time_now, diff);
+		printf("Q[%u] CPU[rx:%d/run:%d]:%s"
+		       " meta-time rx_ktime:%llu time_now:%llu diff:%llu ns"
+		       "(avg:%.0f min:%u max:%u )\n",
+		       qid, xdp_rx_cpu, cpu_running,
+		       (xdp_rx_cpu == cpu_running) ? "same" : "remote",
+		       rx_ktime, time_now, diff,
+		       tot / cnt, min , max);
 
 	return 0;
 }
@@ -733,6 +766,9 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 
 	/* Do we need to wake up the kernel for transmission */
 	complete_tx(xsk);
+
+	if (verbose && rcvd > 1)
+		printf("%s(): RX batch %d packets (i:%d)\n", __func__, rcvd, i);
   }
 
 static void rx_and_process(struct config *cfg,
