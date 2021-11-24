@@ -97,7 +97,7 @@ kernels.
 | igc      | spin   | remote | 1056 ns        | 419 ns   | 2798 ns     | B      |
 | igc      | wakeup | same   | 3177 ns        | 2210 ns  | 9136 ns     | B      |
 | igc      | wakeup | remote | 4095 ns        | 3029 ns  | 10595 ns    | B      |
-|          |        |        |                |          |             |        |
+|----------+--------+--------+----------------+----------+-------------+--------|
 
 The latency is affected a lot by CPUs power-saving states, which can
 be limited globally by changing =/dev/cpu_dma_latency=. (See section
@@ -106,11 +106,23 @@ below). The main difference between system *A* and *B* is that
 doesn't use C-states. (Side-note: used tool =tuned-adm profile
 latency-performance= thus other tunings might also have happened)
 
+System *RT1* have a Real-Time patched kernel, and =cpu_dma_latency=
+have no effect (likely due to kernel config).
+
+| Driver   | Test   | core   | time-delay avg | min     | max     | System |
+|----------+--------+--------+----------------+---------+---------+--------|
+| igb/i210 | spin   | same   | 2577 ns        | 2129 ns | 4155 ns | RT1    |
+| igb/i210 | spin   | remote | 788 ns         | 551 ns  | 1473 ns | RT1    |
+| igb/i210 | wakeup | same   | 6209 ns        | 5644 ns | 8178 ns | RT1    |
+| igb/i210 | wakeup | remote | 5239 ns        | 4463 ns | 7390 ns | RT1    |
+
+
 Systems table:
 | Name | CPU @ GHz            | Kernel          | Kernel options | cpu_dma_latency      |
 |------+----------------------+-----------------+----------------+----------------------|
 | A    | E5-1650 v4 @ 3.60GHz | 5.15.0-net-next | PREEMPT        | 2 ms (2000000000 ns) |
 | B    | E5-1650 v4 @ 3.60GHz | 5.15.0-net-next | PREEMPT        | 2 ns                 |
+| RT1  | i5-6500TE @ 2.30GHz  | 5.13.0-rt1+     | PREEMPT_RT     | 2ms, but no-effect   |
 |      |                      |                 |                |                      |
 
 ** C-states wakeup time
