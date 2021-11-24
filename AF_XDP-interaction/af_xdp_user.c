@@ -766,6 +766,9 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 
 	/* Do we need to wake up the kernel for transmission */
 	complete_tx(xsk);
+
+	if (verbose && rcvd > 1)
+		printf("%s(): RX batch %d packets (i:%d)\n", __func__, rcvd, i);
   }
 
 static void rx_and_process(struct config *cfg,
