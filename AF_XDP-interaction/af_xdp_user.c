@@ -806,6 +806,21 @@ static void rx_and_process(struct config *cfg,
 	}
 }
 
+/* Use-case: Accurate cyclic Tx and lazy RX-processing
+ *
+ * This processing loop is simulating a Time-Triggered schedule, where
+ * transmitting packets within a small time-window is the most
+ * important task.  Picking up frames in RX-queue is less time
+ * critical, as the PCF synchronization packets will have been
+ * timestamped (rx_ktime) by XDP before they got enqueued.
+ */
+static void tx_and_rx_batch_process(struct config *cfg,
+				    struct xsk_container *xsks)
+{
+
+
+}
+
 static double calc_period(struct stats_record *r, struct stats_record *p)
 {
 	double period_ = 0;
