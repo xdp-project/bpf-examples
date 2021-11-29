@@ -109,7 +109,7 @@ def __count_pping_messages(filename, parsing_func, keys, date=None,
     return count
 
 
-def parse_epping_message(line, date, src_ip="172.16.24.31"):
+def parse_epping_message(line, date, src_ip=None):
     words = line.split()
     if len(words) < 7:
         return None, None
@@ -119,13 +119,13 @@ def parse_epping_message(line, date, src_ip="172.16.24.31"):
     increments = ["all_events"]
     if words[2] == "ms":
         increments.append("rtt_events")
-        if words[-1].split(":")[0] == src_ip:
+        if src_ip is not None and words[-1].split(":")[0] == src_ip:
             increments.append("filtered_rtt_events")
 
     return t, increments
 
 
-def parse_kpping_message(line, date, src_ip="172.16.24.31"):
+def parse_kpping_message(line, date, src_ip=None):
     words = line.split()
     if len(words) != 4:
         return None, None
@@ -133,13 +133,13 @@ def parse_kpping_message(line, date, src_ip="172.16.24.31"):
     t = parse_timestamp(date, words[0])
 
     increments = ["rtt_events"]
-    if words[-1].split(":")[0] == src_ip:
+    if src_ip is not None and words[-1].split(":")[0] == src_ip:
         increments.append("filtered_rtt_events")
 
     return t, increments
 
 
-def count_epping_messages(root_folder):
+def count_epping_messages(root_folder, src_ip=None):
     """
     Count nr of rtt-events per second from the standard output of eBPF pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
@@ -150,14 +150,15 @@ def count_epping_messages(root_folder):
     test_interval = get_test_interval(sub_path)
     date = str(get_test_interval(sub_path, skip_omitted=False)[0])[:10]
     file = list(sub_path.glob("*M2/pping.out*"))[0]
+    keys = ["all_events", "rtt_events"]
+    if src_ip is not None:
+        keys.append("filtered_rtt_events")
 
-    return __count_pping_messages(file, parse_epping_message,
-                                  ("all_events", "rtt_events",
-                                   "filtered_rtt_events"), date=date,
-                                  filter_timerange=test_interval)
+    return __count_pping_messages(file, parse_epping_message, keys, date=date,
+                                  filter_timerange=test_interval, src_ip=src_ip)
 
 
-def count_kpping_messages(root_folder):
+def count_kpping_messages(root_folder, src_ip=None):
     """
     Count nr of rtt-events per second from the standard output of Kathie's pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
@@ -167,10 +168,12 @@ def count_kpping_messages(root_folder):
     test_interval = get_test_interval(sub_path)
     date = str(get_test_interval(sub_path, skip_omitted=False)[0])[:10]
     file = list(sub_path.glob("*M2/pping.out*"))[0]
+    keys = ["rtt_events"]
+    if src_ip is not None:
+        keys.append("filtered_rtt_events")
 
-    return __count_pping_messages(file, parse_kpping_message,
-                                  ("rtt_events", "filtered_rtt_events"),
-                                  date=date, filter_timerange=test_interval)
+    return __count_pping_messages(file, parse_kpping_message, keys, date=date,
+                                  filter_timerange=test_interval, src_ip=src_ip)
 
 
 def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=True):
@@ -178,10 +181,12 @@ def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=Tru
         axes = plt.gca()
 
     axes.plot(kpping_data["ts"].values, kpping_data["rtt_events"].values, c="C1", ls="-", label="PPing")
-    axes.plot(kpping_data["ts"].values, kpping_data["filtered_rtt_events"].values, c="C1", ls="--", label="PPing filtered")
+    if "filtered_rtt_events" in kpping_data.columns:
+        axes.plot(kpping_data["ts"].values, kpping_data["filtered_rtt_events"].values, c="C1", ls="--", label="PPing filtered")
 
     axes.plot(epping_data["ts"].values, epping_data["rtt_events"].values, c="C2", ls="-", label="ePPing")
-    axes.plot(epping_data["ts"].values, epping_data["filtered_rtt_events"].values, c="C2", ls="--", label="ePPing filtered")
+    if "filtered_rtt_events" in epping_data.columns:
+        axes.plot(epping_data["ts"].values, epping_data["filtered_rtt_events"].values, c="C2", ls="--", label="ePPing filtered")
 
     axes.set_ylim(0)
     axes.set_xlabel("Time (s)")
@@ -196,14 +201,15 @@ def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=Tru
 def main():
     parser = argparse.ArgumentParser("Plot graphs comparing the performance overhead of pping versions")
     parser.add_argument("-i", "--input", type=str, help="root folder of the results from run_tests.sh", required=True)
-    parser.add_argument("-o", "--output", type=str, help="image output file")
+    parser.add_argument("-o", "--output", type=str, help="image output file", required=False)
+    parser.add_argument("-s", "--source-ip", type=str, help="src-ip used to count filtered report", required=False, default=None)
     args = parser.parse_args()
 
     cpu_data = load_cpu_data(args.input)
     iperf_data = load_iperf_data(args.input)
 
-    epping_messages = count_epping_messages(args.input)
-    kpping_messages = count_kpping_messages(args.input)
+    epping_messages = count_epping_messages(args.input, src_ip=args.source_ip)
+    kpping_messages = count_kpping_messages(args.input, src_ip=args.source_ip)
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 

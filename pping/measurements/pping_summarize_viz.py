@@ -63,7 +63,7 @@ def read_all_iperf_data(root_folder):
     return all_data
 
 
-def read_all_rtt_reports(root_folder):
+def read_all_rtt_reports(root_folder, **kwargs):
     all_data = dict()
     path = root_folder
     for run in os.listdir(root_folder):
@@ -77,10 +77,10 @@ def read_all_rtt_reports(root_folder):
                         all_data[n_streams] = {"PPing": list(), "ePPing": list()}
 
                     all_data[n_streams]["PPing"].append(
-                        pping_comp.count_kpping_messages(path))
+                        pping_comp.count_kpping_messages(path, **kwargs))
 
                     all_data[n_streams]["ePPing"].append(
-                        pping_comp.count_epping_messages(path))
+                        pping_comp.count_epping_messages(path, **kwargs))
 
     for stream_data in all_data.values():
         for setup in stream_data.keys():
@@ -131,7 +131,19 @@ def plot_summarized_network(stream_data):
 
 
 def plot_summarized_reports(stream_data):
-    fig, axes = plt.subplots(2, 2, figsize=(16, 9), constrained_layout=True)
+    if "filtered_rtt_events" in stream_data["PPing"]:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 9), constrained_layout=True)
+
+        axes[0, 1].plot([], [])
+        complot.plot_pergroup_cdf(stream_data, "filtered_rtt_events",
+                                  axes=axes[0, 1], print_stats=True)
+        axes[1, 1].plot([], [])
+        complot.plot_pergroup_histogram(stream_data, "filtered_rtt_events",
+                                        axes=axes[1, 1], print_stats=False)
+        axes[1, 1].set_xlabel("Filtered reports / s")
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(8, 9), squeeze=False,
+                                 constrained_layout=True)
 
     axes[0, 0].plot([], [])  # Dummy - use up one color cycle
     complot.plot_pergroup_cdf(stream_data, "rtt_events", axes=axes[0, 0],
@@ -140,14 +152,6 @@ def plot_summarized_reports(stream_data):
     complot.plot_pergroup_histogram(stream_data, "rtt_events", axes=axes[1, 0],
                                     print_stats=False)
     axes[1, 0].set_xlabel("Reports / s")
-
-    axes[0, 1].plot([], [])
-    complot.plot_pergroup_cdf(stream_data, "filtered_rtt_events",
-                              axes=axes[0, 1], print_stats=True)
-    axes[1, 1].plot([], [])
-    complot.plot_pergroup_histogram(stream_data, "filtered_rtt_events",
-                                    axes=axes[1, 1], print_stats=False)
-    axes[1, 1].set_xlabel("Filtered reports / s")
 
     fig.canvas.draw()
     fig.canvas.draw()
@@ -158,30 +162,34 @@ def plot_summarized_reports(stream_data):
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize statistics from several runs")
-    parser.add_argument("root_path", type=str, help="root folder")
+    parser.add_argument("-i", "--input", type=str, help="root folder",
+                        required=True)
+    parser.add_argument("-s", "--source-ip", type=str,
+                        help="src-ip used to count filtered reports",
+                        required=False, default=None)
     parser.add_argument("-f", "--fileformat", type=str,
                         help="File format for images",
                         required=False, default="png")
     args = parser.parse_args()
 
-    cpu_data = read_all_cpu_data(args.root_path)
+    cpu_data = read_all_cpu_data(args.input)
     for n_streams, data in cpu_data.items():
         fig, axes = plot_summarized_cpu_util(data)
-        fig.savefig(os.path.join(args.root_path,
+        fig.savefig(os.path.join(args.input,
                                  "cpu_" + n_streams + "." + args.fileformat),
                     bbox_inches="tight")
 
-    iperf_data = read_all_iperf_data(args.root_path)
+    iperf_data = read_all_iperf_data(args.input)
     for n_streams, data in iperf_data.items():
         fig, axes = plot_summarized_network(data)
-        fig.savefig(os.path.join(args.root_path,
+        fig.savefig(os.path.join(args.input,
                                  "network_" + n_streams + "." + args.fileformat),
                     bbox_inches="tight")
 
-    report_data = read_all_rtt_reports(args.root_path)
+    report_data = read_all_rtt_reports(args.input, src_ip=args.source_ip)
     for n_streams, data in report_data.items():
         fig, axes = plot_summarized_reports(data)
-        fig.savefig(os.path.join(args.root_path,
+        fig.savefig(os.path.join(args.input,
                                  "reports_" + n_streams + "." + args.fileformat),
                     bbox_inches="tight")
 

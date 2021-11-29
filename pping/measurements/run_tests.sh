@@ -163,4 +163,4 @@ run_tests $SPATH $2
 stop_pping
 copy_back_results $SPATH
 
-./plot_results.sh $1
+./plot_results.sh $1 $IP_TARGET

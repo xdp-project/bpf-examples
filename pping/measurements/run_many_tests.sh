@@ -1,7 +1,10 @@
 #!/bin/bash
 
 N_FLOWS=(1 10 100 500)
+IP_TARGET=${IP_TARGET:-"172.16.24.31"}
 INTERTEST_INTERVAL=${INTERTEST_INTERVAL:-10} #sec
+export IP_TARGET
+export INTERTEST_INTERVAL
 
 # $1 = path to save results in
 # $2 = number of times to repeat the tests
@@ -26,5 +29,5 @@ for (( i = 1; i <= $2; i++ )); do
 done
 
 echo -e "\nPlotting summarized statistics for all runs..."
-./pping_summarize_viz.py $1
+./pping_summarize_viz.py -i $1 -s $IP_TARGET
 echo "Done!"
