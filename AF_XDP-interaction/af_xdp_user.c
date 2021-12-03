@@ -566,7 +566,7 @@ static void gen_ip_hdr(struct iphdr *ip_hdr)
 	ip_hdr->check = ip_fast_csum((const void *)ip_hdr, ip_hdr->ihl);
 }
 
-static uint32_t opt_pkt_fill_pattern = 0x2a2b2c2d;
+static uint32_t opt_pkt_fill_pattern = 0x41424344;
 
 static void gen_udp_hdr(struct udphdr *udp_hdr, struct iphdr *ip_hdr)
 {
@@ -579,6 +579,15 @@ static void gen_udp_hdr(struct udphdr *udp_hdr, struct iphdr *ip_hdr)
 	memset32_htonl(udp_hdr + sizeof(struct udphdr),
 		       opt_pkt_fill_pattern,
 		       UDP_PKT_DATA_SIZE);
+
+	if (0) {
+		uint8_t *p = udp_hdr + sizeof(struct udphdr);
+		int i;
+
+		for (i = 0; i < UDP_PKT_DATA_SIZE; i++) {
+			printf("i[%d] = %c\n", i, p[i]);
+		}
+	}
 
 	/* UDP header checksum */
 	udp_hdr->check = 0;
@@ -757,6 +766,9 @@ static void print_pkt_info(uint8_t *pkt, uint32_t len)
 	}
 }
 
+static void tx_pkt(struct config *cfg,
+		   struct xsk_socket_info *xsk);
+
 static bool process_packet(struct xsk_socket_info *xsk,
 			   uint64_t addr, uint32_t len)
 {
@@ -931,6 +943,7 @@ static void rx_and_process(struct config *cfg,
 			//printf("XXX i[%d] queue:%d xsk_info:%p \n",
 			//	i, xsk_info->queue_id, xsk_info);
 
+			tx_pkt(cfg, xsk_info);
 			handle_receive_packets(xsk_info);
 		}
 	}
@@ -957,7 +970,7 @@ static void tx_pkt(struct config *cfg,
 	struct xsk_umem_info *umem = xsk->umem;
 	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
 	uint8_t *pkt = NULL;
-	uint32_t offset = 256;
+	uint32_t offset = 0; // 256;
 
 	pkt_addr += offset;
 	pr_addr_info(__func__, pkt_addr, umem);
@@ -965,7 +978,22 @@ static void tx_pkt(struct config *cfg,
 	pkt = xsk_umem__get_data(umem->buffer, pkt_addr);
 	gen_base_pkt(pkt);
 
-	mem_free_umem_frame(&umem->mem, pkt_addr);
+	{
+		uint32_t tx_idx = 0;
+		int ret;
+
+		ret = xsk_ring_prod__reserve(&xsk->tx, 1, &tx_idx);
+		if (ret != 1) {
+			/* No more transmit slots, drop the packet */
+			mem_free_umem_frame(&umem->mem, pkt_addr);
+		}
+
+		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = pkt_addr;
+		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->len = 64;
+		xsk_ring_prod__submit(&xsk->tx, 1);
+		xsk->outstanding_tx++;
+	}
+	//complete_tx(xsk);
 }
 
 static double calc_period(struct stats_record *r, struct stats_record *p)
@@ -1253,7 +1281,9 @@ int main(int argc, char **argv)
 			       cfg.sched_prio, cfg.sched_policy);
 	}
 
-	tx_pkt(&cfg, xsks.sockets[0]);
+	//sleep(3);
+	// tx_pkt(&cfg, xsks.sockets[0]);
+
 	/* Receive and count packets than drop them */
 	rx_and_process(&cfg, &xsks);
 
