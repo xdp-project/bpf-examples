@@ -26,9 +26,11 @@
 #include <net/if.h>
 #include <linux/if_link.h>
 #include <linux/if_ether.h>
+#include <netinet/ether.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/icmpv6.h>
+#include <linux/udp.h>
 
 #include <bpf/btf.h> /* provided by libbpf */
 
@@ -39,6 +41,7 @@
 
 #include "lib_xsk_extend.h"
 #include "ethtool_utils.h"
+#include "lib_checksum.h"
 
 #define NUM_FRAMES         4096 /* Frames per queue */
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE /* 4096 */
@@ -490,6 +493,115 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 }
 
 /**
+ * Packet fill helpers
+ */
+static uint8_t base_pkt_data[FRAME_SIZE];
+
+static struct ether_addr opt_tx_smac =
+{{ 0x24, 0x5e, 0xbe, 0x57, 0xf1, 0x64 }};
+static struct ether_addr opt_tx_dmac =
+{{ 0x00, 0x1b, 0x21, 0xbb, 0x9a, 0x82 }};
+
+#define MIN_PKT_SIZE 64
+static uint16_t opt_pkt_size = MIN_PKT_SIZE;
+
+#define PKT_HDR_SIZE (sizeof(struct ethhdr) + sizeof(struct iphdr) + \
+		      sizeof(struct udphdr))
+
+#define ETH_FCS_SIZE 4
+#define PKT_SIZE		(opt_pkt_size - ETH_FCS_SIZE)
+#define IP_PKT_SIZE		(PKT_SIZE - sizeof(struct ethhdr))
+#define UDP_PKT_SIZE		(IP_PKT_SIZE - sizeof(struct iphdr))
+#define UDP_PKT_DATA_SIZE	(UDP_PKT_SIZE - sizeof(struct udphdr))
+
+static void gen_eth_hdr(struct ethhdr *eth_hdr)
+{
+	/* Ethernet header */
+	memcpy(eth_hdr->h_dest  , &opt_tx_dmac, ETH_ALEN);
+	memcpy(eth_hdr->h_source, &opt_tx_smac, ETH_ALEN);
+	eth_hdr->h_proto = htons(ETH_P_IP);
+}
+
+static bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
+{
+	int res;
+
+	res = inet_pton(AF_INET, ip_str, ip_addr);
+	if (res <= 0) {
+		if (res == 0)
+			fprintf(stderr,	"ERROR: IP%s \"%s\" not in presentation format\n",
+				"v4", ip_str);
+		else
+			perror("inet_pton");
+		return false;
+	}
+	return true;
+}
+
+static char *opt_ip_str_src = "192.168.44.2";
+static char *opt_ip_str_dst = "192.168.44.3";
+
+static void gen_ip_hdr(struct iphdr *ip_hdr)
+{
+	uint32_t saddr;
+	uint32_t daddr;
+
+	get_ipv4_u32(opt_ip_str_src, &saddr);
+	get_ipv4_u32(opt_ip_str_dst, &daddr);
+
+	/* IP header */
+	ip_hdr->version = IPVERSION;
+	ip_hdr->ihl = 0x5; /* 20 byte header */
+	ip_hdr->tos = 0x0;
+	ip_hdr->tot_len = htons(IP_PKT_SIZE);
+	ip_hdr->id = 0;
+	ip_hdr->frag_off = 0;
+	ip_hdr->ttl = IPDEFTTL;
+	ip_hdr->protocol = IPPROTO_UDP;
+	ip_hdr->saddr = saddr;
+	ip_hdr->daddr = daddr;
+
+	/* IP header checksum */
+	ip_hdr->check = 0;
+	ip_hdr->check = ip_fast_csum((const void *)ip_hdr, ip_hdr->ihl);
+}
+
+static uint32_t opt_pkt_fill_pattern = 0x2a2b2c2d;
+
+static void gen_udp_hdr(struct udphdr *udp_hdr, struct iphdr *ip_hdr)
+{
+	/* UDP header */
+	udp_hdr->source = htons(0x1000);
+	udp_hdr->dest = htons(0x1000);
+	udp_hdr->len = htons(UDP_PKT_SIZE);
+
+	/* UDP data */
+	memset32_htonl(udp_hdr + sizeof(struct udphdr),
+		       opt_pkt_fill_pattern,
+		       UDP_PKT_DATA_SIZE);
+
+	/* UDP header checksum */
+	udp_hdr->check = 0;
+	udp_hdr->check = udp_csum(ip_hdr->saddr, ip_hdr->daddr, UDP_PKT_SIZE,
+				  IPPROTO_UDP, (__u16 *)udp_hdr);
+}
+
+static void gen_base_pkt(uint8_t *pkt_ptr)
+{
+	struct ethhdr *eth_hdr = (struct ethhdr *)pkt_ptr;
+	struct iphdr *ip_hdr = (struct iphdr *)(pkt_ptr +
+						sizeof(struct ethhdr));
+	struct udphdr *udp_hdr = (struct udphdr *)(pkt_ptr +
+						   sizeof(struct ethhdr) +
+						   sizeof(struct iphdr));
+
+	gen_eth_hdr(eth_hdr);
+	gen_ip_hdr(ip_hdr);
+	gen_udp_hdr(udp_hdr, ip_hdr);
+}
+
+
+/**
  * BTF accessing XDP-hints
  * -----------------------
  * Accessing the XDP-hints via BTF requires setup done earlier.  As our target
@@ -851,6 +963,7 @@ static void tx_pkt(struct config *cfg,
 	pr_addr_info(__func__, pkt_addr, umem);
 
 	pkt = xsk_umem__get_data(umem->buffer, pkt_addr);
+	gen_base_pkt(pkt);
 
 	mem_free_umem_frame(&umem->mem, pkt_addr);
 }
@@ -1090,6 +1203,9 @@ int main(int argc, char **argv)
 			strerror(errno));
 		exit(EXIT_FAILURE);
 	}
+
+	/* Generate packets to TX */
+	gen_base_pkt((uint8_t*)&base_pkt_data);
 
 	/* Open and configure the AF_XDP (xsk) socket(s) */
 	for (i = 0; i < xsks.num; i++) {
