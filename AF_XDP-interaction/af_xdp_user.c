@@ -591,18 +591,9 @@ static void gen_udp_hdr(struct udphdr *udp_hdr, struct iphdr *ip_hdr)
 	udp_hdr->len = htons(UDP_PKT_SIZE);
 
 	/* UDP data */
-	memset32_htonl(udp_hdr + sizeof(struct udphdr),
+	memset32_htonl((void*)udp_hdr + sizeof(struct udphdr),
 		       opt_pkt_fill_pattern,
 		       UDP_PKT_DATA_SIZE);
-
-	if (0) {
-		uint8_t *p = udp_hdr + sizeof(struct udphdr);
-		int i;
-
-		for (i = 0; i < UDP_PKT_DATA_SIZE; i++) {
-			printf("i[%d] = %c\n", i, p[i]);
-		}
-	}
 
 	/* UDP header checksum */
 	udp_hdr->check = 0;
