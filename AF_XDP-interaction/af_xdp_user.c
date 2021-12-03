@@ -166,6 +166,22 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	return 0;
 }
 
+void pr_addr_info(const char *msg, uint64_t pkt_addr, struct xsk_umem_info *umem)
+{
+	uint64_t pkt_nr = pkt_addr / FRAME_SIZE; /* Integer div round off */
+	uint32_t offset = pkt_addr - (pkt_nr * FRAME_SIZE); /* what got rounded off */
+	uint8_t *pkt_ptr = NULL;
+
+	if (!debug)
+		return;
+
+	if (umem)
+		pkt_ptr = xsk_umem__get_data(umem->buffer, pkt_addr);
+
+	printf(" - Addr-info: %s pkt_nr:%lu offset:%u (addr:0x%lX) ptr:%p\n",
+	       msg, pkt_nr, offset, pkt_addr, pkt_ptr);
+}
+
 #define NANOSEC_PER_SEC 1000000000 /* 10^9 */
 static uint64_t gettime(void)
 {
@@ -754,6 +770,8 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 		uint64_t addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
 		uint32_t len = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx++)->len;
 
+		pr_addr_info(__func__, addr, xsk->umem);
+
 		if (!process_packet(xsk, addr, len))
 			mem_free_umem_frame(&xsk->umem->mem, addr);
 
@@ -819,6 +837,22 @@ static void tx_and_rx_batch_process(struct config *cfg,
 {
 
 
+}
+
+static void tx_pkt(struct config *cfg,
+		   struct xsk_socket_info *xsk)
+{
+	struct xsk_umem_info *umem = xsk->umem;
+	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
+	uint8_t *pkt = NULL;
+	uint32_t offset = 256;
+
+	pkt_addr += offset;
+	pr_addr_info(__func__, pkt_addr, umem);
+
+	pkt = xsk_umem__get_data(umem->buffer, pkt_addr);
+
+	mem_free_umem_frame(&umem->mem, pkt_addr);
 }
 
 static double calc_period(struct stats_record *r, struct stats_record *p)
@@ -1103,6 +1137,7 @@ int main(int argc, char **argv)
 			       cfg.sched_prio, cfg.sched_policy);
 	}
 
+	tx_pkt(&cfg, xsks.sockets[0]);
 	/* Receive and count packets than drop them */
 	rx_and_process(&cfg, &xsks);
 
