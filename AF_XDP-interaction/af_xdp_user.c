@@ -45,6 +45,7 @@
 
 #define NUM_FRAMES         4096 /* Frames per queue */
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE /* 4096 */
+#define FRAME_SIZE_MASK    (FRAME_SIZE - 1)
 #define RX_BATCH_SIZE      64
 #define INVALID_UMEM_FRAME UINT64_MAX
 
@@ -290,6 +291,14 @@ static void mem_free_umem_frame(struct mem_frame_allocator *mem, uint64_t frame)
 {
 	assert(mem->umem_frame_free < mem->umem_frame_max);
 
+	/* Remove any packet offset from the frame addr. The kernel RX process
+	 * will add some headroom.  Our userspace TX process can also choose to
+	 * add headroom.  Thus, frame addr can be returned to our mem allocator
+	 * including this offset.
+	 */
+	// frame = (frame / FRAME_SIZE) * FRAME_SIZE;
+	frame = frame & ~FRAME_SIZE_MASK;
+
 	mem->umem_frame_addr[mem->umem_frame_free++] = frame;
 }
 
@@ -314,8 +323,10 @@ static void mem_init_umem_frame_allocator(struct mem_frame_allocator *mem,
 	mem->umem_frame_max = nr_frames;
 
 	/* The umem_frame_addr is basically index into umem->buffer memory area */
-	for (i = 0; i < nr_frames; i++)
-		mem->umem_frame_addr[i] = i * FRAME_SIZE;
+	for (i = 0; i < nr_frames; i++) {
+		uint64_t addr = i * FRAME_SIZE;
+		mem->umem_frame_addr[i] = addr;
+	}
 
 	mem->umem_frame_free = nr_frames;
 }
@@ -463,10 +474,13 @@ static void complete_tx(struct xsk_socket_info *xsk)
 					&idx_cq);
 
 	if (completed > 0) {
-		for (int i = 0; i < completed; i++)
-			mem_free_umem_frame(&xsk->umem->mem,
-					    *xsk_ring_cons__comp_addr(&xsk->cq,
-								      idx_cq++));
+		for (int i = 0; i < completed; i++) {
+			uint64_t addr;
+
+			addr = *xsk_ring_cons__comp_addr(&xsk->cq, idx_cq++);
+			mem_free_umem_frame(&xsk->umem->mem, addr);
+			//pr_addr_info(__func__, addr, xsk->umem);
+		}
 
 		xsk_ring_cons__release(&xsk->cq, completed);
 		xsk->outstanding_tx -= completed < xsk->outstanding_tx ?
@@ -889,6 +903,8 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 	if (!rcvd)
 		return;
 
+	tx_pkt(NULL, xsk);
+
 	/* Process received packets */
 	for (i = 0; i < rcvd; i++) {
 		uint64_t addr = xsk_ring_cons__rx_desc(&xsk->rx, idx_rx)->addr;
@@ -943,7 +959,6 @@ static void rx_and_process(struct config *cfg,
 			//printf("XXX i[%d] queue:%d xsk_info:%p \n",
 			//	i, xsk_info->queue_id, xsk_info);
 
-			tx_pkt(cfg, xsk_info);
 			handle_receive_packets(xsk_info);
 		}
 	}
