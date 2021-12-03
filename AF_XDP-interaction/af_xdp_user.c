@@ -47,6 +47,7 @@
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE /* 4096 */
 #define FRAME_SIZE_MASK    (FRAME_SIZE - 1)
 #define RX_BATCH_SIZE      64
+#define FQ_REFILL_MAX      (RX_BATCH_SIZE * 2)
 #define INVALID_UMEM_FRAME UINT64_MAX
 
 struct mem_frame_allocator {
@@ -863,17 +864,17 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 	uint32_t idx_fq = 0;
 	int ret;
 
+	/* Limit refill size as it takes time */
 	int free_frames = mem_avail_umem_frames(&xsk->umem->mem);
+	int refill = (free_frames > FQ_REFILL_MAX) ? FQ_REFILL_MAX : free_frames;
+
 	__u64 start = gettime();
 
-	/* Stuff the ring with as much frames as possible */
-	stock_frames = xsk_prod_nb_free(&xsk->fq,
-					mem_avail_umem_frames(&xsk->umem->mem));
+	stock_frames = xsk_prod_nb_free(&xsk->fq, refill);
 
 	if (stock_frames > 0) {
 
-		ret = xsk_ring_prod__reserve(&xsk->fq, stock_frames,
-					     &idx_fq);
+		ret = xsk_ring_prod__reserve(&xsk->fq, stock_frames, &idx_fq);
 
 		/* This should not happen, but just in case */
 		if (ret != stock_frames) {
@@ -889,7 +890,7 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 		xsk_ring_prod__submit(&xsk->fq, stock_frames);
 	}
 	__u64 now = gettime();
-	if (debug && (stock_frames || free_frames))
+	if (debug && stock_frames > 1)
 		printf("XXX stock_frame:%d free_frames:%d cost of xsk_prod_nb_free() %llu ns\n",
 		       stock_frames, free_frames, now - start);
 }
