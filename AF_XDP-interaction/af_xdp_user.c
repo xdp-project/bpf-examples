@@ -772,8 +772,36 @@ static void print_pkt_info(uint8_t *pkt, uint32_t len)
 	}
 }
 
-static void tx_pkt(struct config *cfg,
-		   struct xsk_socket_info *xsk);
+static void tx_pkt(struct xsk_socket_info *xsk)
+{
+	struct xsk_umem_info *umem = xsk->umem;
+	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
+	uint8_t *pkt = NULL;
+	uint32_t offset = 0; // 256;
+
+	pkt_addr += offset;
+	pr_addr_info(__func__, pkt_addr, umem);
+
+	pkt = xsk_umem__get_data(umem->buffer, pkt_addr);
+	gen_base_pkt(pkt);
+
+	{
+		uint32_t tx_idx = 0;
+		int ret;
+
+		ret = xsk_ring_prod__reserve(&xsk->tx, 1, &tx_idx);
+		if (ret != 1) {
+			/* No more transmit slots, drop the packet */
+			mem_free_umem_frame(&umem->mem, pkt_addr);
+		}
+
+		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = pkt_addr;
+		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->len = 64;
+		xsk_ring_prod__submit(&xsk->tx, 1);
+		xsk->outstanding_tx++;
+	}
+	//complete_tx(xsk);
+}
 
 static bool process_packet(struct xsk_socket_info *xsk,
 			   uint64_t addr, uint32_t len)
@@ -895,7 +923,7 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 	if (!rcvd)
 		return;
 
-	tx_pkt(NULL, xsk);
+	tx_pkt(xsk);
 
 	/* Process received packets */
 	for (i = 0; i < rcvd; i++) {
@@ -969,38 +997,6 @@ static void tx_and_rx_batch_process(struct config *cfg,
 {
 
 
-}
-
-static void tx_pkt(struct config *cfg,
-		   struct xsk_socket_info *xsk)
-{
-	struct xsk_umem_info *umem = xsk->umem;
-	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
-	uint8_t *pkt = NULL;
-	uint32_t offset = 0; // 256;
-
-	pkt_addr += offset;
-	pr_addr_info(__func__, pkt_addr, umem);
-
-	pkt = xsk_umem__get_data(umem->buffer, pkt_addr);
-	gen_base_pkt(pkt);
-
-	{
-		uint32_t tx_idx = 0;
-		int ret;
-
-		ret = xsk_ring_prod__reserve(&xsk->tx, 1, &tx_idx);
-		if (ret != 1) {
-			/* No more transmit slots, drop the packet */
-			mem_free_umem_frame(&umem->mem, pkt_addr);
-		}
-
-		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = pkt_addr;
-		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->len = 64;
-		xsk_ring_prod__submit(&xsk->tx, 1);
-		xsk->outstanding_tx++;
-	}
-	//complete_tx(xsk);
 }
 
 static double calc_period(struct stats_record *r, struct stats_record *p)
@@ -1294,7 +1290,7 @@ int main(int argc, char **argv)
 	 * be initilized correctly?
 	 */
 	//sleep(3);
-	// tx_pkt(&cfg, xsks.sockets[0]);
+	// tx_pkt(xsks.sockets[0]);
 
 	/* Receive and count packets than drop them */
 	rx_and_process(&cfg, &xsks);
