@@ -1288,6 +1288,11 @@ int main(int argc, char **argv)
 			       cfg.sched_prio, cfg.sched_policy);
 	}
 
+	/* Issue: At this point AF_XDP socket might not be ready e.g. for TX.
+	 * It seems related with XDP attachment causing link down/up event for
+	 * some drivers.  Q: What is the right method/API that waits for link to
+	 * be initilized correctly?
+	 */
 	//sleep(3);
 	// tx_pkt(&cfg, xsks.sockets[0]);
 
