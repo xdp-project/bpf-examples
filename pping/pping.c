@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 static const char *__doc__ =
-	"Passive Ping - monitor flow RTT based on TCP timestamps";
+	"Passive Ping - monitor flow RTT based on header inspection";
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -51,16 +51,16 @@ enum PPING_OUTPUT_FORMAT {
 };
 
 /* 
- * BPF implementation of pping using libbpf
- * Uses TC-BPF for egress and XDP for ingress
- * - On egrees, packets are parsed for TCP TSval, 
- *   if found added to hashmap using flow+TSval as key, 
- *   and current time as value
- * - On ingress, packets are parsed for TCP TSecr, 
- *   if found looksup hashmap using reverse-flow+TSecr as key, 
- *   and calculates RTT as different between now map value
- * - Calculated RTTs are pushed to userspace 
- *   (together with the related flow) and printed out 
+ * BPF implementation of pping using libbpf.
+ * Uses TC-BPF for egress and XDP for ingress.
+ * - On egrees, packets are parsed for an identifer,
+ *   if found added to hashmap using flow+identifier as key,
+ *   and current time as value.
+ * - On ingress, packets are parsed for reply identifer,
+ *   if found looksup hashmap using reverse-flow+identifier as key,
+ *   and calculates RTT as different between now and stored timestamp.
+ * - Calculated RTTs are pushed to userspace
+ *   (together with the related flow) and printed out.
  */
 
 // Structure to contain arguments for clean_map (for passing to pthread_create)
@@ -678,16 +678,17 @@ static void print_event_standard(void *ctx, int cpu, void *data,
 
 	if (e->event_type == EVENT_TYPE_RTT) {
 		print_ns_datetime(stdout, e->rtt_event.timestamp);
-		printf(" %llu.%06llu ms %llu.%06llu ms ",
+		printf(" %llu.%06llu ms %llu.%06llu ms %s ",
 		       e->rtt_event.rtt / NS_PER_MS,
 		       e->rtt_event.rtt % NS_PER_MS,
 		       e->rtt_event.min_rtt / NS_PER_MS,
-		       e->rtt_event.min_rtt % NS_PER_MS);
+		       e->rtt_event.min_rtt % NS_PER_MS,
+		       proto_to_str(e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stdout, &e->rtt_event.flow);
 		printf("\n");
 	} else if (e->event_type == EVENT_TYPE_FLOW) {
 		print_ns_datetime(stdout, e->flow_event.timestamp);
-		printf(" ");
+		printf(" %s ", proto_to_str(e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stdout, &e->flow_event.flow);
 		printf(" %s due to %s from %s\n",
 		       flowevent_to_str(e->flow_event.event_info.event),
@@ -701,6 +702,7 @@ static void print_event_ppviz(void *ctx, int cpu, void *data, __u32 data_size)
 	const struct rtt_event *e = data;
 	__u64 time = convert_monotonic_to_realtime(e->timestamp);
 
+	// ppviz format does not support flow events
 	if (e->event_type != EVENT_TYPE_RTT)
 		return;
 

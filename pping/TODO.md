@@ -14,14 +14,15 @@
     - If one only considers SEQ/ACK (and don't check for SACK
       options), could result in ex. delay from retransmission being
       included in RTT
-- [ ] ICMP (ex Echo/Reply)
+- [x] ICMP (ex Echo/Reply)
 - [ ] QUIC (based on spinbit)
+- [ ] DNS queries
 
 ## General pping
 - [x] Add sampling so that RTT is not calculated for every packet
       (with unique value) for large flows
   - [ ] Allow short bursts to bypass sampling in order to handle 
-        delayed ACKs
+        delayed ACKs, reordered or lost packets etc.
 - [x] Keep some per-flow state
   - Will likely be needed for the sampling
   - [ ] Could potentially include keeping track of average RTT, which

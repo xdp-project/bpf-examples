@@ -6,11 +6,11 @@ TC-BPF (on egress) for the packet capture logic.
 ## Simple description
 Passive Ping (PPing) is a simple tool for passively measuring per-flow RTTs. It
 can be used on endhosts as well as any (BPF-capable Linux) device which can see
-both directions of the traffic (ex router or middlebox). Currently it only works
-for TCP traffic which uses the TCP timestamp option, but could be extended to
-also work with for example TCP seq/ACK numbers, the QUIC spinbit and ICMP
-echo-reply messages. See the [TODO-list](./TODO.md) for more potential features
-(which may or may not ever get implemented).
+both directions of the traffic (ex router or middlebox). Currently it works for
+TCP traffic which uses the TCP timestamp option and ICMP echo messages, but
+could be extended to also work with for example TCP seq/ACK numbers, the QUIC
+spinbit and DNS queries. See the [TODO-list](./TODO.md) for more potential
+features (which may or may not ever get implemented).
 
 The fundamental logic of pping is to timestamp a pseudo-unique identifier for
 outgoing packets, and then look for matches in the incoming packets. If a match
@@ -18,15 +18,22 @@ is found, the RTT is simply calculated as the time difference between the
 current time and the stored timestamp.
 
 This tool, just as Kathie's original pping implementation, uses TCP timestamps
-as identifiers. For outgoing packets, the TSval (which is a timestamp in and off
-itself) is timestamped. Incoming packets are then parsed for the TSecr, which
-are the echoed TSval values from the receiver. The TCP timestamps are not
-necessarily unique for every packet (they have a limited update frequency,
-appears to be 1000 Hz for modern Linux systems), so only the first instance of
-an identifier is timestamped, and matched against the first incoming packet with
-the identifier. The mechanism to ensure only the first packet is timestamped and
-matched differs from the one in Kathie's pping, and is further described in
-[SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
+as identifiers for TCP traffic. For outgoing packets, the TSval (which is a
+timestamp in and off itself) is timestamped. Incoming packets are then parsed
+for the TSecr, which are the echoed TSval values from the receiver. The TCP
+timestamps are not necessarily unique for every packet (they have a limited
+update frequency, appears to be 1000 Hz for modern Linux systems), so only the
+first instance of an identifier is timestamped, and matched against the first
+incoming packet with the identifier. The mechanism to ensure only the first
+packet is timestamped and matched differs from the one in Kathie's pping, and is
+further described in [SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
+
+For ICMP echo, it uses the echo identifier as port numbers, and echo sequence
+number as identifer to match against. Linux systems will typically use different
+echo identifers for different instances of ping, and thus each ping instance
+will be recongnized as a separate flow. Windows systems typically use a static
+echo identifer, and thus all instaces of ping originating from a particular
+Windows host and the same target host will be considered a single flow.
 
 ## Output formats
 pping currently supports 3 different formats, *standard*, *ppviz* and *json*. In
@@ -41,12 +48,12 @@ single line per event.
 
 An example of the format is provided below:
 ```shell
-16:00:46.142279766 10.11.1.1:5201+10.11.1.2:59528 opening due to SYN-ACK from src
-16:00:46.147705205 5.425439 ms 5.425439 ms 10.11.1.1:5201+10.11.1.2:59528
-16:00:47.148905125 5.261430 ms 5.261430 ms 10.11.1.1:5201+10.11.1.2:59528
-16:00:48.151666385 5.972284 ms 5.261430 ms 10.11.1.1:5201+10.11.1.2:59528
-16:00:49.152489316 6.017589 ms 5.261430 ms 10.11.1.1:5201+10.11.1.2:59528
-16:00:49.878508114 10.11.1.1:5201+10.11.1.2:59528 closing due to RST from dest
+16:00:46.142279766 TCP 10.11.1.1:5201+10.11.1.2:59528 opening due to SYN-ACK from src
+16:00:46.147705205 5.425439 ms 5.425439 ms TCP 10.11.1.1:5201+10.11.1.2:59528
+16:00:47.148905125 5.261430 ms 5.261430 ms TCP 10.11.1.1:5201+10.11.1.2:59528
+16:00:48.151666385 5.972284 ms 5.261430 ms TCP 10.11.1.1:5201+10.11.1.2:59528
+16:00:49.152489316 6.017589 ms 5.261430 ms TCP 10.11.1.1:5201+10.11.1.2:59528
+16:00:49.878508114 TCP 10.11.1.1:5201+10.11.1.2:59528 closing due to RST from dest
 ```
 
 ### ppviz format
@@ -196,8 +203,8 @@ these identifiers.
 
 This issue could be avoided entirely by requiring that new-id > old-id instead
 of simply checking that new-id != old-id, as TCP timestamps should monotonically
-increase. That may however not be a suitable solution if/when we add support for
-other types of identifiers.
+increase. That may however not be a suitable solution for other types of
+identifiers.
 
 #### Rate-limiting new timestamps
 In the tc/egress program packets to timestamp are sampled by using a per-flow
