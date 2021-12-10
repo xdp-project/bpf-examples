@@ -1,10 +1,62 @@
-# PPing using XDP and TC-BPF
-A re-implementation of [Kathie Nichols' passive ping
-(pping)](https://github.com/pollere/pping) utility using XDP (on ingress) and
-TC-BPF (on egress) for the packet capture logic.
+# ePPing - extending PPing with BPF
+A re-implementation of [Kathie Nichols' passive ping (PPing)][k-pping] utility
+using XDP and TC-BPF for the packet capture logic.
+
+## Why implement PPing in BPF?
+When evaluating network performance the focus has traditionally been on
+throughput. However, for many applications latency may be an equally or even
+more important metric. Being able to measure network latency is therefore
+essential for understanding network performance, and may also prove useful when
+troubleshooting applications or network missconfigurations.
+
+The most well known tool for measuring network latency is probably ping, which
+reports a Round Trip Time (RTT) to a target node by sending a message and
+measuring the time until it gets a response. Ping is universally available due
+to being standardized in the ICMP protocol, which usually makes it a good first
+choice for determining the idle latency between two nodes. Several other tools
+have also extended this basic approach of sending an active network probe to
+measure latency to other protocols, such as [hping][hping], [IRTT][IRTT] and
+[netlatency][netlatency]. However, active network measurements have some drawbacks.
+
+1. They inject additional packets on the network, and may therefore affect the
+   normal network traffic. While individual network probes likely have
+   negligible effects, frequent probes required to get high resolution RTT
+   metrics could have a considerable impact.
+2. They need to send probes between each pair of nodes of interest. This can be
+   cumbersome and does not scale well to large networks with many nodes.
+3. They report the latency experience by the probe packet, which may different
+   from the latency experienced by normal network traffic. Network probes may be
+   treated differently than other traffic due to for example AQM, load balancing
+   and various middelboxes. Additionally, network probes are typically
+   relatively sparse, and will likely fail to capture latency introduced by
+   bufferbloat if run on an idle network.
+
+Passive network monitoring avoid these issues by using a different
+approach. Instead of sending out additional network traffic passive monitoring
+inspects existing traffic. Passive Ping (PPing) thus reports RTTs by looking at
+the latency experienced by existing traffic. PPing therefore adds no network
+overhead, can report RTTs to any hosts for which it can see the traffic to and
+from regardless if its run on an endhost or middlebox, and the reported RTTs
+correspond to the latency experienced by the real traffic.
+
+Kathleen Nichols proved the feasibility of this approach by implementing
+[PPing][k-pping] for TCP traffic, based on the TCP timestamp option. Kathie's C++
+implementation, like most userspace programs, uses the traditional but rather
+inefficient technique of copying packets to userspace and parsing them there. At
+high line rates copying all packets to userspace is very resource demanding, and
+it may not be possible for the program to keep up with the network traffic,
+leading to it missing packets.
+
+With ePPing we want to leverage the power of BPF to fix this inefficiency, and
+thereby enable ePPing to work at much higher line rates while maintaining a low
+monitoring overhead. Using BPF, the packets can be parsed directly in kernel
+space while passing through the network stack, thereby avoiding copying packets
+to userspace altogether. While we're at it we are also adding some additional
+features, like a JSON output mode and adding support for additional protocols
+beyond TCP.
 
 ## Simple description
-Passive Ping (PPing) is a simple tool for passively measuring per-flow RTTs. It
+ePPing is a simple tool for passively measuring per-flow RTTs. It
 can be used on endhosts as well as any (BPF-capable Linux) device which can see
 both directions of the traffic (ex router or middlebox). Currently it only works
 for TCP traffic which uses the TCP timestamp option, but could be extended to
@@ -12,7 +64,7 @@ also work with for example TCP seq/ACK numbers, the QUIC spinbit and ICMP
 echo-reply messages. See the [TODO-list](./TODO.md) for more potential features
 (which may or may not ever get implemented).
 
-The fundamental logic of pping is to timestamp a pseudo-unique identifier for
+The fundamental logic of ePPing is to timestamp a pseudo-unique identifier for
 outgoing packets, and then look for matches in the incoming packets. If a match
 is found, the RTT is simply calculated as the time difference between the
 current time and the stored timestamp.
@@ -29,10 +81,10 @@ matched differs from the one in Kathie's pping, and is further described in
 [SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
 
 ## Output formats
-pping currently supports 3 different formats, *standard*, *ppviz* and *json*. In
-general, the output consists of two different types of events, flow-events which
-gives information that a flow has started/ended, and RTT-events which provides
-information on a computed RTT within a flow.
+ePPing currently supports 3 different formats, *standard*, *ppviz* and *json*.
+In general, the output consists of two different types of events, flow-events
+which gives information that a flow has started/ended, and RTT-events which
+provides information on a computed RTT within a flow.
 
 ### Standard format
 The standard format is quite similar to the Kathie's pping default output, and
@@ -51,9 +103,9 @@ An example of the format is provided below:
 
 ### ppviz format
 The ppviz format is primarily intended to be used to generate data that can be
-visualized by Kathie's [ppviz](https://github.com/pollere/ppviz) tool. The
-format is essentially a CSV format, using a single space as the separator, and
-is further described [here](http://www.pollere.net/ppviz.html).
+visualized by Kathie's [ppviz][ppviz] tool. The format is essentially a CSV
+format, using a single space as the separator, and is further described
+[here](http://www.pollere.net/ppviz.html).
 
 Note that the optional *FBytes*, *DBytes* and *PBytes* from the format
 specification have not been included here, and do not appear to be used by
@@ -114,6 +166,13 @@ An example of a (pretty-printed) RTT-even is provided below:
 ## Design and technical description
 !["Design of eBPF pping](./eBPF_pping_design.png)
 
+ePPing consists of two major components, the kernel space BPF program and
+the userspace program. The BPF program parses incoming and outgoing packets, and
+uses BPF maps to store packet timestamps as well as some state about each
+flow. When the BPF program can match a reply packet against one of the stored
+packet timestamps, it pushes the calculated RTT to the userspace program which
+in turn prints it out.
+
 ### Files:
 - **pping.c:** Userspace program that loads and attaches the BPF programs, pulls
   the perf-buffer `rtt_events` to print out RTT messages and periodically cleans
@@ -168,7 +227,7 @@ correctly.
 As the BPF programs may run concurrently on different CPU cores accessing these
 global hash maps, this may result in some concurrency issues. In practice, I do
 not believe these will occur particularly often, as I'm under the impression
-that packets from the same flow will typically be processed by the some
+that packets from the same flow will typically be processed by the same
 CPU. Furthermore, most of the concurrency issues will not be that problematic
 even if they do occur. For now, I've therefore left these concurrency issues
 unattended, even if some of them could be avoided with atomic operations and/or
@@ -259,23 +318,32 @@ timestamps only being updated at a limited rate (1000 Hz).
 Passively measuring the RTT for TCP traffic is not a novel concept, and there
 exists a number of other tools that can do so. A good overview of how passive
 RTT calculation using TCP timestamps (as in this project) works is provided in
-[this paper](https://doi.org/10.1145/2523426.2539132) from 2013.
+[this paper][passive-TCP-RTT] from 2013.
 
-- [pping](https://github.com/pollere/pping): This project is largely a
-  re-implementation of Kathie's pping, but by using BPF and XDP as well as
-  implementing some filtering logic the hope is to be able to create a always-on
-  tool that can scale well even to large amounts of massive flows.
-- [ppviz](https://github.com/pollere/ppviz): Web-based visualization tool for
-  the "machine-friendly" (-m) output from Kathie's pping tool. Running this
-  implementation of pping with --format="ppviz" will generate output that can be
-  used by ppviz.
-- [tcptrace](https://github.com/blitz/tcptrace): A post-processing tool which
-  can analyze a tcpdump file and among other things calculate RTTs based on
-  seq/ACK numbers (`-r` or `-R` flag).
+- [PPing][k-pping]: The original C++ implementation by Kathleen Nichols. Our
+  ePPing is largely a re-implementation of PPing in BPF and is thus heavily
+  inspired by Kathie's work.
+- [ppviz][ppviz]: Web-based visualization tool for the "machine-friendly" (-m)
+  output from Kathie's PPing. Running ePPing with --format="ppviz" will
+  generate output that can be used by ppviz.
+- [tcptrace][tcptrace]: A post-processing tool which can analyze a tcpdump file
+  and among other things calculate RTTs based on seq/ACK numbers (`-r` or `-R`
+  flag).
 - **Dapper**: A passive TCP data plane monitoring tool implemented in P4 which
   can among other things calculate the RTT based on the matching seq/ACK
-  numbers. [Paper](https://doi.org/10.1145/3050220.3050228). [Unofficial
-  source](https://github.com/muhe1991/p4-programs-survey/tree/master/dapper).
-- [P4 Tofino TCP RTT measurement](https://github.com/Princeton-Cabernet/p4-projects/tree/master/RTT-tofino): 
-  A passive TCP RTT monitor based on seq/ACK numbers implemented in P4 for
-  Tofino programmable switches. [Paper](https://doi.org/10.1145/3405669.3405823).
+  numbers. [Paper][dapper-paper]. [Unofficial source][dapper-source].
+- [P4 Tofino TCP RTT measurement][P4RTT-source]: A passive TCP RTT monitor based
+  on seq/ACK numbers implemented in P4 for Tofino programmable
+  switches. [Paper][P4RTT-paper].
+
+[passive-TCP-RTT]: https://doi.org/10.1145/2523426.2539132
+[k-pping]: https://github.com/pollere/pping
+[ppviz]: https://github.com/pollere/ppviz
+[tcptrace]: https://github.com/blitz/tcptrace
+[hping]: http://www.hping.org/
+[IRTT]: https://github.com/heistp/irtt
+[netlatency]: https://github.com/kontron/netlatency
+[dapper-source]: https://github.com/muhe1991/p4-programs-survey/tree/master/dapper
+[dapper-paper]: https://doi.org/10.1145/3050220.3050228
+[P4RTT-source]: https://github.com/Princeton-Cabernet/p4-projects/tree/master/RTT-tofino
+[P4RTT-paper]: https://doi.org/10.1145/3405669.3405823
