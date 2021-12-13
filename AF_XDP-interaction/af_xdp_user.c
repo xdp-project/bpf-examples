@@ -515,7 +515,8 @@ static uint8_t base_pkt_data[FRAME_SIZE];
 static struct ether_addr opt_tx_smac =
 {{ 0x24, 0x5e, 0xbe, 0x57, 0xf1, 0x64 }};
 static struct ether_addr opt_tx_dmac =
-{{ 0x00, 0x1b, 0x21, 0xbb, 0x9a, 0x82 }};
+//{{ 0x00, 0x1b, 0x21, 0xbb, 0x9a, 0x82 }};
+{{ 0xbc, 0xee, 0x7b, 0xda, 0xc2, 0x62 }};
 
 #define MIN_PKT_SIZE 64
 static uint16_t opt_pkt_size = MIN_PKT_SIZE;
@@ -985,17 +986,12 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 
 static void handle_receive_packets(struct xsk_socket_info *xsk)
 {
-	struct xdp_desc tx_pkts[4];
 	unsigned int rcvd, i;
 	uint32_t idx_rx = 0;
-	int tx_nr;
 
 	rcvd = xsk_ring_cons__peek(&xsk->rx, RX_BATCH_SIZE, &idx_rx);
 	if (!rcvd)
 		return;
-
-	tx_nr = invent_tx_pkts(xsk->umem, 4, tx_pkts);
-	tx_batch_pkts(xsk, tx_nr, tx_pkts);
 
 	/* Process received packets */
 	for (i = 0; i < rcvd; i++) {
@@ -1056,6 +1052,15 @@ static void rx_and_process(struct config *cfg,
 	}
 }
 
+static void rx_avail_packets(struct xsk_container *xsks)
+{
+	for (int i = 0; i < xsks->num; i++) {
+		struct xsk_socket_info *xsk_info = xsks->sockets[i];
+
+		handle_receive_packets(xsk_info);
+	}
+}
+
 /* Default interval in usec */
 #define DEFAULT_INTERVAL 1000000
 
@@ -1078,21 +1083,6 @@ static inline int64_t calcdiff(struct timespec t1, struct timespec t2)
 	return diff;
 }
 
-/* Use-case: Accurate cyclic Tx and lazy RX-processing
- *
- * This processing loop is simulating a Time-Triggered schedule, where
- * transmitting packets within a small time-window is the most
- * important task.  Picking up frames in RX-queue is less time
- * critical, as the PCF synchronization packets will have been
- * timestamped (rx_ktime) by XDP before they got enqueued.
- */
-static void tx_and_rx_batch_process(struct config *cfg,
-				    struct xsk_container *xsks)
-{
-
-
-}
-
 struct wakeup_stat {
 	long min;
 	long max;
@@ -1101,8 +1091,16 @@ struct wakeup_stat {
 	unsigned long events;
 };
 
-static void tx_cyclic_batch(struct config *cfg,
-			    struct xsk_container *xsks)
+/* Use-case: Accurate cyclic Tx and lazy RX-processing
+ *
+ * This processing loop is simulating a Time-Triggered schedule, where
+ * transmitting packets within a small time-window is the most
+ * important task.  Picking up frames in RX-queue is less time
+ * critical, as the PCF synchronization packets will have been
+ * timestamped (rx_ktime) by XDP before they got enqueued.
+ */
+static void tx_cyclic_and_rx_process(struct config *cfg,
+				    struct xsk_container *xsks)
 {
 	struct timespec now, next, interval;
 	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL};
@@ -1179,6 +1177,9 @@ static void tx_cyclic_batch(struct config *cfg,
 
 		/* Get packets for next iteration */
 		tx_nr = invent_tx_pkts(xsk->umem, batch_nr, tx_pkts);
+
+		/* Empty RX queues */
+		rx_avail_packets(xsks);
 	}
 out:
 	/* Free umem frames */
@@ -1483,7 +1484,8 @@ int main(int argc, char **argv)
 	/* Receive and count packets than drop them */
 	// rx_and_process(&cfg, &xsks);
 
-	tx_cyclic_batch(&cfg, &xsks);
+
+	tx_cyclic_and_rx_process(&cfg, &xsks);
 
 	/* Cleanup */
 	for (i = 0; i < xsks.num; i++)
