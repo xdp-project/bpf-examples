@@ -32,6 +32,16 @@
 #include <linux/icmpv6.h>
 #include <linux/udp.h>
 
+#include <linux/socket.h>
+
+#ifndef SO_PREFER_BUSY_POLL
+#define SO_PREFER_BUSY_POLL     69
+#endif
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET     70
+#endif
+
+
 #include <bpf/btf.h> /* provided by libbpf */
 
 #include "common_params.h"
@@ -91,6 +101,16 @@ struct xsk_container {
 	struct xsk_socket_info *sockets[MAX_AF_SOCKS];
 	int num; /* Number of xsk_sockets configured */
 };
+
+static void __exit_with_error(int error, const char *file, const char *func,
+			      int line)
+{
+	fprintf(stderr, "%s:%s:%i: errno: %d/\"%s\"\n", file, func,
+		line, error, strerror(error));
+	exit(EXIT_FAILURE);
+}
+
+#define exit_with_error(error) __exit_with_error(error, __FILE__, __func__, __LINE__)
 
 /**
  * BTF setup XDP-hints
@@ -332,6 +352,30 @@ static void mem_init_umem_frame_allocator(struct mem_frame_allocator *mem,
 	mem->umem_frame_free = nr_frames;
 }
 
+static void apply_setsockopt(struct xsk_socket_info *xsk, bool opt_busy_poll,
+			     int opt_batch_size)
+{
+	int sock_opt;
+
+	if (!opt_busy_poll)
+		return;
+
+	sock_opt = 1;
+	if (setsockopt(xsk_socket__fd(xsk->xsk), SOL_SOCKET, SO_PREFER_BUSY_POLL,
+		       (void *)&sock_opt, sizeof(sock_opt)) < 0)
+		exit_with_error(errno);
+
+	sock_opt = 20;
+	if (setsockopt(xsk_socket__fd(xsk->xsk), SOL_SOCKET, SO_BUSY_POLL,
+		       (void *)&sock_opt, sizeof(sock_opt)) < 0)
+		exit_with_error(errno);
+
+	sock_opt = opt_batch_size;
+	if (setsockopt(xsk_socket__fd(xsk->xsk), SOL_SOCKET, SO_BUSY_POLL_BUDGET,
+		       (void *)&sock_opt, sizeof(sock_opt)) < 0)
+		exit_with_error(errno);
+}
+
 static struct xsk_umem_info *configure_xsk_umem(void *buffer, uint64_t size,
 						uint32_t frame_size, uint32_t nr_frames)
 {
@@ -451,6 +495,9 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 
 	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
 	//  xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
+
+	apply_setsockopt(xsk_info, true, RX_BATCH_SIZE);
+
 	return xsk_info;
 
 error_exit:
@@ -994,6 +1041,9 @@ static void handle_receive_packets(struct xsk_socket_info *xsk)
 	unsigned int rcvd, i;
 	uint32_t idx_rx = 0;
 
+	// FIXME: Needed when in NAPI busy_poll mode?
+	recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+
 	rcvd = xsk_ring_cons__peek(&xsk->rx, RX_BATCH_SIZE, &idx_rx);
 	if (!rcvd)
 		return;
@@ -1337,7 +1387,7 @@ int main(int argc, char **argv)
 	 * cost of copying over packet data to our preallocated AF_XDP umem
 	 * area.
 	 */
-	// cfg.xsk_bind_flags = XDP_COPY;
+	//cfg.xsk_bind_flags = XDP_COPY;
 	cfg.xsk_bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP;
 
 	struct bpf_object *bpf_obj = NULL;
