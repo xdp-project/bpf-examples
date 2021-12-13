@@ -1056,6 +1056,28 @@ static void rx_and_process(struct config *cfg,
 	}
 }
 
+/* Default interval in usec */
+#define DEFAULT_INTERVAL 1000000
+
+#define USEC_PER_SEC		1000000
+#define NSEC_PER_SEC		1000000000
+
+static inline void tsnorm(struct timespec *ts)
+{
+	while (ts->tv_nsec >= NSEC_PER_SEC) {
+		ts->tv_nsec -= NSEC_PER_SEC;
+		ts->tv_sec++;
+	}
+}
+
+static inline int64_t calcdiff(struct timespec t1, struct timespec t2)
+{
+	int64_t diff;
+	diff = USEC_PER_SEC * (long long)((int) t1.tv_sec - (int) t2.tv_sec);
+	diff += ((int) t1.tv_nsec - (int) t2.tv_nsec) / 1000;
+	return diff;
+}
+
 /* Use-case: Accurate cyclic Tx and lazy RX-processing
  *
  * This processing loop is simulating a Time-Triggered schedule, where
@@ -1069,6 +1091,100 @@ static void tx_and_rx_batch_process(struct config *cfg,
 {
 
 
+}
+
+struct wakeup_stat {
+	long min;
+	long max;
+	long act;
+	double avg;
+	unsigned long events;
+};
+
+static void tx_cyclic_batch(struct config *cfg,
+			    struct xsk_container *xsks)
+{
+	struct timespec now, next, interval;
+	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL};
+	int batch_nr = 4;
+	struct xdp_desc tx_pkts[batch_nr];
+	int tx_nr;
+
+	int period = DEFAULT_INTERVAL; // TODO: Add to cfg
+	int timermode = TIMER_ABSTIME;
+	int clock = CLOCK_MONOTONIC;
+
+	// Choosing xsk id 0
+	struct xsk_socket_info *xsk = xsks->sockets[0];
+
+	/* Get packets for first iteration */
+	tx_nr = invent_tx_pkts(xsk->umem, batch_nr, tx_pkts);
+
+	interval.tv_sec = period / USEC_PER_SEC;
+	interval.tv_nsec = (period % USEC_PER_SEC) * 1000;
+
+	clock_gettime(clock, &now);
+
+	next = now;
+	next.tv_sec  += interval.tv_sec;
+	next.tv_nsec += interval.tv_nsec;
+	tsnorm(&next);
+
+	while (!global_exit) {
+		int64_t diff;
+		int err, n;
+
+		/* Wait for next period */
+		err = clock_nanosleep(clock, timermode, &next, NULL);
+		/* Took case MODE_CLOCK_NANOSLEEP from cyclictest */
+		if (err) {
+			if (err != EINTR)
+				fprintf(stderr, "clock_nanosleep failed."
+					" err:%d errno:%d\n", err, errno);
+			goto out;
+		}
+
+		/* Expecting to wakeup at "next" get systime "now" to check */
+		err = clock_gettime(clock, &now);
+		if (err) {
+			if (err != EINTR)
+				fprintf(stderr, "clock_getttime() failed."
+					" err:%d errno:%d\n", err, errno);
+			goto out;
+		}
+
+		/* Detect inaccuracy diff */
+		diff = calcdiff(now, next);
+		if (diff < stat.min)
+			stat.min = diff;
+		if (diff > stat.max)
+			stat.max = diff;
+		stat.avg += (double) diff;
+		stat.act = diff;
+
+		stat.events++;
+
+		/* Send batch of packets */
+		n = tx_batch_pkts(xsk, tx_nr, tx_pkts);
+
+		if (verbose >=1 )
+			printf("TX pkts:%d event:%lu"
+			       " inaccurate(usec) wakeup min:%ld cur:%ld max:%ld\n",
+			       n, stat.events, stat.min, stat.act, stat.max);
+
+		/* Calculate next time to wakeup */
+		next.tv_sec  += interval.tv_sec;
+		next.tv_nsec += interval.tv_nsec;
+		tsnorm(&next);
+
+		/* Get packets for next iteration */
+		tx_nr = invent_tx_pkts(xsk->umem, batch_nr, tx_pkts);
+	}
+out:
+	/* Free umem frames */
+	for (int i = 0; i < tx_nr; i++) {
+		mem_free_umem_frame(&xsk->umem->mem, tx_pkts[i].addr);
+	}
 }
 
 static double calc_period(struct stats_record *r, struct stats_record *p)
@@ -1365,7 +1481,9 @@ int main(int argc, char **argv)
 	// tx_pkt(xsks.sockets[0]);
 
 	/* Receive and count packets than drop them */
-	rx_and_process(&cfg, &xsks);
+	// rx_and_process(&cfg, &xsks);
+
+	tx_cyclic_batch(&cfg, &xsks);
 
 	/* Cleanup */
 	for (i = 0; i < xsks.num; i++)
