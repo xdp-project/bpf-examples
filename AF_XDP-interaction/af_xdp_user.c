@@ -868,8 +868,13 @@ static int tx_batch_pkts(struct xsk_socket_info *xsk,
 	}
 	xsk_ring_prod__submit(&xsk->tx, nr);
 
+	// Kick Tx
 	// sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
 	complete_tx(xsk);
+
+	// See if kicking Rx-side works
+	// recvfrom(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
+
 	return nr;
 }
 
@@ -1332,7 +1337,8 @@ int main(int argc, char **argv)
 	 * cost of copying over packet data to our preallocated AF_XDP umem
 	 * area.
 	 */
-	cfg.xsk_bind_flags = XDP_COPY;
+	// cfg.xsk_bind_flags = XDP_COPY;
+	cfg.xsk_bind_flags = XDP_COPY | XDP_USE_NEED_WAKEUP;
 
 	struct bpf_object *bpf_obj = NULL;
 	struct bpf_map *map;
@@ -1484,7 +1490,7 @@ int main(int argc, char **argv)
 	/* Receive and count packets than drop them */
 	// rx_and_process(&cfg, &xsks);
 
-
+	/* Send packets cyclic */
 	tx_cyclic_and_rx_process(&cfg, &xsks);
 
 	/* Cleanup */
