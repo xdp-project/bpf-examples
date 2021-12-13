@@ -835,15 +835,13 @@ static int invent_tx_pkts(struct xsk_umem_info *umem,
 	return i;
 }
 
-static int tx_batch_pkts(struct xsk_socket_info *xsk, const unsigned int n)
+static int tx_batch_pkts(struct xsk_socket_info *xsk,
+			 const unsigned int nr,	struct xdp_desc pkts[nr])
 {
 	struct xsk_umem_info *umem = xsk->umem;
-	struct xdp_desc pkts[n];
 	uint32_t tx_res;
 	uint32_t tx_idx = 0;
-	int i, nr;
-
-	nr = invent_tx_pkts(umem, n, pkts);
+	int i;
 
 	tx_res = xsk_ring_prod__reserve(&xsk->tx, nr, &tx_idx);
 	if (tx_res != nr) {
@@ -987,15 +985,17 @@ void restock_receive_fill_queue(struct xsk_socket_info *xsk)
 
 static void handle_receive_packets(struct xsk_socket_info *xsk)
 {
+	struct xdp_desc tx_pkts[4];
 	unsigned int rcvd, i;
 	uint32_t idx_rx = 0;
+	int tx_nr;
 
 	rcvd = xsk_ring_cons__peek(&xsk->rx, RX_BATCH_SIZE, &idx_rx);
 	if (!rcvd)
 		return;
 
-	//tx_pkt(xsk);
-	tx_batch_pkts(xsk, 4);
+	tx_nr = invent_tx_pkts(xsk->umem, 4, tx_pkts);
+	tx_batch_pkts(xsk, tx_nr, tx_pkts);
 
 	/* Process received packets */
 	for (i = 0; i < rcvd; i++) {
