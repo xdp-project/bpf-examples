@@ -288,6 +288,9 @@ static const struct option_wrapper long_options[] = {
 	{{"progsec",	 required_argument,	NULL,  2  },
 	 "Load program in <section> of the ELF file", "<section>"},
 
+	{{"busy-poll",	 no_argument,		NULL, 'B' },
+	 "Enable socket prefer NAPI busy-poll mode (remember adjust sysctl too)"},
+
 	{{0, 0, NULL,  0 }, NULL, false}
 };
 
@@ -496,7 +499,7 @@ static struct xsk_socket_info *xsk_configure_socket(struct config *cfg,
 	/* Due to XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD manually update map */
 	//  xsk_socket__update_xskmap(xsk_info->xsk, xsks_map_fd);
 
-	apply_setsockopt(xsk_info, true, RX_BATCH_SIZE);
+	apply_setsockopt(xsk_info, cfg->opt_busy_poll, RX_BATCH_SIZE);
 
 	return xsk_info;
 

@@ -96,7 +96,7 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:ASNFUMQ:czqp:",
+	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:czqp:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -128,6 +128,9 @@ void parse_cmdline_args(int argc, char **argv,
 						errno, strerror(errno));
 				goto error;
 			}
+			break;
+		case 'B':
+			cfg->opt_busy_poll = true;
 			break;
 		case 'A':
 			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */

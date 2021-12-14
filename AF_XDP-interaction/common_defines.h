@@ -26,6 +26,7 @@ struct config {
 	/* Real-Time scheduler setting */
 	int sched_prio;
 	int sched_policy;
+	bool opt_busy_poll;
 };
 
 /* Defined in common_params.o */
