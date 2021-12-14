@@ -4,6 +4,7 @@
 #include <net/if.h>
 #include <linux/types.h>
 #include <stdbool.h>
+#include <netinet/ether.h> /* struct ether_addr */
 
 struct config {
 	__u32 xdp_flags;
@@ -27,6 +28,8 @@ struct config {
 	int sched_prio;
 	int sched_policy;
 	bool opt_busy_poll;
+	struct ether_addr opt_tx_smac;
+	struct ether_addr opt_tx_dmac;
 };
 
 /* Defined in common_params.o */

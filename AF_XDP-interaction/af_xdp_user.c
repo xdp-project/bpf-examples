@@ -291,6 +291,12 @@ static const struct option_wrapper long_options[] = {
 	{{"busy-poll",	 no_argument,		NULL, 'B' },
 	 "Enable socket prefer NAPI busy-poll mode (remember adjust sysctl too)"},
 
+	{{"tx-dmac",	 required_argument,	NULL, 'G' },
+	 "Dest MAC addr of TX frame in aa:bb:cc:dd:ee:ff format", "aa:bb:cc:dd:ee:ff"},
+
+	{{"tx-smac",	 required_argument,	NULL, 'H' },
+	 "Src MAC addr of TX frame in aa:bb:cc:dd:ee:ff format", "aa:bb:cc:dd:ee:ff"},
+
 	{{0, 0, NULL,  0 }, NULL, false}
 };
 
@@ -562,11 +568,9 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
  */
 static uint8_t base_pkt_data[FRAME_SIZE];
 
-static struct ether_addr opt_tx_smac =
-{{ 0x24, 0x5e, 0xbe, 0x57, 0xf1, 0x64 }};
-static struct ether_addr opt_tx_dmac =
-//{{ 0x00, 0x1b, 0x21, 0xbb, 0x9a, 0x82 }};
-{{ 0xbc, 0xee, 0x7b, 0xda, 0xc2, 0x62 }};
+/* Can be changed via cmdline options (-G|--tx-dmac) or (-H|--tx-smac) */
+static struct ether_addr default_tx_smac = {{ 0x24, 0x5e, 0xbe, 0x57, 0xf1, 0x64 }};
+static struct ether_addr default_tx_dmac = {{ 0xbc, 0xee, 0x7b, 0xda, 0xc2, 0x62 }};
 
 #define MIN_PKT_SIZE 64
 static uint16_t opt_pkt_size = MIN_PKT_SIZE;
@@ -580,11 +584,13 @@ static uint16_t opt_pkt_size = MIN_PKT_SIZE;
 #define UDP_PKT_SIZE		(IP_PKT_SIZE - sizeof(struct iphdr))
 #define UDP_PKT_DATA_SIZE	(UDP_PKT_SIZE - sizeof(struct udphdr))
 
-static void gen_eth_hdr(struct ethhdr *eth_hdr)
+static void gen_eth_hdr(struct config *cfg, struct ethhdr *eth_hdr)
 {
-	/* Ethernet header */
-	memcpy(eth_hdr->h_dest  , &opt_tx_dmac, ETH_ALEN);
-	memcpy(eth_hdr->h_source, &opt_tx_smac, ETH_ALEN);
+	/* Ethernet header:
+	 *  Can be changed via cmdline options (-G|--tx-dmac) or (-H|--tx-smac)
+	 */
+	memcpy(eth_hdr->h_dest  , &cfg->opt_tx_dmac, ETH_ALEN);
+	memcpy(eth_hdr->h_source, &cfg->opt_tx_smac, ETH_ALEN);
 	eth_hdr->h_proto = htons(ETH_P_IP);
 }
 
@@ -652,7 +658,7 @@ static void gen_udp_hdr(struct udphdr *udp_hdr, struct iphdr *ip_hdr)
 				  IPPROTO_UDP, (__u16 *)udp_hdr);
 }
 
-static void gen_base_pkt(uint8_t *pkt_ptr)
+static void gen_base_pkt(struct config *cfg, uint8_t *pkt_ptr)
 {
 	struct ethhdr *eth_hdr = (struct ethhdr *)pkt_ptr;
 	struct iphdr *ip_hdr = (struct iphdr *)(pkt_ptr +
@@ -661,7 +667,7 @@ static void gen_base_pkt(uint8_t *pkt_ptr)
 						   sizeof(struct ethhdr) +
 						   sizeof(struct iphdr));
 
-	gen_eth_hdr(eth_hdr);
+	gen_eth_hdr(cfg, eth_hdr);
 	gen_ip_hdr(ip_hdr);
 	gen_udp_hdr(udp_hdr, ip_hdr);
 }
@@ -823,7 +829,7 @@ static void print_pkt_info(uint8_t *pkt, uint32_t len)
 	}
 }
 
-static void tx_pkt(struct xsk_socket_info *xsk)
+static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 {
 	struct xsk_umem_info *umem = xsk->umem;
 	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
@@ -834,7 +840,7 @@ static void tx_pkt(struct xsk_socket_info *xsk)
 	pr_addr_info(__func__, pkt_addr, umem);
 
 	pkt = xsk_umem__get_data(umem->buffer, pkt_addr);
-	gen_base_pkt(pkt);
+	gen_base_pkt(cfg, pkt);
 
 	{
 		uint32_t tx_idx = 0;
@@ -857,7 +863,7 @@ static void tx_pkt(struct xsk_socket_info *xsk)
 /* Generate some fake packets (in umem area).  Real system will deliver TX
  * packets containing the needed control information.
  */
-static int invent_tx_pkts(struct xsk_umem_info *umem,
+static int invent_tx_pkts(struct config *cfg, struct xsk_umem_info *umem,
 			  const unsigned int n, struct xdp_desc pkts[n])
 {
 	uint32_t len = opt_pkt_size;
@@ -879,7 +885,7 @@ static int invent_tx_pkts(struct xsk_umem_info *umem,
 
 		/* Write into packet memory area */
 		pkt_data = xsk_umem__get_data(umem->buffer, pkt_addr);
-		gen_base_pkt(pkt_data);
+		gen_base_pkt(cfg, pkt_data);
 
 		pkts[i] = desc;
 	}
@@ -1173,8 +1179,8 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 	// Choosing xsk id 0
 	struct xsk_socket_info *xsk = xsks->sockets[0];
 
-	/* Get packets for first iteration */
-	tx_nr = invent_tx_pkts(xsk->umem, batch_nr, tx_pkts);
+	/* Get packets for *first* iteration */
+	tx_nr = invent_tx_pkts(cfg, xsk->umem, batch_nr, tx_pkts);
 
 	interval.tv_sec = period / USEC_PER_SEC;
 	interval.tv_nsec = (period % USEC_PER_SEC) * 1000;
@@ -1233,8 +1239,8 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 		next.tv_nsec += interval.tv_nsec;
 		tsnorm(&next);
 
-		/* Get packets for next iteration */
-		tx_nr = invent_tx_pkts(xsk->umem, batch_nr, tx_pkts);
+		/* Get packets for *next* iteration */
+		tx_nr = invent_tx_pkts(cfg, xsk->umem, batch_nr, tx_pkts);
 
 		/* Empty RX queues */
 		rx_avail_packets(xsks);
@@ -1366,6 +1372,8 @@ int main(int argc, char **argv)
 		.progsec = "xdp_sock",
 		.xsk_wakeup_mode = true, /* Default, change via --spin */
 		.xsk_if_queue = -1,
+		.opt_tx_dmac = default_tx_dmac,
+		.opt_tx_smac = default_tx_smac,
 	};
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;
@@ -1484,7 +1492,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Generate packets to TX */
-	gen_base_pkt((uint8_t*)&base_pkt_data);
+	gen_base_pkt(&cfg, (uint8_t*)&base_pkt_data);
 
 	/* Open and configure the AF_XDP (xsk) socket(s) */
 	for (i = 0; i < xsks.num; i++) {
@@ -1538,7 +1546,7 @@ int main(int argc, char **argv)
 	 * be initilized correctly?
 	 */
 	//sleep(3);
-	// tx_pkt(xsks.sockets[0]);
+	// tx_pkt(&cfg, xsks.sockets[0]);
 
 	/* Receive and count packets than drop them */
 	// rx_and_process(&cfg, &xsks);
