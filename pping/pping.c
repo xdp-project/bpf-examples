@@ -76,10 +76,13 @@ struct pping_config {
 	char *event_map;
 	int xdp_flags;
 	int ifindex;
+	int ingress_prog_id;
+	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
 	bool json_format;
 	bool ppviz_format;
 	bool force;
+	bool created_tc_hook;
 };
 
 static volatile int keep_running = 1;
@@ -90,7 +93,7 @@ static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
 	{ "interface",        required_argument, NULL, 'i' }, // Name of interface to run on
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
-	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
+	{ "force",            no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
@@ -118,6 +121,21 @@ static void print_usage(char *argv[])
 		printf("\n");
 	}
 	printf("\n");
+}
+
+/*
+ * Simple convenience wrapper around libbpf_strerror for which you don't have
+ * to provide a buffer. Instead uses its own static buffer and returns a pointer
+ * to it.
+ *
+ * This of course comes with the tradeoff that it is no longer thread safe and
+ * later invocations overwrite previous results.
+ */
+static const char *get_libbpf_strerror(int err)
+{
+	static char buf[200];
+	libbpf_strerror(err, buf, sizeof(buf));
+	return buf;
 }
 
 static double parse_positive_double_argument(const char *str,
@@ -163,7 +181,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				err = -errno;
 				fprintf(stderr,
 					"Could not get index of interface %s: %s\n",
-					config->ifname, strerror(err));
+					config->ifname, get_libbpf_strerror(err));
 				return err;
 			}
 			break;
@@ -207,6 +225,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 'f':
 			config->force = true;
+			config->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
 			break;
 		case 'h':
 			printf("HELP:\n");
@@ -242,32 +261,6 @@ static int set_rlimit(long int lim)
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
 }
 
-static int xdp_detach(int ifindex, __u32 xdp_flags)
-{
-	return bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
-}
-
-static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
-		      __u32 xdp_flags, bool force)
-{
-	struct bpf_program *prog;
-	int prog_fd;
-
-	if (sec)
-		prog = bpf_object__find_program_by_title(obj, sec);
-	else
-		prog = bpf_program__next(NULL, obj);
-
-	prog_fd = bpf_program__fd(prog);
-	if (prog_fd < 0)
-		return prog_fd;
-
-	if (force) // detach current (if any) xdp-program first
-		xdp_detach(ifindex, xdp_flags);
-
-	return bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
-}
-
 static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 {
 	struct bpf_map *map = NULL;
@@ -280,39 +273,148 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 	return -EINVAL;
 }
 
+/*
+ * Attempt to attach program in section sec of obj to ifindex.
+ * If sucessful, will return the positive program id of the attached.
+ * On failure, will return a negative error code.
+ */
+static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
+		      __u32 xdp_flags)
+{
+	struct bpf_program *prog;
+	int prog_fd, err;
+	__u32 prog_id;
+
+	if (sec)
+		prog = bpf_object__find_program_by_title(obj, sec);
+	else
+		prog = bpf_program__next(NULL, obj);
+
+	prog_fd = bpf_program__fd(prog);
+	if (prog_fd < 0)
+		return prog_fd;
+
+	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
+	if (err)
+		return err;
+
+	err = bpf_get_link_xdp_id(ifindex, &prog_id, xdp_flags);
+	if (err) {
+		bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+		return err;
+	}
+
+	return prog_id;
+}
+
+static int xdp_detach(int ifindex, __u32 xdp_flags, __u32 expected_prog_id)
+{
+	__u32 curr_prog_id;
+	int err;
+
+	err = bpf_get_link_xdp_id(ifindex, &curr_prog_id, xdp_flags);
+	if (err)
+		return err;
+
+	if (!curr_prog_id) {
+		return 0; // No current prog on interface
+	}
+
+	if (expected_prog_id && curr_prog_id != expected_prog_id)
+		return -ENOENT;
+
+	return bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+}
+
+/*
+ * Will attempt to attach program at section sec in obj to ifindex at
+ * attach_point.
+ * On success, will fill in the passed opts, optionally set new_hook depending
+ * if it created a new hook or not, and return the id of the attached program.
+ * On failure it will return a negative error code.
+ */
 static int tc_attach(struct bpf_object *obj, int ifindex,
 		     enum bpf_tc_attach_point attach_point,
-		     const char *prog_title, struct bpf_tc_opts *opts)
+		     const char *sec, struct bpf_tc_opts *opts,
+		     bool *new_hook)
 {
 	int err;
 	int prog_fd;
+	bool created_hook = true;
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
 			    .attach_point = attach_point);
 
 	err = bpf_tc_hook_create(&hook);
-	if (err && err != -EEXIST)
+	if (err == -EEXIST)
+		created_hook = false;
+	else if (err)
 		return err;
 
 	prog_fd = bpf_program__fd(
-		bpf_object__find_program_by_title(obj, prog_title));
-	if (prog_fd < 0)
-		return prog_fd;
+		bpf_object__find_program_by_title(obj, sec));
+	if (prog_fd < 0) {
+		err = prog_fd;
+		goto err_after_hook;
+	}
 
 	opts->prog_fd = prog_fd;
 	opts->prog_id = 0;
-	return bpf_tc_attach(&hook, opts);
+	err = bpf_tc_attach(&hook, opts);
+	if (err)
+		goto err_after_hook;
+
+	if (new_hook)
+		*new_hook = created_hook;
+	return opts->prog_id;
+
+err_after_hook:
+	/*
+	 * Destroy hook if it created it.
+	 * This is slightly racy, as some other program may still have been
+	 * attached to the hook between its creation and this error cleanup.
+	 */
+	if (created_hook) {
+		hook.attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+		bpf_tc_hook_destroy(&hook);
+	}
+	return err;
 }
 
 static int tc_detach(int ifindex, enum bpf_tc_attach_point attach_point,
-		     struct bpf_tc_opts *opts)
+		     const struct bpf_tc_opts *opts, bool destroy_hook)
 {
+	int err;
+	int hook_err = 0;
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
 			    .attach_point = attach_point);
-	opts->prog_fd = 0;
-	opts->prog_id = 0;
-	opts->flags = 0;
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts_info, .handle = opts->handle,
+			    .priority = opts->priority);
 
-	return bpf_tc_detach(&hook, opts);
+	// Check we are removing the correct program
+	err = bpf_tc_query(&hook, &opts_info);
+	if (err)
+		return err;
+	if (opts->prog_id != opts_info.prog_id)
+		return -ENOENT;
+
+	// Attempt to detach program
+	opts_info.prog_fd = 0;
+	opts_info.prog_id = 0;
+	opts_info.flags = 0;
+	err = bpf_tc_detach(&hook, &opts_info);
+
+	/*
+	 * Attempt to destroy hook regardsless if detach succeded.
+	 * If the hook is destroyed sucessfully, program should
+	 * also be detached.
+	 */
+	if (destroy_hook) {
+		hook.attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+		hook_err = bpf_tc_hook_destroy(&hook);
+	}
+
+	err = destroy_hook ? hook_err : err;
+	return err;
 }
 
 /*
@@ -688,6 +790,26 @@ static int set_programs_to_load(struct bpf_object *obj,
 	return bpf_program__set_autoload(prog, false);
 }
 
+/*
+ * Print out some hints for what might have caused an error while attempting
+ * to attach an XDP program. Based on xdp_link_attach() in
+ * xdp-tutorial/common/common_user_bpf_xdp.c
+ */
+static void print_xdp_error_hints(FILE *stream, int err)
+{
+	err = err > 0 ? err : -err;
+	switch (err) {
+	case EBUSY:
+	case EEXIST:
+		fprintf(stream, "Hint: XDP already loaded on device"
+				" use --force to swap/replace\n");
+		break;
+	case EOPNOTSUPP:
+		fprintf(stream, "Hint: Native-XDP not supported\n");
+		break;
+	}
+}
+
 static int load_attach_bpfprogs(struct bpf_object **obj,
 				struct pping_config *config)
 {
@@ -698,7 +820,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	err = libbpf_get_error(*obj);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
-			config->object_path, strerror(-err));
+			config->object_path, get_libbpf_strerror(err));
 		return err;
 	}
 
@@ -706,7 +828,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 			  sizeof(config->bpf_config));
 	if (err) {
 		fprintf(stderr, "Failed pushing user-configration to %s: %s\n",
-			config->object_path, strerror(-err));
+			config->object_path, get_libbpf_strerror(err));
 		return err;
 	}
 
@@ -714,42 +836,52 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	err = bpf_object__load(*obj);
 	if (err) {
 		fprintf(stderr, "Failed loading bpf programs in %s: %s\n",
-			config->object_path, strerror(-err));
+			config->object_path, get_libbpf_strerror(err));
 		return err;
 	}
 
 	// Attach egress prog
-	err = tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
-			config->egress_sec, &config->tc_egress_opts);
-	if (err) {
+	config->egress_prog_id =
+		tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
+			  config->egress_sec, &config->tc_egress_opts,
+			  &config->created_tc_hook);
+	if (config->egress_prog_id < 0) {
 		fprintf(stderr,
 			"Failed attaching egress BPF program on interface %s: %s\n",
-			config->ifname, strerror(-err));
-		return err;
+			config->ifname,
+			get_libbpf_strerror(config->egress_prog_id));
+		return config->egress_prog_id;
 	}
 
 	// Attach ingress prog
 	if (strcmp(config->ingress_sec, SEC_INGRESS_XDP) == 0)
-		err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
-				 config->xdp_flags, config->force);
+		config->ingress_prog_id =
+			xdp_attach(*obj, config->ingress_sec, config->ifindex,
+				   config->xdp_flags);
 	else
-		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
-				config->ingress_sec, &config->tc_ingress_opts);
-	if (err) {
+		config->ingress_prog_id =
+			tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
+				  config->ingress_sec, &config->tc_ingress_opts,
+				  NULL);
+	if (config->ingress_prog_id < 0) {
 		fprintf(stderr,
 			"Failed attaching ingress BPF program on interface %s: %s\n",
-			config->ifname, strerror(-err));
+			config->ifname, get_libbpf_strerror(err));
+		err = config->ingress_prog_id;
+		if (strcmp(config->ingress_sec, SEC_INGRESS_XDP) == 0)
+			print_xdp_error_hints(stderr, err);
 		goto ingress_err;
 	}
 
 	return 0;
 
 ingress_err:
-	detach_err = tc_detach(config->ifindex, BPF_TC_EGRESS,
-			       &config->tc_egress_opts);
+	detach_err =
+		tc_detach(config->ifindex, BPF_TC_EGRESS,
+			  &config->tc_egress_opts, config->created_tc_hook);
 	if (detach_err)
 		fprintf(stderr, "Failed detaching tc program from %s: %s\n",
-			config->ifname, strerror(-detach_err));
+			config->ifname, get_libbpf_strerror(detach_err));
 	return err;
 }
 
@@ -767,7 +899,7 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 	if (clean_args.packet_map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
 			config->packet_map,
-			strerror(-clean_args.packet_map_fd));
+			get_libbpf_strerror(clean_args.packet_map_fd));
 		return clean_args.packet_map_fd;
 	}
 
@@ -775,15 +907,16 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 		bpf_object__find_map_fd_by_name(obj, config->flow_map);
 	if (clean_args.flow_map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
-			config->flow_map, strerror(-clean_args.flow_map_fd));
-		return clean_args.packet_map_fd;
+			config->flow_map,
+			get_libbpf_strerror(clean_args.flow_map_fd));
+		return clean_args.flow_map_fd;
 	}
 
 	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
 	if (err) {
 		fprintf(stderr,
 			"Failed starting thread to perform periodic map cleanup: %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		return err;
 	}
 
@@ -829,14 +962,14 @@ int main(int argc, char *argv[])
 	err = set_rlimit(RLIM_INFINITY);
 	if (err) {
 		fprintf(stderr, "Could not set rlimit to infinity: %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		return EXIT_FAILURE;
 	}
 
 	err = parse_arguments(argc, argv, &config);
 	if (err) {
 		fprintf(stderr, "Failed parsing arguments:  %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		print_usage(argv);
 		return EXIT_FAILURE;
 	}
@@ -860,7 +993,7 @@ int main(int argc, char *argv[])
 	err = setup_periodical_map_cleaning(obj, &config);
 	if (err) {
 		fprintf(stderr, "Failed setting up map cleaning: %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		goto cleanup_attached_progs;
 	}
 
@@ -871,7 +1004,7 @@ int main(int argc, char *argv[])
 	err = libbpf_get_error(pb);
 	if (err) {
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
-			config.event_map, strerror(err));
+			config.event_map, get_libbpf_strerror(err));
 		goto cleanup_attached_progs;
 	}
 
@@ -884,7 +1017,7 @@ int main(int argc, char *argv[])
 			if (keep_running) // Only print polling error if it wasn't caused by program termination
 				fprintf(stderr,
 					"Error polling perf buffer: %s\n",
-					strerror(-err));
+					get_libbpf_strerror(-err));
 			break;
 		}
 	}
@@ -898,22 +1031,24 @@ int main(int argc, char *argv[])
 	perf_buffer__free(pb);
 
 cleanup_attached_progs:
-	detach_err = tc_detach(config.ifindex, BPF_TC_EGRESS,
-			       &config.tc_egress_opts);
-	if (detach_err)
-		fprintf(stderr,
-			"Failed removing egress program from interface %s: %s\n",
-			config.ifname, strerror(-detach_err));
-
 	if (strcmp(config.ingress_sec, SEC_INGRESS_XDP) == 0)
-		detach_err = xdp_detach(config.ifindex, config.xdp_flags);
+		detach_err = xdp_detach(config.ifindex, config.xdp_flags,
+					config.ingress_prog_id);
 	else
 		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
-				       &config.tc_ingress_opts);
+				       &config.tc_ingress_opts, false);
 	if (detach_err)
 		fprintf(stderr,
 			"Failed removing ingress program from interface %s: %s\n",
-			config.ifname, strerror(-detach_err));
+			config.ifname, get_libbpf_strerror(detach_err));
+
+	detach_err =
+		tc_detach(config.ifindex, BPF_TC_EGRESS, &config.tc_egress_opts,
+			  config.force && config.created_tc_hook);
+	if (detach_err)
+		fprintf(stderr,
+			"Failed removing egress program from interface %s: %s\n",
+			config.ifname, get_libbpf_strerror(detach_err));
 
 	return (err != 0 && keep_running) || detach_err != 0;
 }
