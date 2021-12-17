@@ -40,6 +40,37 @@ stop_mpstat() {
     ssh ${MACHINE_NAMES[$1]} "killall -s SIGINT mpstat"
 }
 
+start_sar() {
+    # $1 machine (M1, M2 or M3)
+    # $2 save path
+
+    echo "${MACHINE_NAMES[$1]}: Starting sar..."
+    ssh ${MACHINE_NAMES[$1]} "mkdir -p $2; TZ=UTC sar -o ${2}/${1}_stats.sar 1 > /dev/null" 2> /dev/null &
+    sleep 1
+}
+
+stop_sar() {
+    # $1 machine (M1, M2 or M3)
+
+    echo "${MACHINE_NAMES[$1]}: Stopping sar..."
+    ssh ${MACHINE_NAMES[$1]} 'pkill -u $(whoami) --signal SIGINT sar'
+}
+
+stop_sar_pretend_mpstat() {
+    # $1 machine (M1, M2 or M3)
+    # $2 save path
+    stop_sar $1
+    sar_to_mpstat $1 $2
+}
+
+
+sar_to_mpstat() {
+    # $1 machine (M1, M2 or M3)
+    # $2 save path
+    ssh ${MACHINE_NAMES[$1]} "sadf -j ${2}/${1}_stats.sar -- -u ALL -P ALL > ${2}/${1}_mpstat.json"
+}
+
+
 start_iperf_servers() {
     # $1 = save path
 
@@ -53,11 +84,14 @@ start_iperf_servers() {
     ssh $M3 "$CMD" 2> /dev/null &
     sleep 1
 
-    start_mpstat "M3" $1
+    #start_mpstat "M3" $1
+    start_sar "M3" $1
 }
 
 stop_iperf_servers() {
-    stop_mpstat "M3"
+    # $1 = save path
+    #stop_mpstat "M3"
+    stop_sar_pretend_mpstat "M3" $1
 
     echo "${M3}: Killing iperf3 servers"
     ssh $M3 "killall iperf3"
@@ -67,7 +101,8 @@ run_iperf_clients() {
     # $1 = save path
     # $2 = n streams
 
-    start_mpstat "M1" $1
+    #start_mpstat "M1" $1
+    start_sar "M1" $1
 
     echo "${M1}: Running iperf3 tests..."
 
@@ -81,7 +116,8 @@ run_iperf_clients() {
 
     ssh $M1 "$CMD"
 
-    stop_mpstat "M1"
+    #stop_mpstat "M1"
+    stop_sar_pretend_mpstat "M1" $1
 }
 
 start_kpping() {
@@ -117,11 +153,13 @@ run_tests() {
     # $1 = save path
     # $2 = n streams
 
-    start_mpstat "M2" $1
+    #start_mpstat "M2" $1
+    start_sar "M2" $1
     start_iperf_servers $1
     run_iperf_clients $1 $2
-    stop_iperf_servers
-    stop_mpstat "M2"
+    stop_iperf_servers $1
+    #stop_mpstat "M2"
+    stop_sar_pretend_mpstat "M2" $1
 }
 
 copy_back_results() {

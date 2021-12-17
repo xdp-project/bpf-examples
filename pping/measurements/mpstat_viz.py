@@ -12,6 +12,7 @@ import iperf_viz
 
 # Data mangling
 
+
 def load_mpstat_json(filename, compression="auto"):
     with util.open_compressed_file(filename, compression, mode="rt") as file:
         stats = json.load(file)
@@ -19,13 +20,34 @@ def load_mpstat_json(filename, compression="auto"):
 
 
 def get_timestamps(mpstat_json):
-    date = mpstat_json["date"]
-    timestamps = [date + " " + entry["timestamp"]
+    date = _get_file_date(mpstat_json)
+    timestamps = [date + " " + _stat_entry_timestamp(entry)
                   for entry in mpstat_json["statistics"]]
     ts = pd.to_datetime(timestamps).values
     for i in range(1, len(ts)):
         if ts[i] < ts[i - 1]:
             ts[i] += np.timedelta64(1, "D")
+    return ts
+
+
+def _get_file_date(mpstat_json):
+    '''
+    Handle difference between mpstat -o and sadf -j.
+    For mpstat  key is "date" but for sadf key is "file-date"
+    '''
+    return (mpstat_json["date"] if "date" in mpstat_json
+            else mpstat_json["file-date"])
+
+
+def _stat_entry_timestamp(stat_entry_dict):
+    '''
+    Handle difference between mpstat -o and sadf -j.
+    In mpstat timestamp is key is string with timestamp,
+    in sadf timestamp key is dict with key time
+    '''
+    ts = stat_entry_dict["timestamp"]
+    if isinstance(ts, dict):
+        ts = ts["time"]
     return ts
 
 

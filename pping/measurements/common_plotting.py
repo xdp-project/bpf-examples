@@ -68,14 +68,14 @@ def plot_stats_table(group_dfs, col, axes=None, fmt="{:.3f}", only_all=False, **
         if not only_all or group == "all":
             rows.append(group)
             cells.append([fmt.format(func(df[col].values))
-                          for func in (np.amin, np.median, np.mean, np.max, std_1)])
+                          for func in (np.nanmin, np.nanmedian, np.nanmean, np.nanmax, std_1)])
 
     axes.table(cells, rowLabels=rows, colLabels=cols, **kwargs)
     return axes
 
 
 def std_1(values):
-    return np.std(values, ddof=1)
+    return np.nanstd(values, ddof=1)
 
 
 def plot_cdf(x, axes=None, **kwargs):
