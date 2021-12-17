@@ -130,7 +130,7 @@ copy_back_results() {
 
     for M in "M1" "M2" "M3"; do
 	mkdir -p ${1}/${M}
-	ssh ${MACHINE_NAMES[$M]} "xz ${1}/*"
+	ssh ${MACHINE_NAMES[$M]} "xz -T0 ${1}/*"
 	scp -p "${MACHINE_NAMES[$M]}:${1}/*" "${1}/${M}/"
 	ssh ${MACHINE_NAMES[$M]} "rm -r ${1}"
     done
