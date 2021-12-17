@@ -163,14 +163,17 @@ def plot_iperf(stream_dfs, title=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize iperf3 JSON output")
-    parser.add_argument("-i", "--input", action="append", type=str, help="json input file", required=True)
+    parser.add_argument("-i", "--input", nargs="+", type=str, help="json input file(s)", required=True)
     parser.add_argument("-o", "--output", type=str, help="image output file", required=False)
     parser.add_argument("-T", "--title", type=str, help="figure title", required=False)
+    parser.add_argument("-O", "--include-omitted", help="include values marked as omitted",
+                        required=False, action="store_true")
     args = parser.parse_args()
 
-    json_data = [load_iperf3_json(file) for file in args.input]
-    data = merge_iperf_data(*[to_perstream_df(data) for data in json_data])
-    fig = plot_iperf(data, title=args.title)
+    data = [to_perstream_df(load_iperf3_json(f), skip_omitted=not args.include_omitted)
+            for f in args.input]
+    mdata = merge_iperf_data(*data)
+    fig = plot_iperf(mdata, title=args.title)
 
     if args.output is not None:
         fig.savefig(args.output, bbox_inches="tight")

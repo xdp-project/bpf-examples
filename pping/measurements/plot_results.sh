@@ -27,11 +27,7 @@ for pping in no_pping k_pping e_pping; do
     done
 
     echo "Plotting iperf traffic..."
-    IPERF_INPUT=""
-    for iperf_file in ${1}/${pping}/*M1/iperf*.json*; do
-	IPERF_INPUT+="-i $iperf_file "
-    done
-    ./iperf_viz.py $IPERF_INPUT -o ${1}/network_throughput_${pping}.png -T "Iperf traffic $pping"
+    ./iperf_viz.py -i ${1}/${pping}/*M1/iperf_*.json* -o ${1}/network_throughput_${pping}.png -T "Iperf traffic $pping"
 done
 
 echo -e "\nDone"
