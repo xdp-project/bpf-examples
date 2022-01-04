@@ -405,7 +405,7 @@ validflow_out:
 // Programs
 
 // Egress path using TC-BPF
-SEC(SEC_EGRESS_TC)
+SEC("tc")
 int pping_tc_egress(struct __sk_buff *skb)
 {
 	struct parsing_context pctx = {
@@ -422,7 +422,7 @@ int pping_tc_egress(struct __sk_buff *skb)
 }
 
 // Ingress path using TC-BPF
-SEC(SEC_INGRESS_TC)
+SEC("tc")
 int pping_tc_ingress(struct __sk_buff *skb)
 {
 	struct parsing_context pctx = {
@@ -439,7 +439,7 @@ int pping_tc_ingress(struct __sk_buff *skb)
 }
 
 // Ingress path using XDP
-SEC(SEC_INGRESS_XDP)
+SEC("xdp")
 int pping_xdp_ingress(struct xdp_md *ctx)
 {
 	struct parsing_context pctx = {
