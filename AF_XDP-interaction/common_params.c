@@ -29,7 +29,7 @@ void _print_options(const struct option_wrapper *long_options, bool required)
 		if (long_options[i].required != required)
 			continue;
 
-		if (long_options[i].option.val > 64) /* ord('A') = 65 */
+		if (long_options[i].option.val > 64) /* ord('A') = 65 = 0x41 */
 			printf(" -%c,", long_options[i].option.val);
 		else
 			printf("    ");
@@ -96,7 +96,7 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:ASNFUMQ:czqp:",
+	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -128,6 +128,25 @@ void parse_cmdline_args(int argc, char **argv,
 						errno, strerror(errno));
 				goto error;
 			}
+			break;
+		case 'G':
+			if (!ether_aton_r(optarg,
+					  (struct ether_addr *)&cfg->opt_tx_dmac)) {
+				fprintf(stderr, "Invalid dest MAC address:%s\n",
+					optarg);
+				goto error;
+			}
+			break;
+		case 'H':
+			if (!ether_aton_r(optarg,
+					  (struct ether_addr *)&cfg->opt_tx_smac)) {
+				fprintf(stderr, "Invalid src MAC address:%s\n",
+					optarg);
+				goto error;
+			}
+			break;
+		case 'B':
+			cfg->opt_busy_poll = true;
 			break;
 		case 'A':
 			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
