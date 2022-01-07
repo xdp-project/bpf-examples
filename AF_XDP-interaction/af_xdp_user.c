@@ -302,6 +302,13 @@ static const struct option_wrapper long_options[] = {
 
 static bool global_exit;
 
+int print_libbpf_log(enum libbpf_print_level lvl, const char *fmt, va_list args) {
+	if (!debug && lvl >= LIBBPF_DEBUG)
+		return 0;
+	return vfprintf(stderr, fmt, args);
+}
+/* Later set custom log handler via:  libbpf_set_print(print_libbpf_log); */
+
 /**
  * Simple memory allocator for umem frames
  */
@@ -1416,6 +1423,8 @@ int main(int argc, char **argv)
 		usage(argv[0], __doc__, long_options, (argc == 1));
 		return EXIT_FAIL_OPTION;
 	}
+
+	libbpf_set_print(print_libbpf_log); /* set custom log handler */
 
 	/* Unload XDP program if requested */
 	if (cfg.do_unload)
