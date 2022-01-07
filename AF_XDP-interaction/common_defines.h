@@ -37,6 +37,7 @@ extern int verbose;
 extern int debug;
 extern int debug_pkt;
 extern int debug_meta;
+extern int debug_time;
 
 /* Exit return codes */
 #define EXIT_OK 		 0 /* == EXIT_SUCCESS (stdlib.h) man exit(3) */

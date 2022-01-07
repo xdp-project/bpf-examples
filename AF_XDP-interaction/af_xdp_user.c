@@ -279,6 +279,9 @@ static const struct option_wrapper long_options[] = {
 	{{"metainfo",	 no_argument,		NULL, 'm' },
 	 "Print XDP metadata info output mode (debug)"},
 
+	{{"timedebug",	 no_argument,		NULL, 't' },
+	 "Print timestamps info for wakeup accuracy (debug)"},
+
 	{{"debug",	 no_argument,		NULL, 'D' },
 	 "Debug info output mode (debug)"},
 
@@ -1289,9 +1292,11 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 			       stat.curr - stat.prev,
 			       diff_interval);
 
-		print_timespec(&now,  "now");
-		print_timespec(&next_adj, "next_adj");
-		print_timespec(&next, "next");
+		if (debug_time) {
+			print_timespec(&now,  "now");
+			print_timespec(&next_adj, "next_adj");
+			print_timespec(&next, "next");
+		}
 
 		/* Calculate next time to wakeup */
 		next.tv_sec  += interval.tv_sec;

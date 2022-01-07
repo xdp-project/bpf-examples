@@ -17,6 +17,7 @@ int verbose = 1;
 int debug = 0;
 int debug_pkt = 0;
 int debug_meta = 0;
+int debug_time = 0;
 
 #define BUFSIZE 30
 
@@ -96,7 +97,7 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:",
+	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:t",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -195,6 +196,9 @@ void parse_cmdline_args(int argc, char **argv,
 			break;
 		case 'm':
 			debug_meta = true;
+			break;
+		case 't':
+			debug_time = true;
 			break;
 		case 'Q':
 			cfg->xsk_if_queue = atoi(optarg);
