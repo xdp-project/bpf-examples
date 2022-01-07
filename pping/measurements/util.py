@@ -1,6 +1,7 @@
 import numpy as np
 import gzip
 import lzma
+import subprocess
 
 
 def guess_compression(filename):
@@ -18,6 +19,10 @@ def open_compressed_file(filename, compression="auto", **kwargs):
         compression = guess_compression(filename)
 
     return open_funcs[compression](filename, **kwargs)
+
+
+def xz_decompress_file(filename):
+    subprocess.run(["xz", "-dk", filename], check=True)
 
 
 def normalize_timestamps(timestamps, reference=None):

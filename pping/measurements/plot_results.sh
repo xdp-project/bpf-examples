@@ -6,13 +6,16 @@
 # $1 = root folder
 # $2 = src-ip to filter RTT reports on (optional)
 
+IFACE=${IFACE:-"ens192"}
+OMIT=${OMIT:-60} #nr seconds to omit from result
+
 IP_ARG=""
 if [[ -v 2 ]]; then
     IP_ARG="-s $2"
 fi
 
 echo "Plotting comparsion graphs..."
-./pping_compare_viz.py -i $1 -o ${1}/pping_comparison.png $IP_ARG
+./pping_compare_viz.py -i $1 -o ${1}/pping_comparison.png -I $IFACE -O $OMIT $IP_ARG
 
 echo "Plotting eBPF pping map cleaning and lost events..."
 ./pping_err_viz.py -i ${1}/e_pping/*M2/pping.err* -o ${1}/epping_mapcleaning.png -T "Map cleaning and lost events"
@@ -21,13 +24,22 @@ echo "Plotting eBPF pping map cleaning and lost events..."
 for pping in no_pping k_pping e_pping; do
     echo -e "\nPlotting results for ${1}/${pping}..."
 
-    echo "Plotting CPU load..."
-    for M in "M1" "M2" "M3"; do
-	./mpstat_viz.py -i ${1}/${pping}/*${M}/*${M}_mpstat.json* -o ${1}/${M}_cpu_${pping}.png -t -T "${M} cpu load $pping"
-    done
+    if [[ -f "${1}/${pping}/M2/M2_stats.sar.xz" ]]; then
+        echo "Plotting CPU load..."
+        for M in "M1" "M2" "M3"; do
+            ./sar_cpu_viz.py -i ${1}/${pping}/${M}/${M}_stats.sar* -o ${1}/${M}_cpu_${pping}.png -T "${M} cpu load $pping"
+        done
 
-    echo "Plotting iperf traffic..."
-    ./iperf_viz.py -i ${1}/${pping}/*M1/iperf_*.json* -o ${1}/network_throughput_${pping}.png -T "Iperf traffic $pping"
+        echo "Plotting traffic on interface $IFACE"
+        ./sar_net_viz.py -i ${1}/${pping}/M2/M2_stats.sar* -o ${1}/M2_network_${IFACE}_${pping}.png -I $IFACE
+    else
+        echo "Warning: No sar data found!"
+    fi
+
+    if [[ -f "${1}/${pping}/M1/ss_tcp.log.xz" ]]; then
+        echo "Plotting TCP info..."
+        ./ss_tcp_viz.py -i ${1}/${pping}/M1/ss_tcp.log* -o ${1}/TCP_stats_${pping}.png -g
+    else
+        echo "Warning: No TCP data found!"
+    fi
 done
-
-echo -e "\nDone"

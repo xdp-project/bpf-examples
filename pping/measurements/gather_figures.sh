@@ -1,18 +1,23 @@
 #!/bin/bash
 
 # $1 = root folder
-# $2 = runs
 
-N_FLOWS=(1 5 10 100 500)
-DESTDIR=${1}/comparison_figures
+root_folder=${1:-"."}
+dest_dir=${root_folder}/comparison_figures
 
-mkdir $DESTDIR
+mkdir -p $dest_dir
 
-for (( i=1; i <= $2; i++)); do
-    for flows in ${N_FLOWS[@]}; do
-	SRCDIR=${1}/run_${i}/${flows}_streams
-	SUFFIX=${flows}_flows_run_${i}
-	cp "${SRCDIR}/pping_comparison.png" "${DESTDIR}/pping_comparison_${SUFFIX}.png"
-	cp "${SRCDIR}/epping_mapcleaning.png" "${DESTDIR}/mapcleaning_${SUFFIX}.png"
+for run_dir in ${root_folder}/run_*; do
+    run=${run_dir#"${root_folder}/run_"}
+    for flow_dir in $run_dir/*_streams; do
+        flows=${flow_dir#"${run_dir}/"}
+        flows=${flows%"_streams"}
+        suffix="${flows}_flows_run_${run}"
+
+        for image_name in "pping_comparison" "epping_mapcleaning"; do
+            cp "${flow_dir}/${image_name}.png" "${dest_dir}/${image_name}_${suffix}.png"
+        done
+
     done
 done
+

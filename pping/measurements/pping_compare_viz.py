@@ -7,41 +7,64 @@ import pathlib
 import argparse
 import time
 
-import mpstat_viz
-import iperf_viz
+import common_plotting as complot
+import sar_data_loading as sdl
+import sar_cpu_viz
 import util
 
 label_folder_map = {"baseline": "no_pping",
                     "PPing": "k_pping", "ePPing": "e_pping"}
 
 
-def get_test_interval(sub_folder, skip_omitted=True):
-    ref_file = list(pathlib.Path(sub_folder).glob("*M1/iperf_*.json*"))[0]
-    return iperf_viz.get_test_interval(ref_file, skip_omitted=skip_omitted)
+def get_test_interval(sub_folder, omit=0, omit_end=1):
+    start, end = None, None
+    with open(os.path.join(sub_folder, "test_interval.log"), "rt") as file:
+        lines = file.readlines()
+    start = np.datetime64(lines[0].split("Start: ")[1][:19])
+    start += np.timedelta64(omit, "s")
+    end = np.datetime64(lines[1].split("End: ")[1][:19])
+    end -= np.timedelta64(omit_end, "s")
+    return start, end
 
 
-def load_cpu_data(root_folder):
+def get_sarfile(sub_folder):
+    sarfiles = list(pathlib.Path(sub_folder, "M2").glob("M2_stats.sar*"))
+    if len(sarfiles) > 1:
+        print("Warning: Multiple sar files in {}, returning first".format(
+            os.path.join(sub_folder, "M2")))
+    return sarfiles[0] if len(sarfiles) > 0 else None
+
+
+def load_cpu_data(root_folder, omit=0):
     load_dict = dict()
     for label, folder in label_folder_map.items():
-        test_interval = get_test_interval(os.path.join(root_folder, folder))
-        j_data = mpstat_viz.load_mpstat_json(list(
-            pathlib.Path(root_folder, folder).glob("*M2/*M2_mpstat.json*"))[0])
-        data = mpstat_viz.to_percpu_df(j_data, filter_timerange=test_interval)
+        subfolder = os.path.join(root_folder, folder)
+        test_interval = get_test_interval(subfolder, omit)
+        sarfile = get_sarfile(subfolder)
+        if sarfile is None:
+            continue
+
+        j_data = sdl.load_sar_cpu_data(sarfile)
+        data = sdl.to_percpu_df(j_data, filter_timerange=test_interval)
+
         load_dict[label] = data["all"].copy()
+
     return load_dict
 
 
-def load_iperf_data(root_folder):
+def load_network_data(root_folder, interface="ens192", omit=0):
     net_dict = dict()
     for label, folder in label_folder_map.items():
-        iperf_data = []
+        subfolder = os.path.join(root_folder, folder)
+        test_interval = get_test_interval(subfolder, omit)
+        sarfile = get_sarfile(subfolder)
+        if sarfile is None:
+            continue
 
-        for iperf_file in pathlib.Path(root_folder, folder).glob("*M1/iperf_*json*"):
-            j_data = iperf_viz.load_iperf3_json(iperf_file)
-            iperf_data.append(iperf_viz.to_perstream_df(
-                j_data, include_total=False))
+        j_data = sdl.load_sar_network_data(get_sarfile(subfolder))
+        data = sdl.to_perinterface_df(j_data, filter_timerange=test_interval)
 
-        net_dict[label] = iperf_viz.merge_iperf_data(*iperf_data)["all"].copy()
+        net_dict[label] = data[interface].copy()
 
     return net_dict
 
@@ -57,9 +80,9 @@ def datetime64_truncate(dt, unit):
     return dt.astype("datetime64[{}]".format(unit)).astype(dt.dtype)
 
 
-def __count_pping_messages(filename, parsing_func, keys, date=None,
-                           norm_timestamps=True, filter_timerange=None,
-                           **kwargs):
+def _count_pping_messages(filename, parsing_func, keys, date=None,
+                          norm_timestamps=True, filter_timerange=None,
+                          **kwargs):
     """
     Count nr of rtt-events per second from some line-based output from pping.
     If passed, date should be string in YYYY-MM-DD format.
@@ -139,7 +162,7 @@ def parse_kpping_message(line, date, src_ip=None):
     return t, increments
 
 
-def count_epping_messages(root_folder, src_ip=None):
+def count_epping_messages(root_folder, src_ip=None, omit=0):
     """
     Count nr of rtt-events per second from the standard output of eBPF pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
@@ -147,33 +170,43 @@ def count_epping_messages(root_folder, src_ip=None):
     """
 
     sub_path = pathlib.Path(root_folder, "e_pping")
-    test_interval = get_test_interval(sub_path)
-    date = str(get_test_interval(sub_path, skip_omitted=False)[0])[:10]
+    test_interval = get_test_interval(sub_path, omit)
+    date = str(get_test_interval(sub_path)[0])[:10]
     file = list(sub_path.glob("*M2/pping.out*"))[0]
     keys = ["all_events", "rtt_events"]
     if src_ip is not None:
         keys.append("filtered_rtt_events")
 
-    return __count_pping_messages(file, parse_epping_message, keys, date=date,
-                                  filter_timerange=test_interval, src_ip=src_ip)
+    return _count_pping_messages(file, parse_epping_message, keys, date=date,
+                                 filter_timerange=test_interval, src_ip=src_ip)
 
 
-def count_kpping_messages(root_folder, src_ip=None):
+def count_kpping_messages(root_folder, src_ip=None, omit=0):
     """
     Count nr of rtt-events per second from the standard output of Kathie's pping.
     The columns "filtered_rtt_events" is rtt-events from src_ip
     """
 
     sub_path = pathlib.Path(root_folder, "k_pping")
-    test_interval = get_test_interval(sub_path)
-    date = str(get_test_interval(sub_path, skip_omitted=False)[0])[:10]
+    test_interval = get_test_interval(sub_path, omit)
+    date = str(get_test_interval(sub_path)[0])[:10]
     file = list(sub_path.glob("*M2/pping.out*"))[0]
     keys = ["rtt_events"]
     if src_ip is not None:
         keys.append("filtered_rtt_events")
 
-    return __count_pping_messages(file, parse_kpping_message, keys, date=date,
-                                  filter_timerange=test_interval, src_ip=src_ip)
+    return _count_pping_messages(file, parse_kpping_message, keys, date=date,
+                                 filter_timerange=test_interval, src_ip=src_ip)
+
+
+def plot_network_throughput(interface_dfs, axes=None, **kwargs):
+    axes = complot.plot_pergroup_timeseries(interface_dfs, "txbps", axes=axes,
+                                            stat_kwargs={"fmt": "{:.3e}"},
+                                            **kwargs)
+    _, ymax = axes.get_ylim()
+    axes.set_ylim(0, 1.05*ymax)
+    axes.set_ylabel("Throughput (bps)")
+    axes.set_xlabel("Time (s)")
 
 
 def plot_pping_output(kpping_data, epping_data, axes=None, grid=True, legend=True):
@@ -202,20 +235,25 @@ def main():
     parser = argparse.ArgumentParser("Plot graphs comparing the performance overhead of pping versions")
     parser.add_argument("-i", "--input", type=str, help="root folder of the results from run_tests.sh", required=True)
     parser.add_argument("-o", "--output", type=str, help="image output file", required=False)
+    parser.add_argument("-I", "--interface", type=str, help="interface pping is running on", default="ens192", required=False)
     parser.add_argument("-s", "--source-ip", type=str, help="src-ip used to count filtered report", required=False, default=None)
+    parser.add_argument("-O", "--omit", type=int, help="nr seconds to omit from start of test", required=False, default=0)
     args = parser.parse_args()
 
-    cpu_data = load_cpu_data(args.input)
-    iperf_data = load_iperf_data(args.input)
+    cpu_data = load_cpu_data(args.input, omit=args.omit)
+    net_data = load_network_data(args.input, interface=args.interface,
+                                 omit=args.omit)
 
-    epping_messages = count_epping_messages(args.input, src_ip=args.source_ip)
-    kpping_messages = count_kpping_messages(args.input, src_ip=args.source_ip)
+    epping_messages = count_epping_messages(args.input, src_ip=args.source_ip,
+                                            omit=args.omit)
+    kpping_messages = count_kpping_messages(args.input, src_ip=args.source_ip,
+                                            omit=args.omit)
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 15), constrained_layout=True)
 
-    mpstat_viz.plot_percpu_timeseries(cpu_data, axes=axes[0])
+    sar_cpu_viz.plot_percpu_timeseries(cpu_data, axes=axes[0])
     axes[0].set_xlabel("Time (s)")
-    iperf_viz.plot_throughput_timeseries(iperf_data, axes=axes[1])
+    plot_network_throughput(net_data, axes=axes[1])
     axes[1].set_xlabel("Time (s)")
     plot_pping_output(kpping_messages, epping_messages, axes=axes[2])
     fig.suptitle("Comparing performance of pping variants")
