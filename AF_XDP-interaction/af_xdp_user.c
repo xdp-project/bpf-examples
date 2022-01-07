@@ -1156,10 +1156,24 @@ static inline int64_t calcdiff(struct timespec t1, struct timespec t2)
 	return diff;
 }
 
+static inline int64_t calcdiff_ns(struct timespec t1, struct timespec t2)
+{
+	int64_t diff;
+	diff = NSEC_PER_SEC * (long long)((int) t1.tv_sec - (int) t2.tv_sec);
+	diff += ((int) t1.tv_nsec - (int) t2.tv_nsec);
+	return diff;
+}
+
+static void print_timespec(struct timespec *ts, char *msg)
+{
+	printf("Time: %lu.%lu - %s\n", ts->tv_sec, ts->tv_nsec, msg);
+}
+
 struct wakeup_stat {
 	long min;
 	long max;
-	long act;
+	long curr;
+	long prev;
 	double avg;
 	unsigned long events;
 };
@@ -1175,8 +1189,9 @@ struct wakeup_stat {
 static void tx_cyclic_and_rx_process(struct config *cfg,
 				    struct xsk_container *xsks)
 {
-	struct timespec now, next, interval;
-	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL};
+	struct timespec now, next, next_adj, interval, now_prev;
+	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL, .max = -0xFFFF };
+	struct wakeup_stat stat_adj = { .min = DEFAULT_INTERVAL, .max = -0xFFFF };
 	int batch_nr = 4;
 	struct xdp_desc tx_pkts[batch_nr];
 	int tx_nr;
@@ -1200,13 +1215,15 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 	next.tv_sec  += interval.tv_sec;
 	next.tv_nsec += interval.tv_nsec;
 	tsnorm(&next);
+	next_adj = next; /* Not adjusted yet */
 
 	while (!global_exit) {
-		int64_t diff;
+		int64_t diff, diff2adj, diff_interval;
+		int64_t avg, avg2adj;
 		int err, n;
 
-		/* Wait for next period */
-		err = clock_nanosleep(clock, timermode, &next, NULL);
+		/* Wait for next period, but adjusted for measured inaccuracy */
+		err = clock_nanosleep(clock, timermode, &next_adj, NULL);
 		/* Took case MODE_CLOCK_NANOSLEEP from cyclictest */
 		if (err) {
 			if (err != EINTR)
@@ -1216,6 +1233,7 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 		}
 
 		/* Expecting to wakeup at "next" get systime "now" to check */
+		now_prev = now;
 		err = clock_gettime(clock, &now);
 		if (err) {
 			if (err != EINTR)
@@ -1224,29 +1242,54 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 			goto out;
 		}
 
-		/* Detect inaccuracy diff */
-		diff = calcdiff(now, next);
+		/* How close is wakeup time to our actual target */
+		diff = calcdiff_ns(now, next); /* Positive num = wokeup after */
 		if (diff < stat.min)
 			stat.min = diff;
 		if (diff > stat.max)
 			stat.max = diff;
 		stat.avg += (double) diff;
-		stat.act = diff;
-
+		stat.prev = stat.curr;
+		stat.curr = diff;
 		stat.events++;
+		avg = (stat.avg / stat.events);
+
+		/* Measure inaccuracy of clock_nanosleep */
+		diff2adj = calcdiff_ns(now, next_adj); /* Positive num = wokeup after */
+		stat_adj.avg += (double) diff2adj;
+		stat_adj.events++;
+		avg2adj = (stat_adj.avg / stat_adj.events);
+
+		// IDEA: Spin until exact time occurs (if diff negative)
 
 		/* Send batch of packets */
 		n = tx_batch_pkts(xsk, tx_nr, tx_pkts);
 
+		diff_interval = calcdiff_ns(now, now_prev);
+
 		if (verbose >=1 )
 			printf("TX pkts:%d event:%lu"
-			       " inaccurate(usec) wakeup min:%ld cur:%ld max:%ld\n",
-			       n, stat.events, stat.min, stat.act, stat.max);
+			       " inaccurate wakeup(nanosec) curr:%ld"
+			       "(min:%ld max:%ld avg:%ld avg2adj:%ld)"
+			       " variance(n-1):%ld interval:%ld\n",
+			       n, stat.events, stat.curr,
+			       stat.min, stat.max, avg, avg2adj,
+			       stat.curr - stat.prev,
+			       diff_interval);
+
+		print_timespec(&now,  "now");
+		print_timespec(&next_adj, "next_adj");
+		print_timespec(&next, "next");
 
 		/* Calculate next time to wakeup */
 		next.tv_sec  += interval.tv_sec;
 		next.tv_nsec += interval.tv_nsec;
 		tsnorm(&next);
+
+		/* Adjust for inaccuracy of clock_nanosleep wakeup */
+		next_adj = next;
+		next_adj.tv_nsec = next_adj.tv_nsec - avg2adj;
+		tsnorm(&next_adj);
 
 		/* Get packets for *next* iteration */
 		tx_nr = invent_tx_pkts(cfg, xsk->umem, batch_nr, tx_pkts);
