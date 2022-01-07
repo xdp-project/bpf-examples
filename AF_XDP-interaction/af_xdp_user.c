@@ -1148,6 +1148,17 @@ static inline void tsnorm(struct timespec *ts)
 	}
 }
 
+static inline uint64_t timespec2ns(struct timespec *ts)
+{
+	return (uint64_t) ts->tv_sec * NANOSEC_PER_SEC + ts->tv_nsec;
+}
+
+static inline void ns2timespec(uint64_t ns, struct timespec *ts)
+{
+	ts->tv_sec  = ns / NANOSEC_PER_SEC;
+	ts->tv_nsec = ns % NANOSEC_PER_SEC;
+}
+
 static inline int64_t calcdiff(struct timespec t1, struct timespec t2)
 {
 	int64_t diff;
@@ -1287,8 +1298,9 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 		tsnorm(&next);
 
 		/* Adjust for inaccuracy of clock_nanosleep wakeup */
-		next_adj = next;
-		next_adj.tv_nsec = next_adj.tv_nsec - avg2adj;
+		uint64_t next_adj_ns = timespec2ns(&next);
+		next_adj_ns = next_adj_ns - avg2adj;
+		ns2timespec(next_adj_ns, &next_adj);
 		tsnorm(&next_adj);
 
 		/* Get packets for *next* iteration */
