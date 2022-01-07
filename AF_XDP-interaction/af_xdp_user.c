@@ -857,6 +857,8 @@ static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 		if (ret != 1) {
 			/* No more transmit slots, drop the packet */
 			mem_free_umem_frame(&umem->mem, pkt_addr);
+			fprintf(stderr, "ERR - %s() failed transmit\n",
+				__func__);
 		}
 
 		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = pkt_addr;
@@ -1555,7 +1557,7 @@ int main(int argc, char **argv)
 	 * be initilized correctly?
 	 */
 	//sleep(3);
-	// tx_pkt(&cfg, xsks.sockets[0]);
+	tx_pkt(&cfg, xsks.sockets[0]);
 
 	/* Receive and count packets than drop them */
 	// rx_and_process(&cfg, &xsks);
