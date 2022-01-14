@@ -527,16 +527,31 @@ error_exit:
 	return NULL;
 }
 
+static int kick_tx(struct xsk_socket_info *xsk)
+{
+	int err = 0;
+	int ret;
+
+	ret = sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+	if (ret < 0) { /* On error, -1 is returned, and errno is set */
+		fprintf(stderr, "WARN: %s() sendto() failed with errno:%d\n",
+			__func__, errno);
+		err = errno;
+	}
+	return err;
+}
+
 static void complete_tx(struct xsk_socket_info *xsk)
 {
 	unsigned int completed;
 	uint32_t idx_cq;
+	int ret;
 
 	if (!xsk->outstanding_tx)
 		return;
 
-	sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-
+	/* Notify kernel via sendto syscall that TX packet are avail */
+	kick_tx(xsk);
 
 	/* Collect/free completed TX buffers */
 	completed = xsk_ring_cons__peek(&xsk->cq,
@@ -872,7 +887,7 @@ static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 		xsk_ring_prod__submit(&xsk->tx, 1);
 		xsk->outstanding_tx++;
 	}
-	//complete_tx(xsk);
+	complete_tx(xsk);
 }
 
 /* Generate some fake packets (in umem area).  Real system will deliver TX
