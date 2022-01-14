@@ -538,20 +538,24 @@ static int kick_tx(struct xsk_socket_info *xsk)
 			__func__, errno);
 		err = errno;
 	}
+	/* Kernel samples/bpf/ xdp_sock_user.c kick_tx variant doesn't
+	 * treat the following errno values as errors:
+	 *  ENOBUFS , EAGAIN , EBUSY , ENETDOWN
+	 */
 	return err;
 }
 
-static void complete_tx(struct xsk_socket_info *xsk)
+static int complete_tx(struct xsk_socket_info *xsk)
 {
 	unsigned int completed;
 	uint32_t idx_cq;
-	int ret;
+	int err;
 
 	if (!xsk->outstanding_tx)
 		return;
 
 	/* Notify kernel via sendto syscall that TX packet are avail */
-	kick_tx(xsk);
+	err = kick_tx(xsk);
 
 	/* Collect/free completed TX buffers */
 	completed = xsk_ring_cons__peek(&xsk->cq,
@@ -577,6 +581,8 @@ static void complete_tx(struct xsk_socket_info *xsk)
 		xsk->outstanding_tx -= completed < xsk->outstanding_tx ?
 			completed : xsk->outstanding_tx;
 	}
+
+	return err;
 }
 
 static inline __sum16 csum16_add(__sum16 csum, __be16 addend)
@@ -863,7 +869,7 @@ static void print_pkt_info(uint8_t *pkt, uint32_t len)
 	}
 }
 
-static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
+static int tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 {
 	struct xsk_umem_info *umem = xsk->umem;
 	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
@@ -893,7 +899,8 @@ static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 		xsk_ring_prod__submit(&xsk->tx, 1);
 		xsk->outstanding_tx++;
 	}
-	complete_tx(xsk);
+
+	return complete_tx(xsk);
 }
 
 /* Generate some fake packets (in umem area).  Real system will deliver TX
@@ -1640,9 +1647,15 @@ int main(int argc, char **argv)
 	 * It seems related with XDP attachment causing link down/up event for
 	 * some drivers.  Q: What is the right method/API that waits for link to
 	 * be initilized correctly?
+	 *
+	 * This workaround keeps trying to send a single packet, and
+	 * check return value seen from sendto() syscall, until it
+	 * doesn't return an error.
 	 */
-	//sleep(3);
-	tx_pkt(&cfg, xsks.sockets[0]);
+	while (err = tx_pkt(&cfg, xsks.sockets[0])) {
+		fprintf(stderr, "WARN(%d): Failed to Tx pkt, will retry\n", err);
+		sleep(1);
+	}
 
 	/* Receive and count packets than drop them */
 	// rx_and_process(&cfg, &xsks);
