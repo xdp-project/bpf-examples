@@ -30,6 +30,7 @@ struct config {
 	bool opt_busy_poll;
 	struct ether_addr opt_tx_smac;
 	struct ether_addr opt_tx_dmac;
+	__u64 interval;
 };
 
 /* Defined in common_params.o */

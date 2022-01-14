@@ -300,6 +300,9 @@ static const struct option_wrapper long_options[] = {
 	{{"tx-smac",	 required_argument,	NULL, 'H' },
 	 "Src MAC addr of TX frame in aa:bb:cc:dd:ee:ff format", "aa:bb:cc:dd:ee:ff"},
 
+	{{"interval",	 required_argument,	NULL, 'i' },
+	 "Periodic TX-cyclic interval wakeup period in usec", "<usec>"},
+
 	{{0, 0, NULL,  0 }, NULL, false}
 };
 
@@ -1138,7 +1141,7 @@ static void rx_avail_packets(struct xsk_container *xsks)
 }
 
 /* Default interval in usec */
-#define DEFAULT_INTERVAL 1000000
+#define DEFAULT_INTERVAL	1000000
 
 #define USEC_PER_SEC		1000000
 #define NSEC_PER_SEC		1000000000
@@ -1210,7 +1213,7 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 	struct xdp_desc tx_pkts[batch_nr];
 	int tx_nr;
 
-	int period = DEFAULT_INTERVAL; // TODO: Add to cfg
+	int period = cfg->interval;
 	int timermode = TIMER_ABSTIME;
 	int clock = CLOCK_MONOTONIC;
 
@@ -1286,7 +1289,7 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 			printf("TX pkts:%d event:%lu"
 			       " inaccurate wakeup(nanosec) curr:%ld"
 			       "(min:%ld max:%ld avg:%ld avg2adj:%ld)"
-			       " variance(n-1):%ld interval:%ld\n",
+			       " variance(n-1):%ld interval-ns:%ld\n",
 			       n, stat.events, stat.curr,
 			       stat.min, stat.max, avg, avg2adj,
 			       stat.curr - stat.prev,
@@ -1444,6 +1447,7 @@ int main(int argc, char **argv)
 		.xsk_if_queue = -1,
 		.opt_tx_dmac = default_tx_dmac,
 		.opt_tx_smac = default_tx_smac,
+		.interval = DEFAULT_INTERVAL,
 	};
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;

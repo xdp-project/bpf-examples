@@ -97,7 +97,7 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:t",
+	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:ti:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -218,6 +218,9 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'R': /* --dest-mac */
 			dest  = (char *)&cfg->dest_mac;
 			strncpy(dest, optarg, sizeof(cfg->dest_mac));
+			break;
+		case 'i':
+			cfg->interval = atoi(optarg);
 			break;
 		case 'c':
 			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY;	/* Clear flag */
