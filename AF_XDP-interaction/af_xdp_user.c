@@ -1230,8 +1230,7 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 
 	next = now;
 	next.tv_sec  += interval.tv_sec;
-	// next.tv_nsec += interval.tv_nsec;
-	next.tv_nsec = 0;
+	next.tv_nsec += interval.tv_nsec;
 	tsnorm(&next);
 	next_adj = next; /* Not adjusted yet */
 
