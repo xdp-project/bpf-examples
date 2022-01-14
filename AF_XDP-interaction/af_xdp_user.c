@@ -568,6 +568,12 @@ static void complete_tx(struct xsk_socket_info *xsk)
 		}
 
 		xsk_ring_cons__release(&xsk->cq, completed);
+		if (completed > xsk->outstanding_tx) {
+			fprintf(stderr, "WARN: %s() "
+				"reset outstanding_tx(%d) as completed(%d)"
+				"more than outstanding TX pakcets\n",
+				__func__, xsk->outstanding_tx, completed);
+		}
 		xsk->outstanding_tx -= completed < xsk->outstanding_tx ?
 			completed : xsk->outstanding_tx;
 	}
