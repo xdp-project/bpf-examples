@@ -6,9 +6,6 @@
 #include <linux/in6.h>
 #include <stdbool.h>
 
-#define INGRESS_PROG_SEC "xdp"
-#define EGRESS_PROG_SEC "classifier"
-
 /* For the event_type members of rtt_event and flow_event */
 #define EVENT_TYPE_FLOW 1
 #define EVENT_TYPE_RTT 2

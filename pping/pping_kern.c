@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <linux/pkt_cls.h>
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/if_ether.h>
@@ -267,27 +268,21 @@ static void fill_flow_event(struct flow_event *fe, __u64 timestamp,
 	fe->reserved = 0; // Make sure it's initilized
 }
 
-// Programs
-
-// TC-BFP for parsing packet identifier from egress traffic and add to map
-SEC(EGRESS_PROG_SEC)
-int pping_egress(struct __sk_buff *skb)
+/*
+ * Main function for handling the pping egress path.
+ * Parses the packet for an identifer and attemps to store a timestamp for it
+ * in the packet_ts map.
+ */
+static void pping_egress(void *ctx, struct parsing_context *pctx)
 {
 	struct packet_id p_id = { 0 };
 	struct flow_event fe;
-	__u64 now;
-	struct parsing_context pctx = {
-		.data = (void *)(long)skb->data,
-		.data_end = (void *)(long)skb->data_end,
-		.pkt_len = skb->len,
-		.nh = { .pos = pctx.data },
-		.is_egress = true,
-	};
 	struct flow_state *f_state;
 	struct flow_state new_state = { 0 };
+	__u64 now;
 
-	if (parse_packet_identifier(&pctx, &p_id, &fe.event_info) < 0)
-		goto out;
+	if (parse_packet_identifier(pctx, &p_id, &fe.event_info) < 0)
+		return;
 
 	now = bpf_ktime_get_ns(); // or bpf_ktime_get_boot_ns
 	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
@@ -298,10 +293,10 @@ int pping_egress(struct __sk_buff *skb)
 			bpf_map_delete_elem(&flow_state, &p_id.flow);
 			fill_flow_event(&fe, now, &p_id.flow,
 					EVENT_SOURCE_EGRESS);
-			bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU,
+			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
 					      &fe, sizeof(fe));
 		}
-		goto out;
+		return;
 	}
 
 	// No previous state - attempt to create it and push flow-opening event
@@ -311,29 +306,29 @@ int pping_egress(struct __sk_buff *skb)
 		f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
 
 		if (!f_state) // Creation failed
-			goto out;
+			return;
 
 		if (fe.event_info.event != FLOW_EVENT_OPENING) {
 			fe.event_info.event = FLOW_EVENT_OPENING;
 			fe.event_info.reason = EVENT_REASON_FIRST_OBS_PCKT;
 		}
 		fill_flow_event(&fe, now, &p_id.flow, EVENT_SOURCE_EGRESS);
-		bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU, &fe,
+		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe,
 				      sizeof(fe));
 	}
 
 	f_state->sent_pkts++;
-	f_state->sent_bytes += remaining_pkt_payload(&pctx);
+	f_state->sent_bytes += remaining_pkt_payload(pctx);
 
 	// Check if identfier is new
 	if (f_state->last_id == p_id.identifier)
-		goto out;
+		return;
 	f_state->last_id = p_id.identifier;
 
 	// Check rate-limit
 	if (now < f_state->last_timestamp ||
 	    now - f_state->last_timestamp < config.rate_limit)
-		goto out;
+		return;
 
 	/*
 	 * Updates attempt at creating timestamp, even if creation of timestamp
@@ -344,37 +339,32 @@ int pping_egress(struct __sk_buff *skb)
 	f_state->last_timestamp = now;
 	bpf_map_update_elem(&packet_ts, &p_id, &now, BPF_NOEXIST);
 
-out:
-	return BPF_OK;
+	return;
 }
 
-// XDP program for parsing identifier in ingress traffic and check for match in map
-SEC(INGRESS_PROG_SEC)
-int pping_ingress(struct xdp_md *ctx)
+/*
+ * Main function for handling the pping ingress path.
+ * Parses the packet for an identifer and tries to lookup a stored timestmap.
+ * If it finds a match, it pushes an rtt_event to the events buffer.
+ */
+static void pping_ingress(void *ctx, struct parsing_context *pctx)
 {
 	struct packet_id p_id = { 0 };
-	__u64 *p_ts;
 	struct flow_event fe;
 	struct rtt_event re = { 0 };
 	struct flow_state *f_state;
-	struct parsing_context pctx = {
-		.data = (void *)(long)ctx->data,
-		.data_end = (void *)(long)ctx->data_end,
-		.pkt_len = pctx.data_end - pctx.data,
-		.nh = { .pos = pctx.data },
-		.is_egress = false,
-	};
+	__u64 *p_ts;
 	__u64 now;
 
-	if (parse_packet_identifier(&pctx, &p_id, &fe.event_info) < 0)
-		goto out;
+	if (parse_packet_identifier(pctx, &p_id, &fe.event_info) < 0)
+		return;
 
 	f_state = bpf_map_lookup_elem(&flow_state, &p_id.flow);
 	if (!f_state)
-		goto out;
+		return;
 
 	f_state->rec_pkts++;
-	f_state->rec_bytes += remaining_pkt_payload(&pctx);
+	f_state->rec_bytes += remaining_pkt_payload(pctx);
 
 	now = bpf_ktime_get_ns();
 	p_ts = bpf_map_lookup_elem(&packet_ts, &p_id);
@@ -389,6 +379,7 @@ int pping_ingress(struct xdp_md *ctx)
 	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
 		f_state->min_rtt = re.rtt;
 
+	// Fill event and push to perf-buffer
 	re.event_type = EVENT_TYPE_RTT;
 	re.timestamp = now;
 	re.min_rtt = f_state->min_rtt;
@@ -396,9 +387,7 @@ int pping_ingress(struct xdp_md *ctx)
 	re.sent_bytes = f_state->sent_bytes;
 	re.rec_pkts = f_state->rec_pkts;
 	re.rec_bytes = f_state->rec_bytes;
-
-	// Push event to perf-buffer
-	__builtin_memcpy(&re.flow, &p_id.flow, sizeof(struct network_tuple));
+	re.flow = p_id.flow;
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
 
 validflow_out:
@@ -410,6 +399,58 @@ validflow_out:
 				      sizeof(fe));
 	}
 
-out:
+	return;
+}
+
+// Programs
+
+// Egress path using TC-BPF
+SEC("tc")
+int pping_tc_egress(struct __sk_buff *skb)
+{
+	struct parsing_context pctx = {
+		.data = (void *)(long)skb->data,
+		.data_end = (void *)(long)skb->data_end,
+		.pkt_len = skb->len,
+		.nh = { .pos = pctx.data },
+		.is_egress = true,
+	};
+
+	pping_egress(skb, &pctx);
+
+	return TC_ACT_UNSPEC;
+}
+
+// Ingress path using TC-BPF
+SEC("tc")
+int pping_tc_ingress(struct __sk_buff *skb)
+{
+	struct parsing_context pctx = {
+		.data = (void *)(long)skb->data,
+		.data_end = (void *)(long)skb->data_end,
+		.pkt_len = skb->len,
+		.nh = { .pos = pctx.data },
+		.is_egress = false,
+	};
+
+	pping_ingress(skb, &pctx);
+
+	return TC_ACT_UNSPEC;
+}
+
+// Ingress path using XDP
+SEC("xdp")
+int pping_xdp_ingress(struct xdp_md *ctx)
+{
+	struct parsing_context pctx = {
+		.data = (void *)(long)ctx->data,
+		.data_end = (void *)(long)ctx->data_end,
+		.pkt_len = pctx.data_end - pctx.data,
+		.nh = { .pos = pctx.data },
+		.is_egress = false,
+	};
+
+	pping_ingress(ctx, &pctx);
+
 	return XDP_PASS;
 }

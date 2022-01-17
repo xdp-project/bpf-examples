@@ -132,14 +132,6 @@ An example of a (pretty-printed) RTT-even is provided below:
   calculated RTT (together with the flow-tuple) is pushed to the perf-buffer
   `events`. Both `pping_egress()` and `pping_ingress` can also push flow-events
   to the `events` buffer.
-- **bpf_egress_loader.sh:** A shell script that's used by `pping.c` to setup a
-  clsact qdisc and attach the `pping_egress()` program to egress using
-  tc. **Note**: Unless your iproute2 comes with libbpf support, tc will use
-  iproute's own loading mechanism when loading and attaching object files
-  directly through the tc command line. To ensure that libbpf is always used to
-  load `pping_egress()`, `pping.c` actually loads the program and pins it to
-  `/sys/fs/bpf/pping/classifier`, and tc only attaches the pinned program.
-- **functions.sh and parameters.sh:** Imported by `bpf_egress_loader.sh`.
 - **pping.h:** Common header file included by `pping.c` and
   `pping_kern.c`. Contains some common structs used by both (are part of the
   maps).

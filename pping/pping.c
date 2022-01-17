@@ -28,8 +28,8 @@ static const char *__doc__ =
 
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
-
-#define TCBPF_LOADER_SCRIPT "./bpf_egress_loader.sh"
+#define MS_PER_S 1000UL
+#define S_PER_DAY (24*3600UL)
 
 #define TIMESTAMP_LIFETIME                                                     \
 	(10 * NS_PER_SECOND) // Clear out packet timestamps if they're over 10 seconds
@@ -43,6 +43,12 @@ static const char *__doc__ =
 
 #define MON_TO_REAL_UPDATE_FREQ                                                \
 	(1 * NS_PER_SECOND) // Update offset between CLOCK_MONOTONIC and CLOCK_REALTIME once per second
+
+enum PPING_OUTPUT_FORMAT {
+	PPING_OUTPUT_STANDARD,
+	PPING_OUTPUT_JSON,
+	PPING_OUTPUT_PPVIZ
+};
 
 /* 
  * BPF implementation of pping using libbpf
@@ -67,20 +73,23 @@ struct map_cleanup_args {
 // Store configuration values in struct to easily pass around
 struct pping_config {
 	struct bpf_config bpf_config;
+	struct bpf_tc_opts tc_ingress_opts;
+	struct bpf_tc_opts tc_egress_opts;
 	__u64 cleanup_interval;
 	char *object_path;
-	char *ingress_sec;
-	char *egress_sec;
-	char *pin_dir;
+	char *ingress_prog;
+	char *egress_prog;
 	char *packet_map;
 	char *flow_map;
 	char *event_map;
 	int xdp_flags;
 	int ifindex;
+	int ingress_prog_id;
+	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
-	bool json_format;
-	bool ppviz_format;
+	enum PPING_OUTPUT_FORMAT output_format;
 	bool force;
+	bool created_tc_hook;
 };
 
 static volatile int keep_running = 1;
@@ -91,9 +100,10 @@ static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
 	{ "interface",        required_argument, NULL, 'i' }, // Name of interface to run on
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
-	{ "force",            no_argument,       NULL, 'f' }, // Detach any existing XDP program on interface
-	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s
+	{ "force",            no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
+	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
+	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
 	{ 0, 0, NULL, 0 }
 };
 
@@ -120,22 +130,36 @@ static void print_usage(char *argv[])
 	printf("\n");
 }
 
-static double parse_positive_double_argument(const char *str,
-					     const char *parname)
+/*
+ * Simple convenience wrapper around libbpf_strerror for which you don't have
+ * to provide a buffer. Instead uses its own static buffer and returns a pointer
+ * to it.
+ *
+ * This of course comes with the tradeoff that it is no longer thread safe and
+ * later invocations overwrite previous results.
+ */
+static const char *get_libbpf_strerror(int err)
+{
+	static char buf[200];
+	libbpf_strerror(err, buf, sizeof(buf));
+	return buf;
+}
+
+static int parse_bounded_double(double *res, const char *str, double low,
+				   double high, const char *name)
 {
 	char *endptr;
-	double val;
-	val = strtod(str, &endptr);
+	*res = strtod(str, &endptr);
 	if (strlen(str) != endptr - str) {
-		fprintf(stderr, "%s %s is not a valid number\n", parname, str);
+		fprintf(stderr, "%s %s is not a valid number\n", name, str);
 		return -EINVAL;
 	}
-	if (val < 0) {
-		fprintf(stderr, "%s must be positive\n", parname);
+	if (*res < low || *res > high) {
+		fprintf(stderr, "%s must in range [%g, %g]\n", name, low, high);
 		return -EINVAL;
 	}
 
-	return val;
+	return 0;
 }
 
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
@@ -145,10 +169,8 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 	config->ifindex = 0;
 	config->force = false;
-	config->json_format = false;
-	config->ppviz_format = false;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:I:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -163,40 +185,55 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				err = -errno;
 				fprintf(stderr,
 					"Could not get index of interface %s: %s\n",
-					config->ifname, strerror(err));
+					config->ifname, get_libbpf_strerror(err));
 				return err;
 			}
 			break;
 		case 'r':
-			rate_limit_ms = parse_positive_double_argument(
-				optarg, "rate-limit");
-			if (rate_limit_ms < 0)
+			err = parse_bounded_double(&rate_limit_ms, optarg, 0,
+						   7 * S_PER_DAY * MS_PER_S,
+						   "rate-limit");
+			if (err)
 				return -EINVAL;
 
 			config->bpf_config.rate_limit =
 				rate_limit_ms * NS_PER_MS;
 			break;
 		case 'c':
-			cleanup_interval_s = parse_positive_double_argument(
-				optarg, "cleanup-interval");
-			if (cleanup_interval_s < 0)
+			err = parse_bounded_double(&cleanup_interval_s, optarg,
+						   0, 7 * S_PER_DAY,
+						   "cleanup-interval");
+			if (err)
 				return -EINVAL;
 
 			config->cleanup_interval =
 				cleanup_interval_s * NS_PER_SECOND;
 			break;
 		case 'F':
-			if (strcmp(optarg, "json") == 0) {
-				config->json_format = true;
+			if (strcmp(optarg, "standard") == 0) {
+				config->output_format = PPING_OUTPUT_STANDARD;
+			} else if (strcmp(optarg, "json") == 0) {
+				config->output_format = PPING_OUTPUT_JSON;
 			} else if (strcmp(optarg, "ppviz") == 0) {
-				config->ppviz_format = true;
-			} else if (strcmp(optarg, "standard") != 0) {
+				config->output_format = PPING_OUTPUT_PPVIZ;
+			} else {
 				fprintf(stderr, "format must be \"standard\", \"json\" or \"ppviz\"\n");
+				return -EINVAL;
+			}
+			break;
+		case 'I':
+			if (strcmp(optarg, "xdp") == 0) {
+				config->ingress_prog = "pping_xdp_ingress";
+			} else if (strcmp(optarg, "tc") == 0) {
+				config->ingress_prog = "pping_tc_ingress";
+			} else {
+				fprintf(stderr, "ingress-hook must be \"xdp\" or \"tc\"\n");
 				return -EINVAL;
 			}
 			break;
 		case 'f':
 			config->force = true;
+			config->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
 			break;
 		case 'h':
 			printf("HELP:\n");
@@ -232,76 +269,6 @@ static int set_rlimit(long int lim)
 	return !setrlimit(RLIMIT_MEMLOCK, &rlim) ? 0 : -errno;
 }
 
-static int
-bpf_obj_run_prog_pindir_func(struct bpf_object *obj, const char *prog_title,
-			     const char *pin_dir,
-			     int (*func)(struct bpf_program *, const char *))
-{
-	int len;
-	struct bpf_program *prog;
-	char path[MAX_PATH_LEN];
-
-	len = snprintf(path, MAX_PATH_LEN, "%s/%s", pin_dir, prog_title);
-	if (len < 0)
-		return len;
-	if (len > MAX_PATH_LEN)
-		return -ENAMETOOLONG;
-
-	prog = bpf_object__find_program_by_title(obj, prog_title);
-	if (!prog || libbpf_get_error(prog))
-		return prog ? libbpf_get_error(prog) : -EINVAL;
-
-	return func(prog, path);
-}
-
-/*
- * Similar to bpf_object__pin_programs, but only attemps to pin a
- * single program prog_title at path pin_dir/prog_title
- */
-static int bpf_obj_pin_program(struct bpf_object *obj, const char *prog_title,
-			       const char *pin_dir)
-{
-	return bpf_obj_run_prog_pindir_func(obj, prog_title, pin_dir,
-					    bpf_program__pin);
-}
-
-/*
- * Similar to bpf_object__unpin_programs, but only attempts to unpin a
- * single program prog_title at path pin_dir/prog_title.
- */
-static int bpf_obj_unpin_program(struct bpf_object *obj, const char *prog_title,
-				 const char *pin_dir)
-{
-	return bpf_obj_run_prog_pindir_func(obj, prog_title, pin_dir,
-					    bpf_program__unpin);
-}
-
-static int xdp_detach(int ifindex, __u32 xdp_flags)
-{
-	return bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
-}
-
-static int xdp_attach(struct bpf_object *obj, const char *sec, int ifindex,
-		      __u32 xdp_flags, bool force)
-{
-	struct bpf_program *prog;
-	int prog_fd;
-
-	if (sec)
-		prog = bpf_object__find_program_by_title(obj, sec);
-	else
-		prog = bpf_program__next(NULL, obj);
-
-	prog_fd = bpf_program__fd(prog);
-	if (prog_fd < 0)
-		return prog_fd;
-
-	if (force) // detach current (if any) xdp-program first
-		xdp_detach(ifindex, xdp_flags);
-
-	return bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
-}
-
 static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 {
 	struct bpf_map *map = NULL;
@@ -314,48 +281,152 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
 	return -EINVAL;
 }
 
-static int run_external_program(const char *path, char *const argv[])
+/*
+ * Attempt to attach program in section sec of obj to ifindex.
+ * If sucessful, will return the positive program id of the attached.
+ * On failure, will return a negative error code.
+ */
+static int xdp_attach(struct bpf_object *obj, const char *prog_name,
+		      int ifindex, __u32 xdp_flags)
 {
-	int status;
-	int ret = -1;
+	struct bpf_program *prog;
+	int prog_fd, err;
+	__u32 prog_id;
 
-	pid_t pid = fork();
+	if (prog_name)
+		prog = bpf_object__find_program_by_name(obj, prog_name);
+	else
+		prog = bpf_object__next_program(obj, NULL);
 
-	if (pid < 0)
-		return -errno;
-	if (pid == 0) {
-		execv(path, argv);
-		return -errno;
-	} else { //pid > 0
-		waitpid(pid, &status, 0);
-		if (WIFEXITED(status))
-			ret = WEXITSTATUS(status);
-		return ret;
+	prog_fd = bpf_program__fd(prog);
+	if (prog_fd < 0)
+		return prog_fd;
+
+	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
+	if (err)
+		return err;
+
+	err = bpf_get_link_xdp_id(ifindex, &prog_id, xdp_flags);
+	if (err) {
+		bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+		return err;
 	}
+
+	return prog_id;
 }
 
-static int tc_bpf_attach(const char *pin_dir, const char *section,
-			 char *interface)
+static int xdp_detach(int ifindex, __u32 xdp_flags, __u32 expected_prog_id)
 {
-	char prog_path[MAX_PATH_LEN];
-	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev",   interface,
-			       "--pinned",	    prog_path, NULL };
+	__u32 curr_prog_id;
+	int err;
 
-	if (snprintf(prog_path, sizeof(prog_path), "%s/%s", pin_dir, section) < 0)
-		return -EINVAL;
+	err = bpf_get_link_xdp_id(ifindex, &curr_prog_id, xdp_flags);
+	if (err)
+		return err;
 
-	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
-}
+	if (!curr_prog_id) {
+		return 0; // No current prog on interface
+	}
 
-static int tc_bpf_clear(char *interface)
-{
-	char *const argv[] = { TCBPF_LOADER_SCRIPT, "--dev", interface,
-			       "--remove", NULL };
-	return run_external_program(TCBPF_LOADER_SCRIPT, argv);
+	if (expected_prog_id && curr_prog_id != expected_prog_id)
+		return -ENOENT;
+
+	return bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
 }
 
 /*
- * Returns time of CLOCK_MONOTONIC as nanoseconds in a single __u64.
+ * Will attempt to attach program at section sec in obj to ifindex at
+ * attach_point.
+ * On success, will fill in the passed opts, optionally set new_hook depending
+ * if it created a new hook or not, and return the id of the attached program.
+ * On failure it will return a negative error code.
+ */
+static int tc_attach(struct bpf_object *obj, int ifindex,
+		     enum bpf_tc_attach_point attach_point,
+		     const char *prog_name, struct bpf_tc_opts *opts,
+		     bool *new_hook)
+{
+	int err;
+	int prog_fd;
+	bool created_hook = true;
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+			    .attach_point = attach_point);
+
+	err = bpf_tc_hook_create(&hook);
+	if (err == -EEXIST)
+		created_hook = false;
+	else if (err)
+		return err;
+
+	prog_fd = bpf_program__fd(
+		bpf_object__find_program_by_name(obj, prog_name));
+	if (prog_fd < 0) {
+		err = prog_fd;
+		goto err_after_hook;
+	}
+
+	opts->prog_fd = prog_fd;
+	opts->prog_id = 0;
+	err = bpf_tc_attach(&hook, opts);
+	if (err)
+		goto err_after_hook;
+
+	if (new_hook)
+		*new_hook = created_hook;
+	return opts->prog_id;
+
+err_after_hook:
+	/*
+	 * Destroy hook if it created it.
+	 * This is slightly racy, as some other program may still have been
+	 * attached to the hook between its creation and this error cleanup.
+	 */
+	if (created_hook) {
+		hook.attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+		bpf_tc_hook_destroy(&hook);
+	}
+	return err;
+}
+
+static int tc_detach(int ifindex, enum bpf_tc_attach_point attach_point,
+		     const struct bpf_tc_opts *opts, bool destroy_hook)
+{
+	int err;
+	int hook_err = 0;
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+			    .attach_point = attach_point);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts_info, .handle = opts->handle,
+			    .priority = opts->priority);
+
+	// Check we are removing the correct program
+	err = bpf_tc_query(&hook, &opts_info);
+	if (err)
+		return err;
+	if (opts->prog_id != opts_info.prog_id)
+		return -ENOENT;
+
+	// Attempt to detach program
+	opts_info.prog_fd = 0;
+	opts_info.prog_id = 0;
+	opts_info.flags = 0;
+	err = bpf_tc_detach(&hook, &opts_info);
+
+	/*
+	 * Attempt to destroy hook regardsless if detach succeded.
+	 * If the hook is destroyed sucessfully, program should
+	 * also be detached.
+	 */
+	if (destroy_hook) {
+		hook.attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+		hook_err = bpf_tc_hook_destroy(&hook);
+	}
+
+	err = destroy_hook ? hook_err : err;
+	return err;
+}
+
+/*
+ * Returns time as nanoseconds in a single __u64.
  * On failure, the value 0 is returned (and errno will be set).
  */
 static __u64 get_time_ns(clockid_t clockid)
@@ -706,18 +777,59 @@ static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "Lost %llu RTT events on CPU %d\n", lost_cnt, cpu);
 }
 
-static int load_attach_bpfprogs(struct bpf_object **obj,
-				struct pping_config *config, bool *tc_attached,
-				bool *xdp_attached)
+/*
+ * Sets only the necessary programs in the object file to autoload.
+ *
+ * Assumes all programs are set to autoload by default, so in practice
+ * deactivates autoloading for the program that does not need to be loaded.
+ */
+static int set_programs_to_load(struct bpf_object *obj,
+				struct pping_config *config)
 {
-	int err;
+	struct bpf_program *prog;
+	char *unload_prog =
+		strcmp(config->ingress_prog, "pping_xdp_ingress") != 0 ?
+			"pping_xdp_ingress" :
+			      "pping_tc_ingress";
+
+	prog = bpf_object__find_program_by_name(obj, unload_prog);
+	if (libbpf_get_error(prog))
+		return libbpf_get_error(prog);
+
+	return bpf_program__set_autoload(prog, false);
+}
+
+/*
+ * Print out some hints for what might have caused an error while attempting
+ * to attach an XDP program. Based on xdp_link_attach() in
+ * xdp-tutorial/common/common_user_bpf_xdp.c
+ */
+static void print_xdp_error_hints(FILE *stream, int err)
+{
+	err = err > 0 ? err : -err;
+	switch (err) {
+	case EBUSY:
+	case EEXIST:
+		fprintf(stream, "Hint: XDP already loaded on device"
+				" use --force to swap/replace\n");
+		break;
+	case EOPNOTSUPP:
+		fprintf(stream, "Hint: Native-XDP not supported\n");
+		break;
+	}
+}
+
+static int load_attach_bpfprogs(struct bpf_object **obj,
+				struct pping_config *config)
+{
+	int err, detach_err;
 
 	// Open and load ELF file
 	*obj = bpf_object__open(config->object_path);
 	err = libbpf_get_error(*obj);
 	if (err) {
 		fprintf(stderr, "Failed opening object file %s: %s\n",
-			config->object_path, strerror(-err));
+			config->object_path, get_libbpf_strerror(err));
 		return err;
 	}
 
@@ -725,48 +837,61 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 			  sizeof(config->bpf_config));
 	if (err) {
 		fprintf(stderr, "Failed pushing user-configration to %s: %s\n",
-			config->object_path, strerror(-err));
+			config->object_path, get_libbpf_strerror(err));
 		return err;
 	}
 
+	set_programs_to_load(*obj, config);
 	err = bpf_object__load(*obj);
 	if (err) {
-		fprintf(stderr, "Failed loading bpf program in %s: %s\n",
-			config->object_path, strerror(-err));
+		fprintf(stderr, "Failed loading bpf programs in %s: %s\n",
+			config->object_path, get_libbpf_strerror(err));
 		return err;
 	}
 
-	// Attach tc program
-	err = bpf_obj_pin_program(*obj, config->egress_sec, config->pin_dir);
-	if (err) {
-		fprintf(stderr, "Failed pinning tc program to %s/%s: %s\n",
-			config->pin_dir, config->egress_sec, strerror(-err));
-		return err;
-	}
-
-	err = tc_bpf_attach(config->pin_dir, config->egress_sec,
-			    config->ifname);
-	if (err) {
+	// Attach egress prog
+	config->egress_prog_id =
+		tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
+			  config->egress_prog, &config->tc_egress_opts,
+			  &config->created_tc_hook);
+	if (config->egress_prog_id < 0) {
 		fprintf(stderr,
-			"Failed attaching tc program on interface %s: %s\n",
-			config->ifname, strerror(-err));
-		return err;
-	}
-	*tc_attached = true;
-
-	// Attach XDP program
-	err = xdp_attach(*obj, config->ingress_sec, config->ifindex,
-			 config->xdp_flags, config->force);
-	if (err) {
-		fprintf(stderr, "Failed attaching XDP program to %s%s: %s\n",
+			"Failed attaching egress BPF program on interface %s: %s\n",
 			config->ifname,
-			config->force ? "" : ", ensure no other XDP program is already running on interface",
-			strerror(-err));
-		return err;
+			get_libbpf_strerror(config->egress_prog_id));
+		return config->egress_prog_id;
 	}
-	*xdp_attached = true;
+
+	// Attach ingress prog
+	if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0)
+		config->ingress_prog_id =
+			xdp_attach(*obj, config->ingress_prog, config->ifindex,
+				   config->xdp_flags);
+	else
+		config->ingress_prog_id =
+			tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
+				  config->ingress_prog,
+				  &config->tc_ingress_opts, NULL);
+	if (config->ingress_prog_id < 0) {
+		fprintf(stderr,
+			"Failed attaching ingress BPF program on interface %s: %s\n",
+			config->ifname, get_libbpf_strerror(err));
+		err = config->ingress_prog_id;
+		if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0)
+			print_xdp_error_hints(stderr, err);
+		goto ingress_err;
+	}
 
 	return 0;
+
+ingress_err:
+	detach_err =
+		tc_detach(config->ifindex, BPF_TC_EGRESS,
+			  &config->tc_egress_opts, config->created_tc_hook);
+	if (detach_err)
+		fprintf(stderr, "Failed detaching tc program from %s: %s\n",
+			config->ifname, get_libbpf_strerror(detach_err));
+	return err;
 }
 
 static int setup_periodical_map_cleaning(struct bpf_object *obj,
@@ -778,12 +903,17 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 	};
 	int err;
 
+	if (!clean_args.cleanup_interval) {
+		fprintf(stderr, "Periodic map cleanup disabled\n");
+		return 0;
+	}
+
 	clean_args.packet_map_fd =
 		bpf_object__find_map_fd_by_name(obj, config->packet_map);
 	if (clean_args.packet_map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
 			config->packet_map,
-			strerror(-clean_args.packet_map_fd));
+			get_libbpf_strerror(clean_args.packet_map_fd));
 		return clean_args.packet_map_fd;
 	}
 
@@ -791,15 +921,16 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 		bpf_object__find_map_fd_by_name(obj, config->flow_map);
 	if (clean_args.flow_map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
-			config->flow_map, strerror(-clean_args.flow_map_fd));
-		return clean_args.packet_map_fd;
+			config->flow_map,
+			get_libbpf_strerror(clean_args.flow_map_fd));
+		return clean_args.flow_map_fd;
 	}
 
 	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
 	if (err) {
 		fprintf(stderr,
 			"Failed starting thread to perform periodic map cleanup: %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		return err;
 	}
 
@@ -808,33 +939,27 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 
 int main(int argc, char *argv[])
 {
-	int err = 0;
-
-	bool tc_attached = false;
-	bool xdp_attached = false;
-
+	int err = 0, detach_err;
 	struct bpf_object *obj = NULL;
+	struct perf_buffer *pb = NULL;
+
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_ingress_opts);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_egress_opts);
 
 	struct pping_config config = {
 		.bpf_config = { .rate_limit = 100 * NS_PER_MS },
 		.cleanup_interval = 1 * NS_PER_SECOND,
 		.object_path = "pping_kern.o",
-		.ingress_sec = INGRESS_PROG_SEC,
-		.egress_sec = EGRESS_PROG_SEC,
-		.pin_dir = "/sys/fs/bpf/pping",
+		.ingress_prog = "pping_xdp_ingress",
+		.egress_prog = "pping_tc_egress",
 		.packet_map = "packet_ts",
 		.flow_map = "flow_state",
 		.event_map = "events",
 		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
+		.tc_ingress_opts = tc_ingress_opts,
+		.tc_egress_opts = tc_egress_opts,
+		.output_format = PPING_OUTPUT_STANDARD,
 	};
-
-	struct perf_buffer *pb = NULL;
-	struct perf_buffer_opts pb_opts = {
-		.sample_cb = print_event_standard,
-		.lost_cb = handle_missed_rtt_event,
-	};
-
-	print_event_func = print_event_standard;
 
 	// Detect if running as root
 	if (geteuid() != 0) {
@@ -846,51 +971,55 @@ int main(int argc, char *argv[])
 	err = set_rlimit(RLIM_INFINITY);
 	if (err) {
 		fprintf(stderr, "Could not set rlimit to infinity: %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		return EXIT_FAILURE;
 	}
 
 	err = parse_arguments(argc, argv, &config);
 	if (err) {
 		fprintf(stderr, "Failed parsing arguments:  %s\n",
-			strerror(-err));
+			get_libbpf_strerror(err));
 		print_usage(argv);
 		return EXIT_FAILURE;
 	}
 
-	if (config.json_format) {
-		pb_opts.sample_cb = print_event_json;
+	switch (config.output_format) {
+	case PPING_OUTPUT_STANDARD:
+		print_event_func = print_event_standard;
+		break;
+	case PPING_OUTPUT_JSON:
 		print_event_func = print_event_json;
-	} else if (config.ppviz_format) {
-		pb_opts.sample_cb = print_event_ppviz;
+		break;
+	case PPING_OUTPUT_PPVIZ:
 		print_event_func = print_event_ppviz;
+		break;
 	}
 
-	err = load_attach_bpfprogs(&obj, &config, &tc_attached, &xdp_attached);
+	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
 			config.object_path);
-		goto cleanup;
+		return EXIT_FAILURE;
 	}
 
 	err = setup_periodical_map_cleaning(obj, &config);
 	if (err) {
 		fprintf(stderr, "Failed setting up map cleaning: %s\n",
-			strerror(-err));
-		goto cleanup;
+			get_libbpf_strerror(err));
+		goto cleanup_attached_progs;
 	}
 
 	// Set up perf buffer
 	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
 							      config.event_map),
-			      PERF_BUFFER_PAGES, &pb_opts);
+			      PERF_BUFFER_PAGES, print_event_func,
+			      handle_missed_rtt_event, NULL, NULL);
 	err = libbpf_get_error(pb);
 	if (err) {
-		pb = NULL;
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
-			config.event_map, strerror(err));
-		goto cleanup;
+			config.event_map, get_libbpf_strerror(err));
+		goto cleanup_attached_progs;
 	}
 
 	// Allow program to perform cleanup on Ctrl-C
@@ -902,43 +1031,38 @@ int main(int argc, char *argv[])
 			if (keep_running) // Only print polling error if it wasn't caused by program termination
 				fprintf(stderr,
 					"Error polling perf buffer: %s\n",
-					strerror(-err));
+					get_libbpf_strerror(-err));
 			break;
 		}
 	}
 
-cleanup:
-	perf_buffer__free(pb);
-
-	if (xdp_attached) {
-		err = xdp_detach(config.ifindex, config.xdp_flags);
-		if (err)
-			fprintf(stderr,
-				"Failed deatching program from ifindex %s: %s\n",
-				config.ifname, strerror(-err));
-	}
-
-	if (tc_attached) {
-		err = tc_bpf_clear(config.ifname);
-		if (err)
-			fprintf(stderr,
-				"Failed removing tc-bpf program from interface %s: %s\n",
-				config.ifname, strerror(-err));
-	}
-
-	if (obj && !libbpf_get_error(obj)) {
-		err = bpf_obj_unpin_program(obj, config.egress_sec,
-					    config.pin_dir);
-		if (err)
-			fprintf(stderr,
-				"Failed unpinning tc program from %s: %s\n",
-				config.pin_dir, strerror(-err));
-	}
-
-	if (config.json_format && json_ctx) {
+	// Cleanup
+	if (config.output_format == PPING_OUTPUT_JSON && json_ctx) {
 		jsonw_end_array(json_ctx);
 		jsonw_destroy(&json_ctx);
 	}
 
-	return err != 0;
+	perf_buffer__free(pb);
+
+cleanup_attached_progs:
+	if (strcmp(config.ingress_prog, "pping_xdp_ingress") == 0)
+		detach_err = xdp_detach(config.ifindex, config.xdp_flags,
+					config.ingress_prog_id);
+	else
+		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
+				       &config.tc_ingress_opts, false);
+	if (detach_err)
+		fprintf(stderr,
+			"Failed removing ingress program from interface %s: %s\n",
+			config.ifname, get_libbpf_strerror(detach_err));
+
+	detach_err =
+		tc_detach(config.ifindex, BPF_TC_EGRESS, &config.tc_egress_opts,
+			  config.force && config.created_tc_hook);
+	if (detach_err)
+		fprintf(stderr,
+			"Failed removing egress program from interface %s: %s\n",
+			config.ifname, get_libbpf_strerror(detach_err));
+
+	return (err != 0 && keep_running) || detach_err != 0;
 }
