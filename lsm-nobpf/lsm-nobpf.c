@@ -57,7 +57,7 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	prog = bpf_program__next(NULL, obj);
+	prog = bpf_object__next_program(obj, NULL);
 	if (!prog) {
 		printf("No program!\n");
 		err = -ENOENT;
