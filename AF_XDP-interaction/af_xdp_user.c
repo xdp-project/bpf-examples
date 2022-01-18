@@ -291,6 +291,12 @@ static const struct option_wrapper long_options[] = {
 	{{"progsec",	 required_argument,	NULL,  2  },
 	 "Load program in <section> of the ELF file", "<section>"},
 
+	{{"src-ip",	 required_argument,	NULL,  4  },
+	 "Change IPv4 source      address in generated packets", "<ip>"},
+
+	{{"dst-ip",	 required_argument,	NULL,  5 },
+	 "Change IPv4 destination address in generated packets", "<ip>"},
+
 	{{"busy-poll",	 no_argument,		NULL, 'B' },
 	 "Enable socket prefer NAPI busy-poll mode (remember adjust sysctl too)"},
 
@@ -637,32 +643,17 @@ static void gen_eth_hdr(struct config *cfg, struct ethhdr *eth_hdr)
 	eth_hdr->h_proto = htons(ETH_P_IP);
 }
 
-static bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
-{
-	int res;
-
-	res = inet_pton(AF_INET, ip_str, ip_addr);
-	if (res <= 0) {
-		if (res == 0)
-			fprintf(stderr,	"ERROR: IP%s \"%s\" not in presentation format\n",
-				"v4", ip_str);
-		else
-			perror("inet_pton");
-		return false;
-	}
-	return true;
-}
 
 static char *opt_ip_str_src = "192.168.44.1";
 static char *opt_ip_str_dst = "192.168.44.3";
 
-static void gen_ip_hdr(struct iphdr *ip_hdr)
+static void gen_ip_hdr(struct config *cfg, struct iphdr *ip_hdr)
 {
-	uint32_t saddr;
-	uint32_t daddr;
+	if (cfg->opt_ip_src == 0)
+		get_ipv4_u32(opt_ip_str_src, &cfg->opt_ip_src);
 
-	get_ipv4_u32(opt_ip_str_src, &saddr);
-	get_ipv4_u32(opt_ip_str_dst, &daddr);
+	if (cfg->opt_ip_dst == 0)
+		get_ipv4_u32(opt_ip_str_dst, &cfg->opt_ip_dst);
 
 	/* IP header */
 	ip_hdr->version = IPVERSION;
@@ -673,8 +664,8 @@ static void gen_ip_hdr(struct iphdr *ip_hdr)
 	ip_hdr->frag_off = 0;
 	ip_hdr->ttl = IPDEFTTL;
 	ip_hdr->protocol = IPPROTO_UDP;
-	ip_hdr->saddr = saddr;
-	ip_hdr->daddr = daddr;
+	ip_hdr->saddr = cfg->opt_ip_src;
+	ip_hdr->daddr = cfg->opt_ip_dst;
 
 	/* IP header checksum */
 	ip_hdr->check = 0;
@@ -711,7 +702,7 @@ static void gen_base_pkt(struct config *cfg, uint8_t *pkt_ptr)
 						   sizeof(struct iphdr));
 
 	gen_eth_hdr(cfg, eth_hdr);
-	gen_ip_hdr(ip_hdr);
+	gen_ip_hdr(cfg, ip_hdr);
 	gen_udp_hdr(udp_hdr, ip_hdr);
 }
 

@@ -11,6 +11,8 @@
 #include <linux/if_xdp.h>
 #include <sched.h>
 
+#include <arpa/inet.h> /* inet_pton */
+
 #include "common_params.h"
 
 int verbose = 1;
@@ -62,6 +64,23 @@ void usage(const char *prog_name, const char *doc,
 	printf("\n");
 }
 
+/* Helper for convert IPv4 address from text to binary form */
+bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
+{
+	int res;
+
+	res = inet_pton(AF_INET, ip_str, ip_addr);
+	if (res <= 0) {
+		if (res == 0)
+			fprintf(stderr,	"ERROR: IP%s \"%s\" not in presentation format\n",
+				"v4", ip_str);
+		else
+			perror("inet_pton");
+		return false;
+	}
+	return true;
+}
+
 int option_wrappers_to_options(const struct option_wrapper *wrapper,
 				struct option **options)
 {
@@ -87,6 +106,7 @@ void parse_cmdline_args(int argc, char **argv,
 {
 	struct option *long_options;
 	bool full_help = false;
+	uint32_t ipv4_tmp = 0;
 	int longindex = 0;
 	char *dest;
 	int opt;
@@ -220,6 +240,16 @@ void parse_cmdline_args(int argc, char **argv,
 		case 2: /* --progsec */
 			dest  = (char *)&cfg->progsec;
 			strncpy(dest, optarg, sizeof(cfg->progsec));
+			break;
+		case 4: /* --src-ip */
+			if (!get_ipv4_u32(optarg, &ipv4_tmp))
+				goto error;
+			cfg->opt_ip_src = ipv4_tmp;
+			break;
+		case 5: /* --dst-ip */
+			if (!get_ipv4_u32(optarg, &ipv4_tmp))
+				goto error;
+			cfg->opt_ip_dst = ipv4_tmp;
 			break;
 		case 'L': /* --src-mac */
 			dest  = (char *)&cfg->src_mac;

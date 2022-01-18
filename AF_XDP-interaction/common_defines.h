@@ -32,6 +32,8 @@ struct config {
 	struct ether_addr opt_tx_dmac;
 	__u64 interval;
 	__u32 batch_pkts;
+	__u32 opt_ip_src;
+	__u32 opt_ip_dst;
 };
 
 #define BATCH_PKTS_MAX		64
