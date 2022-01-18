@@ -97,7 +97,8 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:ti:",
+	while ((opt = getopt_long(argc, argv,
+				  "hd:r:L:R:BASNFUMQ:G:H:czqp:ti:b:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -143,6 +144,15 @@ void parse_cmdline_args(int argc, char **argv,
 					  (struct ether_addr *)&cfg->opt_tx_smac)) {
 				fprintf(stderr, "Invalid src MAC address:%s\n",
 					optarg);
+				goto error;
+			}
+			break;
+		case 'b':
+			cfg->batch_pkts = atoi(optarg);
+			if (cfg->batch_pkts > BATCH_PKTS_MAX) {
+				fprintf(stderr, "ERROR: "
+					" batch (%u) pkts limited to %u\n",
+					cfg->batch_pkts, BATCH_PKTS_MAX);
 				goto error;
 			}
 			break;

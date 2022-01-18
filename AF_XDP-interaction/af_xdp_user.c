@@ -303,6 +303,9 @@ static const struct option_wrapper long_options[] = {
 	{{"interval",	 required_argument,	NULL, 'i' },
 	 "Periodic TX-cyclic interval wakeup period in usec", "<usec>"},
 
+	{{"batch-pkts",	 required_argument,	NULL, 'b' },
+	 "Periodic TX-cyclic batch send pkts", "<pkts>"},
+
 	{{0, 0, NULL,  0 }, NULL, false}
 };
 
@@ -1237,8 +1240,8 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 	struct timespec now, next, next_adj, interval, now_prev;
 	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL, .max = -0xFFFF };
 	struct wakeup_stat stat_adj = { .min = DEFAULT_INTERVAL, .max = -0xFFFF };
-	int batch_nr = 4;
-	struct xdp_desc tx_pkts[batch_nr];
+	struct xdp_desc tx_pkts[BATCH_PKTS_MAX];
+	int batch_nr = cfg->batch_pkts;
 	int tx_nr;
 
 	int period = cfg->interval;
@@ -1475,6 +1478,7 @@ int main(int argc, char **argv)
 		.opt_tx_dmac = default_tx_dmac,
 		.opt_tx_smac = default_tx_smac,
 		.interval = DEFAULT_INTERVAL,
+		.batch_pkts = BATCH_PKTS_DEFAULT,
 	};
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;

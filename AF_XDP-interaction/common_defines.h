@@ -31,7 +31,11 @@ struct config {
 	struct ether_addr opt_tx_smac;
 	struct ether_addr opt_tx_dmac;
 	__u64 interval;
+	__u32 batch_pkts;
 };
+
+#define BATCH_PKTS_MAX		64
+#define BATCH_PKTS_DEFAULT	4
 
 /* Defined in common_params.o */
 extern int verbose;
