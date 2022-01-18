@@ -653,7 +653,7 @@ static bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
 	return true;
 }
 
-static char *opt_ip_str_src = "192.168.44.2";
+static char *opt_ip_str_src = "192.168.44.1";
 static char *opt_ip_str_dst = "192.168.44.3";
 
 static void gen_ip_hdr(struct iphdr *ip_hdr)
