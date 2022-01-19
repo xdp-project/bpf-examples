@@ -1234,6 +1234,7 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 	struct xdp_desc tx_pkts[BATCH_PKTS_MAX];
 	int batch_nr = cfg->batch_pkts;
 	int tx_nr;
+	bool first = true;
 
 	int period = cfg->interval;
 	int timermode = TIMER_ABSTIME;
@@ -1283,10 +1284,14 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 
 		/* How close is wakeup time to our actual target */
 		diff = calcdiff_ns(now, next); /* Positive num = wokeup after */
-		if (diff < stat.min)
-			stat.min = diff;
-		if (diff > stat.max)
-			stat.max = diff;
+		/* Exclude first measurement as no next_adj happened */
+		if (!first) {
+			if (diff < stat.min)
+				stat.min = diff;
+			if (diff > stat.max)
+				stat.max = diff;
+		}
+		first = false;
 		stat.avg += (double) diff;
 		stat.prev = stat.curr;
 		stat.curr = diff;
