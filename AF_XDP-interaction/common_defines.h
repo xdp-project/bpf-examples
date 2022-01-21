@@ -30,13 +30,21 @@ struct config {
 	bool opt_busy_poll;
 	struct ether_addr opt_tx_smac;
 	struct ether_addr opt_tx_dmac;
+	__u64 interval;
+	__u32 batch_pkts;
+	__u32 opt_ip_src;
+	__u32 opt_ip_dst;
 };
+
+#define BATCH_PKTS_MAX		64
+#define BATCH_PKTS_DEFAULT	4
 
 /* Defined in common_params.o */
 extern int verbose;
 extern int debug;
 extern int debug_pkt;
 extern int debug_meta;
+extern int debug_time;
 
 /* Exit return codes */
 #define EXIT_OK 		 0 /* == EXIT_SUCCESS (stdlib.h) man exit(3) */

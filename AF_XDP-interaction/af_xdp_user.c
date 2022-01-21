@@ -279,6 +279,9 @@ static const struct option_wrapper long_options[] = {
 	{{"metainfo",	 no_argument,		NULL, 'm' },
 	 "Print XDP metadata info output mode (debug)"},
 
+	{{"timedebug",	 no_argument,		NULL, 't' },
+	 "Print timestamps info for wakeup accuracy (debug)"},
+
 	{{"debug",	 no_argument,		NULL, 'D' },
 	 "Debug info output mode (debug)"},
 
@@ -288,6 +291,12 @@ static const struct option_wrapper long_options[] = {
 	{{"progsec",	 required_argument,	NULL,  2  },
 	 "Load program in <section> of the ELF file", "<section>"},
 
+	{{"src-ip",	 required_argument,	NULL,  4  },
+	 "Change IPv4 source      address in generated packets", "<ip>"},
+
+	{{"dst-ip",	 required_argument,	NULL,  5 },
+	 "Change IPv4 destination address in generated packets", "<ip>"},
+
 	{{"busy-poll",	 no_argument,		NULL, 'B' },
 	 "Enable socket prefer NAPI busy-poll mode (remember adjust sysctl too)"},
 
@@ -296,6 +305,12 @@ static const struct option_wrapper long_options[] = {
 
 	{{"tx-smac",	 required_argument,	NULL, 'H' },
 	 "Src MAC addr of TX frame in aa:bb:cc:dd:ee:ff format", "aa:bb:cc:dd:ee:ff"},
+
+	{{"interval",	 required_argument,	NULL, 'i' },
+	 "Periodic TX-cyclic interval wakeup period in usec", "<usec>"},
+
+	{{"batch-pkts",	 required_argument,	NULL, 'b' },
+	 "Periodic TX-cyclic batch send pkts", "<pkts>"},
 
 	{{0, 0, NULL,  0 }, NULL, false}
 };
@@ -521,16 +536,35 @@ error_exit:
 	return NULL;
 }
 
-static void complete_tx(struct xsk_socket_info *xsk)
+static int kick_tx(struct xsk_socket_info *xsk)
+{
+	int err = 0;
+	int ret;
+
+	ret = sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+	if (ret < 0) { /* On error, -1 is returned, and errno is set */
+		fprintf(stderr, "WARN: %s() sendto() failed with errno:%d\n",
+			__func__, errno);
+		err = errno;
+	}
+	/* Kernel samples/bpf/ xdp_sock_user.c kick_tx variant doesn't
+	 * treat the following errno values as errors:
+	 *  ENOBUFS , EAGAIN , EBUSY , ENETDOWN
+	 */
+	return err;
+}
+
+static int complete_tx(struct xsk_socket_info *xsk)
 {
 	unsigned int completed;
 	uint32_t idx_cq;
+	int err;
 
 	if (!xsk->outstanding_tx)
 		return;
 
-	sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
-
+	/* Notify kernel via sendto syscall that TX packet are avail */
+	err = kick_tx(xsk);
 
 	/* Collect/free completed TX buffers */
 	completed = xsk_ring_cons__peek(&xsk->cq,
@@ -547,9 +581,17 @@ static void complete_tx(struct xsk_socket_info *xsk)
 		}
 
 		xsk_ring_cons__release(&xsk->cq, completed);
+		if (completed > xsk->outstanding_tx) {
+			fprintf(stderr, "WARN: %s() "
+				"reset outstanding_tx(%d) as completed(%d)"
+				"more than outstanding TX pakcets\n",
+				__func__, xsk->outstanding_tx, completed);
+		}
 		xsk->outstanding_tx -= completed < xsk->outstanding_tx ?
 			completed : xsk->outstanding_tx;
 	}
+
+	return err;
 }
 
 static inline __sum16 csum16_add(__sum16 csum, __be16 addend)
@@ -601,32 +643,17 @@ static void gen_eth_hdr(struct config *cfg, struct ethhdr *eth_hdr)
 	eth_hdr->h_proto = htons(ETH_P_IP);
 }
 
-static bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
-{
-	int res;
 
-	res = inet_pton(AF_INET, ip_str, ip_addr);
-	if (res <= 0) {
-		if (res == 0)
-			fprintf(stderr,	"ERROR: IP%s \"%s\" not in presentation format\n",
-				"v4", ip_str);
-		else
-			perror("inet_pton");
-		return false;
-	}
-	return true;
-}
-
-static char *opt_ip_str_src = "192.168.44.2";
+static char *opt_ip_str_src = "192.168.44.1";
 static char *opt_ip_str_dst = "192.168.44.3";
 
-static void gen_ip_hdr(struct iphdr *ip_hdr)
+static void gen_ip_hdr(struct config *cfg, struct iphdr *ip_hdr)
 {
-	uint32_t saddr;
-	uint32_t daddr;
+	if (cfg->opt_ip_src == 0)
+		get_ipv4_u32(opt_ip_str_src, &cfg->opt_ip_src);
 
-	get_ipv4_u32(opt_ip_str_src, &saddr);
-	get_ipv4_u32(opt_ip_str_dst, &daddr);
+	if (cfg->opt_ip_dst == 0)
+		get_ipv4_u32(opt_ip_str_dst, &cfg->opt_ip_dst);
 
 	/* IP header */
 	ip_hdr->version = IPVERSION;
@@ -637,8 +664,8 @@ static void gen_ip_hdr(struct iphdr *ip_hdr)
 	ip_hdr->frag_off = 0;
 	ip_hdr->ttl = IPDEFTTL;
 	ip_hdr->protocol = IPPROTO_UDP;
-	ip_hdr->saddr = saddr;
-	ip_hdr->daddr = daddr;
+	ip_hdr->saddr = cfg->opt_ip_src;
+	ip_hdr->daddr = cfg->opt_ip_dst;
 
 	/* IP header checksum */
 	ip_hdr->check = 0;
@@ -675,7 +702,7 @@ static void gen_base_pkt(struct config *cfg, uint8_t *pkt_ptr)
 						   sizeof(struct iphdr));
 
 	gen_eth_hdr(cfg, eth_hdr);
-	gen_ip_hdr(ip_hdr);
+	gen_ip_hdr(cfg, ip_hdr);
 	gen_udp_hdr(udp_hdr, ip_hdr);
 }
 
@@ -836,7 +863,7 @@ static void print_pkt_info(uint8_t *pkt, uint32_t len)
 	}
 }
 
-static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
+static int tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 {
 	struct xsk_umem_info *umem = xsk->umem;
 	uint64_t pkt_addr = mem_alloc_umem_frame(&umem->mem);
@@ -857,6 +884,8 @@ static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 		if (ret != 1) {
 			/* No more transmit slots, drop the packet */
 			mem_free_umem_frame(&umem->mem, pkt_addr);
+			fprintf(stderr, "ERR - %s() failed transmit\n",
+				__func__);
 		}
 
 		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = pkt_addr;
@@ -864,7 +893,8 @@ static void tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 		xsk_ring_prod__submit(&xsk->tx, 1);
 		xsk->outstanding_tx++;
 	}
-	//complete_tx(xsk);
+
+	return complete_tx(xsk);
 }
 
 /* Generate some fake packets (in umem area).  Real system will deliver TX
@@ -1133,7 +1163,7 @@ static void rx_avail_packets(struct xsk_container *xsks)
 }
 
 /* Default interval in usec */
-#define DEFAULT_INTERVAL 1000000
+#define DEFAULT_INTERVAL	1000000
 
 #define USEC_PER_SEC		1000000
 #define NSEC_PER_SEC		1000000000
@@ -1146,6 +1176,17 @@ static inline void tsnorm(struct timespec *ts)
 	}
 }
 
+static inline uint64_t timespec2ns(struct timespec *ts)
+{
+	return (uint64_t) ts->tv_sec * NANOSEC_PER_SEC + ts->tv_nsec;
+}
+
+static inline void ns2timespec(uint64_t ns, struct timespec *ts)
+{
+	ts->tv_sec  = ns / NANOSEC_PER_SEC;
+	ts->tv_nsec = ns % NANOSEC_PER_SEC;
+}
+
 static inline int64_t calcdiff(struct timespec t1, struct timespec t2)
 {
 	int64_t diff;
@@ -1154,10 +1195,24 @@ static inline int64_t calcdiff(struct timespec t1, struct timespec t2)
 	return diff;
 }
 
+static inline int64_t calcdiff_ns(struct timespec t1, struct timespec t2)
+{
+	int64_t diff;
+	diff = NSEC_PER_SEC * (long long)((int) t1.tv_sec - (int) t2.tv_sec);
+	diff += ((int) t1.tv_nsec - (int) t2.tv_nsec);
+	return diff;
+}
+
+static void print_timespec(struct timespec *ts, char *msg)
+{
+	printf("Time: %lu.%lu - %s\n", ts->tv_sec, ts->tv_nsec, msg);
+}
+
 struct wakeup_stat {
 	long min;
 	long max;
-	long act;
+	long curr;
+	long prev;
 	double avg;
 	unsigned long events;
 };
@@ -1173,13 +1228,15 @@ struct wakeup_stat {
 static void tx_cyclic_and_rx_process(struct config *cfg,
 				    struct xsk_container *xsks)
 {
-	struct timespec now, next, interval;
-	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL};
-	int batch_nr = 4;
-	struct xdp_desc tx_pkts[batch_nr];
+	struct timespec now, next, next_adj, interval, now_prev;
+	struct wakeup_stat stat = { .min = DEFAULT_INTERVAL, .max = -0xFFFF };
+	struct wakeup_stat stat_adj = { .min = DEFAULT_INTERVAL, .max = -0xFFFF };
+	struct xdp_desc tx_pkts[BATCH_PKTS_MAX];
+	int batch_nr = cfg->batch_pkts;
 	int tx_nr;
+	bool first = true;
 
-	int period = DEFAULT_INTERVAL; // TODO: Add to cfg
+	int period = cfg->interval;
 	int timermode = TIMER_ABSTIME;
 	int clock = CLOCK_MONOTONIC;
 
@@ -1198,13 +1255,15 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 	next.tv_sec  += interval.tv_sec;
 	next.tv_nsec += interval.tv_nsec;
 	tsnorm(&next);
+	next_adj = next; /* Not adjusted yet */
 
 	while (!global_exit) {
-		int64_t diff;
+		int64_t diff, diff2adj, diff_interval;
+		int64_t avg, avg2adj;
 		int err, n;
 
-		/* Wait for next period */
-		err = clock_nanosleep(clock, timermode, &next, NULL);
+		/* Wait for next period, but adjusted for measured inaccuracy */
+		err = clock_nanosleep(clock, timermode, &next_adj, NULL);
 		/* Took case MODE_CLOCK_NANOSLEEP from cyclictest */
 		if (err) {
 			if (err != EINTR)
@@ -1214,6 +1273,7 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 		}
 
 		/* Expecting to wakeup at "next" get systime "now" to check */
+		now_prev = now;
 		err = clock_gettime(clock, &now);
 		if (err) {
 			if (err != EINTR)
@@ -1222,29 +1282,61 @@ static void tx_cyclic_and_rx_process(struct config *cfg,
 			goto out;
 		}
 
-		/* Detect inaccuracy diff */
-		diff = calcdiff(now, next);
-		if (diff < stat.min)
-			stat.min = diff;
-		if (diff > stat.max)
-			stat.max = diff;
+		/* How close is wakeup time to our actual target */
+		diff = calcdiff_ns(now, next); /* Positive num = wokeup after */
+		/* Exclude first measurement as no next_adj happened */
+		if (!first) {
+			if (diff < stat.min)
+				stat.min = diff;
+			if (diff > stat.max)
+				stat.max = diff;
+		}
+		first = false;
 		stat.avg += (double) diff;
-		stat.act = diff;
-
+		stat.prev = stat.curr;
+		stat.curr = diff;
 		stat.events++;
+		avg = (stat.avg / stat.events);
+
+		/* Measure inaccuracy of clock_nanosleep */
+		diff2adj = calcdiff_ns(now, next_adj); /* Positive num = wokeup after */
+		stat_adj.avg += (double) diff2adj;
+		stat_adj.events++;
+		avg2adj = (stat_adj.avg / stat_adj.events);
+
+		// IDEA: Spin until exact time occurs (if diff negative)
 
 		/* Send batch of packets */
 		n = tx_batch_pkts(xsk, tx_nr, tx_pkts);
 
+		diff_interval = calcdiff_ns(now, now_prev);
+
 		if (verbose >=1 )
 			printf("TX pkts:%d event:%lu"
-			       " inaccurate(usec) wakeup min:%ld cur:%ld max:%ld\n",
-			       n, stat.events, stat.min, stat.act, stat.max);
+			       " inaccurate wakeup(nanosec) curr:%ld"
+			       "(min:%ld max:%ld avg:%ld avg2adj:%ld)"
+			       " variance(n-1):%ld interval-ns:%ld\n",
+			       n, stat.events, stat.curr,
+			       stat.min, stat.max, avg, avg2adj,
+			       stat.curr - stat.prev,
+			       diff_interval);
+
+		if (debug_time) {
+			print_timespec(&now,  "now");
+			print_timespec(&next_adj, "next_adj");
+			print_timespec(&next, "next");
+		}
 
 		/* Calculate next time to wakeup */
 		next.tv_sec  += interval.tv_sec;
 		next.tv_nsec += interval.tv_nsec;
 		tsnorm(&next);
+
+		/* Adjust for inaccuracy of clock_nanosleep wakeup */
+		uint64_t next_adj_ns = timespec2ns(&next);
+		next_adj_ns = next_adj_ns - avg2adj;
+		ns2timespec(next_adj_ns, &next_adj);
+		tsnorm(&next_adj);
 
 		/* Get packets for *next* iteration */
 		tx_nr = invent_tx_pkts(cfg, xsk->umem, batch_nr, tx_pkts);
@@ -1381,6 +1473,8 @@ int main(int argc, char **argv)
 		.xsk_if_queue = -1,
 		.opt_tx_dmac = default_tx_dmac,
 		.opt_tx_smac = default_tx_smac,
+		.interval = DEFAULT_INTERVAL,
+		.batch_pkts = BATCH_PKTS_DEFAULT,
 	};
 	pthread_t stats_poll_thread;
 	struct xsk_umem_info *umem;
@@ -1553,9 +1647,15 @@ int main(int argc, char **argv)
 	 * It seems related with XDP attachment causing link down/up event for
 	 * some drivers.  Q: What is the right method/API that waits for link to
 	 * be initilized correctly?
+	 *
+	 * This workaround keeps trying to send a single packet, and
+	 * check return value seen from sendto() syscall, until it
+	 * doesn't return an error.
 	 */
-	//sleep(3);
-	// tx_pkt(&cfg, xsks.sockets[0]);
+	while (err = tx_pkt(&cfg, xsks.sockets[0])) {
+		fprintf(stderr, "WARN(%d): Failed to Tx pkt, will retry\n", err);
+		sleep(1);
+	}
 
 	/* Receive and count packets than drop them */
 	// rx_and_process(&cfg, &xsks);

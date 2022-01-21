@@ -11,12 +11,15 @@
 #include <linux/if_xdp.h>
 #include <sched.h>
 
+#include <arpa/inet.h> /* inet_pton */
+
 #include "common_params.h"
 
 int verbose = 1;
 int debug = 0;
 int debug_pkt = 0;
 int debug_meta = 0;
+int debug_time = 0;
 
 #define BUFSIZE 30
 
@@ -61,6 +64,23 @@ void usage(const char *prog_name, const char *doc,
 	printf("\n");
 }
 
+/* Helper for convert IPv4 address from text to binary form */
+bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
+{
+	int res;
+
+	res = inet_pton(AF_INET, ip_str, ip_addr);
+	if (res <= 0) {
+		if (res == 0)
+			fprintf(stderr,	"ERROR: IP%s \"%s\" not in presentation format\n",
+				"v4", ip_str);
+		else
+			perror("inet_pton");
+		return false;
+	}
+	return true;
+}
+
 int option_wrappers_to_options(const struct option_wrapper *wrapper,
 				struct option **options)
 {
@@ -86,6 +106,7 @@ void parse_cmdline_args(int argc, char **argv,
 {
 	struct option *long_options;
 	bool full_help = false;
+	uint32_t ipv4_tmp = 0;
 	int longindex = 0;
 	char *dest;
 	int opt;
@@ -96,7 +117,8 @@ void parse_cmdline_args(int argc, char **argv,
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hd:r:L:R:BASNFUMQ:G:H:czqp:",
+	while ((opt = getopt_long(argc, argv,
+				  "hd:r:L:R:BASNFUMQ:G:H:czqp:ti:b:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -142,6 +164,15 @@ void parse_cmdline_args(int argc, char **argv,
 					  (struct ether_addr *)&cfg->opt_tx_smac)) {
 				fprintf(stderr, "Invalid src MAC address:%s\n",
 					optarg);
+				goto error;
+			}
+			break;
+		case 'b':
+			cfg->batch_pkts = atoi(optarg);
+			if (cfg->batch_pkts > BATCH_PKTS_MAX) {
+				fprintf(stderr, "ERROR: "
+					" batch (%u) pkts limited to %u\n",
+					cfg->batch_pkts, BATCH_PKTS_MAX);
 				goto error;
 			}
 			break;
@@ -196,6 +227,9 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'm':
 			debug_meta = true;
 			break;
+		case 't':
+			debug_time = true;
+			break;
 		case 'Q':
 			cfg->xsk_if_queue = atoi(optarg);
 			break;
@@ -207,6 +241,16 @@ void parse_cmdline_args(int argc, char **argv,
 			dest  = (char *)&cfg->progsec;
 			strncpy(dest, optarg, sizeof(cfg->progsec));
 			break;
+		case 4: /* --src-ip */
+			if (!get_ipv4_u32(optarg, &ipv4_tmp))
+				goto error;
+			cfg->opt_ip_src = ipv4_tmp;
+			break;
+		case 5: /* --dst-ip */
+			if (!get_ipv4_u32(optarg, &ipv4_tmp))
+				goto error;
+			cfg->opt_ip_dst = ipv4_tmp;
+			break;
 		case 'L': /* --src-mac */
 			dest  = (char *)&cfg->src_mac;
 			strncpy(dest, optarg, sizeof(cfg->src_mac));
@@ -214,6 +258,9 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'R': /* --dest-mac */
 			dest  = (char *)&cfg->dest_mac;
 			strncpy(dest, optarg, sizeof(cfg->dest_mac));
+			break;
+		case 'i':
+			cfg->interval = atoi(optarg);
 			break;
 		case 'c':
 			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY;	/* Clear flag */

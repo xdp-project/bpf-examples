@@ -19,4 +19,6 @@ void parse_cmdline_args(int argc, char **argv,
 			const struct option_wrapper *long_options,
                         struct config *cfg, const char *doc);
 
+bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr);
+
 #endif /* __COMMON_PARAMS_H */
