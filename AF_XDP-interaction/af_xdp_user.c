@@ -561,7 +561,7 @@ static int complete_tx(struct xsk_socket_info *xsk)
 	int err;
 
 	if (!xsk->outstanding_tx)
-		return;
+		return 0;
 
 	/* Notify kernel via sendto syscall that TX packet are avail */
 	err = kick_tx(xsk);
