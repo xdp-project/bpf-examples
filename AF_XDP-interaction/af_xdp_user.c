@@ -1652,7 +1652,7 @@ int main(int argc, char **argv)
 	 * check return value seen from sendto() syscall, until it
 	 * doesn't return an error.
 	 */
-	while (err = tx_pkt(&cfg, xsks.sockets[0])) {
+	while ((err = tx_pkt(&cfg, xsks.sockets[0]))) {
 		fprintf(stderr, "WARN(%d): Failed to Tx pkt, will retry\n", err);
 		sleep(1);
 	}
