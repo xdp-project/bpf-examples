@@ -132,6 +132,44 @@ get_bpf_skel_object(struct user_config *cfg)
 	return obj;
 }
 
+int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
+{
+	int err = 0;
+	int fd;
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_EGRESS);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_egress);
+
+	/* Selecting BPF-prog here: */
+	fd = bpf_program__fd(obj->progs.queue_map_4);
+	if (fd < 0) {
+		fprintf(stderr, "Couldn't find egress program\n");
+		err = -ENOENT;
+		goto out;
+	}
+	attach_egress.prog_fd = fd;
+
+	hook.ifindex = cfg->ifindex;
+
+	err = bpf_tc_hook_create(&hook);
+	if (err && err != -EEXIST) {
+		fprintf(stderr, "Couldn't create TC-BPF hook for ifindex %d (err:%d)\n",
+			cfg->ifindex, err);
+		goto out;
+	}
+
+	hook.attach_point = BPF_TC_EGRESS;
+	err = bpf_tc_attach(&hook, &attach_egress);
+	if (err) {
+		fprintf(stderr, "Couldn't attach egress program to ifindex %d (err:%d)\n",
+			hook.ifindex, err);
+		goto out;
+	}
+
+out:
+	return err;
+}
+
+
 int main(int argc, char *argv[])
 {
 	struct user_config cfg = {
@@ -139,14 +177,11 @@ int main(int argc, char *argv[])
 	};
 	struct tc_txq_policy_kern *obj; /* Skeleton gave us this */
 	int err;
-	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_EGRESS);
-	DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_egress);
 
 	err = parse_arguments(argc, argv, &cfg);
 	if (err)
 		return EXIT_FAILURE;
 
-	hook.ifindex = cfg.ifindex;
 	if (cfg.unload)
 		return EXIT_FAILURE; // FIXME NOT implemented
 
@@ -154,6 +189,12 @@ int main(int argc, char *argv[])
 	if (obj == NULL)
 		return EXIT_FAILURE;
 
+	err = tc_attach_egress(&cfg, obj);
+	if (err) {
+		err = EXIT_FAILURE;
+		goto out;
+	}
+out:
 	tc_txq_policy_kern__destroy(obj);
-	return 0;
+	return err;
 }
