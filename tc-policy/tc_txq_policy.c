@@ -27,6 +27,7 @@ static const struct option long_options[] = {
 	{ "interface",        required_argument, NULL, 'i' },
 	{ "unload",           no_argument,       NULL, 'u' },
 	{ "destroy-hook",     no_argument,       NULL, 'f' },
+	{ "quiet",            no_argument,       NULL, 'q' },
 	{ 0, 0, NULL, 0 }
 };
 
@@ -72,7 +73,7 @@ static int parse_arguments(int argc, char *argv[],
 
 	cfg->ifindex = 0;
 
-	while ((opt = getopt_long(argc, argv, "i:hu", long_options,
+	while ((opt = getopt_long(argc, argv, "i:hufq", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -96,6 +97,9 @@ static int parse_arguments(int argc, char *argv[],
 			break;
 		case 'f':
 			cfg->flush_hook = true;
+			break;
+		case 'q':
+			verbose = 0;
 			break;
 		default:
 			print_usage(argv);
@@ -221,6 +225,10 @@ int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 			"ifindex %d (err:%d)\n", cfg->ifindex, err);
 		goto out;
 	}
+	if (verbose && err == -EEXIST) {
+		printf("Success: TC-BPF hook already existed "
+		       "(Ignore: \"libbpf: Kernel error message\")\n");
+	}
 
 	hook.attach_point = BPF_TC_EGRESS;
 	attach_egress.flags    = BPF_TC_F_REPLACE;
@@ -233,6 +241,23 @@ int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 		goto out;
 	}
 
+	/* Let check BPF prog got attached */
+	attach_egress.flags = 0;
+	attach_egress.prog_fd = 0;
+	attach_egress.prog_id = 0;
+	attach_egress.handle   = EGRESS_HANDLE;
+	attach_egress.priority = EGRESS_PRIORITY;
+	err = bpf_tc_query(&hook, &attach_egress);
+	if (err) {
+		fprintf(stderr, "No egress program is attached "
+			"for ifindex %d (err:%d)\n", cfg->ifindex, err);
+		goto out;
+	}
+
+	if (verbose) {
+		printf("Attached TC-BPF program id:%d\n",
+		       attach_egress.prog_id);
+	}
 out:
 	return err;
 }
