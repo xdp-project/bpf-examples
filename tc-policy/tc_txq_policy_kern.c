@@ -34,7 +34,10 @@ int queue_map_4 (struct __sk_buff *skb)
 
 	/* The skb->queue_mapping is 1-indexed (zero means not set).  The
 	 * underlying MQ leaf's are also 1-indexed, which makes it easier to
-	 * reason about.
+	 * reason about. If debugging this realize that setting
+	 * skb->queue_mapping here is like it was set on RX-path the
+	 * skb_rx_queue_recorded number, and when reaching TX-layer
+	 * (skb_get_rx_queue) will have decremented it by-1.
 	 */
 	txq_root_handle = 4;
 	skb->queue_mapping = txq_root_handle;
