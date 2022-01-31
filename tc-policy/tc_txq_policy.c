@@ -161,6 +161,9 @@ int teardown_hook(struct user_config *cfg)
 	if (err)
 		fprintf(stderr, "Couldn't remove clsact qdisc on %s\n", cfg->ifname);
 
+	if (verbose)
+		printf("Flushed all TC-BPF egress programs (via destroy hook)\n");
+
 	return err;
 }
 
