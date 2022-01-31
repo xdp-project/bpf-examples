@@ -25,6 +25,7 @@ static const char *__doc__ =
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
 	{ "interface",        required_argument, NULL, 'i' },
+	{ "unload",           no_argument,       NULL, 'u' },
 	{ 0, 0, NULL, 0 }
 };
 
@@ -132,6 +133,20 @@ get_bpf_skel_object(struct user_config *cfg)
 	return obj;
 }
 
+int teardown(struct user_config *cfg)
+{
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook,
+			    .attach_point = BPF_TC_EGRESS,
+			    .ifindex = cfg->ifindex);
+	int err;
+
+	err = bpf_tc_hook_destroy(&hook);
+	if (err)
+		fprintf(stderr, "Couldn't remove clsact qdisc on %s\n", cfg->ifname);
+
+	return err;
+}
+
 int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 {
 	int err = 0;
@@ -183,7 +198,7 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 
 	if (cfg.unload)
-		return EXIT_FAILURE; // FIXME NOT implemented
+		return teardown(&cfg);
 
 	obj = get_bpf_skel_object(&cfg);
 	if (obj == NULL)
