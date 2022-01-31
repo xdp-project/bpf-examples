@@ -173,6 +173,9 @@ int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 	}
 
 	hook.attach_point = BPF_TC_EGRESS;
+	attach_egress.flags    = BPF_TC_F_REPLACE;
+	attach_egress.handle   = 0x1;
+	attach_egress.priority = 0xC02a;
 	err = bpf_tc_attach(&hook, &attach_egress);
 	if (err) {
 		fprintf(stderr, "Couldn't attach egress program to ifindex %d (err:%d)\n",

@@ -19,6 +19,10 @@
  * Quick test reloading with tc:
  tc filter replace dev "$DEV" egress prio 0xC000 handle 1 bpf da obj tc_txq_policy_kern.o
 
+ * Beware: Trying to replace an existing TC-BPF prog often result in appending a
+ * new prog (as a new tc filter instance).  Be careful to set both handle and
+ * prio to the existing TC-BPF "filter" instance.
+
  * Delete by teardown of clsact
  tc qdisc delete dev "$DEV" clsact
 
