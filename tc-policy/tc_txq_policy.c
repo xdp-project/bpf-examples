@@ -30,12 +30,17 @@ static const struct option long_options[] = {
 	{ 0, 0, NULL, 0 }
 };
 
+#define EGRESS_HANDLE		0x1;
+#define EGRESS_PRIORITY 	0xC02F;
+
 struct user_config {
 	int ifindex;
 	char ifname[IF_NAMESIZE+1];
 	bool unload;
 	bool flush_hook;
 };
+
+static int verbose = 1;
 
 /* Auto-generated skeleton: Contains BPF-object inlined as code */
 #include "tc_txq_policy_kern.skel.h"
@@ -155,6 +160,43 @@ int teardown_hook(struct user_config *cfg)
 	return err;
 }
 
+int tc_detach_egress(struct user_config *cfg)
+{
+	int err;
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = cfg->ifindex,
+			    .attach_point = BPF_TC_EGRESS);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts_info);
+
+	opts_info.handle   = EGRESS_HANDLE;
+	opts_info.priority = EGRESS_PRIORITY;
+
+	/* Check what program we are removing */
+	err = bpf_tc_query(&hook, &opts_info);
+	if (err) {
+		fprintf(stderr, "No egress program to detach "
+			"for ifindex %d (err:%d)\n", cfg->ifindex, err);
+		return err;
+	}
+	if (verbose)
+		printf("Detaching TC-BPF prog id:%d\n", opts_info.prog_id);
+
+	/* Attempt to detach program */
+	opts_info.prog_fd = 0;
+	opts_info.prog_id = 0;
+	opts_info.flags = 0;
+	err = bpf_tc_detach(&hook, &opts_info);
+	if (err) {
+		fprintf(stderr, "Cannot detach TC-BPF program id:%d "
+			"for ifindex %d (err:%d)\n", opts_info.prog_id,
+			cfg->ifindex, err);
+	}
+
+	if (cfg->flush_hook)
+		return teardown_hook(cfg);
+
+	return err;
+}
+
 int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 {
 	int err = 0;
@@ -175,19 +217,19 @@ int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 
 	err = bpf_tc_hook_create(&hook);
 	if (err && err != -EEXIST) {
-		fprintf(stderr, "Couldn't create TC-BPF hook for ifindex %d (err:%d)\n",
-			cfg->ifindex, err);
+		fprintf(stderr, "Couldn't create TC-BPF hook for "
+			"ifindex %d (err:%d)\n", cfg->ifindex, err);
 		goto out;
 	}
 
 	hook.attach_point = BPF_TC_EGRESS;
 	attach_egress.flags    = BPF_TC_F_REPLACE;
-	attach_egress.handle   = 0x1;
-	attach_egress.priority = 0xC02a;
+	attach_egress.handle   = EGRESS_HANDLE;
+	attach_egress.priority = EGRESS_PRIORITY;
 	err = bpf_tc_attach(&hook, &attach_egress);
 	if (err) {
-		fprintf(stderr, "Couldn't attach egress program to ifindex %d (err:%d)\n",
-			hook.ifindex, err);
+		fprintf(stderr, "Couldn't attach egress program to "
+			"ifindex %d (err:%d)\n", hook.ifindex, err);
 		goto out;
 	}
 
@@ -208,6 +250,9 @@ int main(int argc, char *argv[])
 	err = parse_arguments(argc, argv, &cfg);
 	if (err)
 		return EXIT_FAILURE;
+
+	if (cfg.unload)
+		return tc_detach_egress(&cfg);
 
 	if (cfg.flush_hook)
 		return teardown_hook(&cfg);
