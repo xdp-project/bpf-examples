@@ -241,19 +241,6 @@ int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 		goto out;
 	}
 
-	/* Let check BPF prog got attached */
-	attach_egress.flags = 0;
-	attach_egress.prog_fd = 0;
-	attach_egress.prog_id = 0;
-	attach_egress.handle   = EGRESS_HANDLE;
-	attach_egress.priority = EGRESS_PRIORITY;
-	err = bpf_tc_query(&hook, &attach_egress);
-	if (err) {
-		fprintf(stderr, "No egress program is attached "
-			"for ifindex %d (err:%d)\n", cfg->ifindex, err);
-		goto out;
-	}
-
 	if (verbose) {
 		printf("Attached TC-BPF program id:%d\n",
 		       attach_egress.prog_id);
