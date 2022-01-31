@@ -1024,6 +1024,7 @@ int main(int argc, char *argv[])
 
 	// Allow program to perform cleanup on Ctrl-C
 	signal(SIGINT, abort_program);
+	signal(SIGTERM, abort_program);
 
 	// Main loop
 	while (keep_running) {
