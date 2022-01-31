@@ -34,6 +34,9 @@ struct user_config {
 	bool unload;
 };
 
+/* Auto-generated skeleton: Contains BPF-object inlined as code */
+#include "tc_txq_policy_kern.skel.h"
+
 static void print_usage(char *argv[])
 {
 	int i;
@@ -99,15 +102,58 @@ static int parse_arguments(int argc, char *argv[],
 	return 0;
 }
 
+struct tc_txq_policy_kern *
+get_bpf_skel_object(struct user_config *cfg)
+{
+	struct tc_txq_policy_kern *obj; /* Skeleton gave us this */
+	char buf[100];
+	int err;
+
+	/* Skeleton header file have BPF-object as inline code */
+	obj = tc_txq_policy_kern__open();
+	err = libbpf_get_error(obj);
+	if (err) {
+		libbpf_strerror(err, buf, sizeof(buf));
+		fprintf(stderr, "Couldn't open BPF skeleton:(%d) %s\n", err, buf);
+		return NULL;
+	}
+
+	/* Add code here that change BPF-obj config before loading */
+
+	/* Loading BPF-code into kernel, verifier will check, but not attach */
+	err = tc_txq_policy_kern__load(obj);
+	if (err) {
+		libbpf_strerror(err, buf, sizeof(buf));
+		fprintf(stderr, "Couldn't load BPF skeleton:(%d) %s\n", err, buf);
+		tc_txq_policy_kern__destroy(obj);
+		return NULL;
+	}
+
+	return obj;
+}
+
 int main(int argc, char *argv[])
 {
 	struct user_config cfg = {
 		.unload = false,
 	};
+	struct tc_txq_policy_kern *obj; /* Skeleton gave us this */
 	int err;
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_EGRESS);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_egress);
 
 	err = parse_arguments(argc, argv, &cfg);
 	if (err)
 		return EXIT_FAILURE;
 
+	hook.ifindex = cfg.ifindex;
+	if (cfg.unload)
+		return EXIT_FAILURE; // FIXME NOT implemented
+
+	obj = get_bpf_skel_object(&cfg);
+	if (obj == NULL)
+		return EXIT_FAILURE;
+
+	tc_txq_policy_kern__destroy(obj);
+	return 0;
 }
