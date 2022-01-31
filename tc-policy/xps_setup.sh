@@ -1,5 +1,9 @@
-#!/bin/bash
+#!/bin/sh
 #
+# This script is a modified version of:
+#  https://github.com/xdp-project/xdp-cpumap-tc/blob/master/bin/xps_setup.sh
+#
+# Script simplied for work with shell: ash
 
 function usage() {
     echo "Change setting of XPS txq to CPU mapping via files"
@@ -49,7 +53,7 @@ function mask_to_cpus() {
 }
 
 function sorted_txq_xps_cpus() {
-    local queues=$(ls /sys/class/net/$DEV/queues/tx-*/xps_cpus | sort --field-separator='-' -k2n)
+    local queues=$(ls /sys/class/net/$DEV/queues/tx-*/xps_cpus | sort -t '-' -k2n)
     echo $queues
 }
 
@@ -108,13 +112,13 @@ function xps_setup_1to1_mapping() {
 }
 
 # Using external program "getopt" to get --long-options
-OPTIONS=$(getopt -o ld: \
-    --long list,default,disable,dev:,txq:,cpu: -- "$@")
-if (( $? != 0 )); then
-    usage
-    err 2 "Error calling getopt"
-fi
-eval set -- "$OPTIONS"
+## OPTIONS=$(getopt -o ld: \
+##    --long list,default,disable,dev:,txq:,cpu: -- "$@")
+##if (( $? != 0 )); then
+##    usage
+##    err 2 "Error calling getopt"
+##fi
+##eval set -- "$OPTIONS"
 
 ##  --- Parse command line arguments / parameters ---
 while true; do
@@ -191,6 +195,6 @@ if [[ "$DISABLE" == "yes" ]]; then
     fi
 fi
 
-if [[ -n "$LIST" ]]; then
+#if [[ -n "$LIST" ]]; then
     list_xps_setup
-fi
+#fi
