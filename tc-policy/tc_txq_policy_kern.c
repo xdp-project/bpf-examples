@@ -9,6 +9,20 @@
 //#include <stdbool.h>
 //#include "../include/xdp/parsing_helpers.h"
 
+/* Manuel setup:
+ export DEV=eth1
+
+ tc qdisc  add dev "$DEV" clsact
+ tc filter add dev "$DEV" egress bpf da obj tc_txq_policy_kern.o
+ tc filter list dev "$DEV" egress
+
+ * Quick test reloading with tc:
+ tc filter replace dev "$DEV" egress prio 0xC000 handle 1 bpf da obj tc_txq_policy_kern.o
+
+ * Delete by teardown of clsact
+ tc qdisc delete dev "$DEV" clsact
+
+*/
 SEC("classifier")
 int queue_map_4 (struct __sk_buff *skb)
 {
