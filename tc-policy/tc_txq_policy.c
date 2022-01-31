@@ -26,6 +26,7 @@ static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
 	{ "interface",        required_argument, NULL, 'i' },
 	{ "unload",           no_argument,       NULL, 'u' },
+	{ "destroy-hook",     no_argument,       NULL, 'f' },
 	{ 0, 0, NULL, 0 }
 };
 
@@ -33,6 +34,7 @@ struct user_config {
 	int ifindex;
 	char ifname[IF_NAMESIZE+1];
 	bool unload;
+	bool flush_hook;
 };
 
 /* Auto-generated skeleton: Contains BPF-object inlined as code */
@@ -87,6 +89,9 @@ static int parse_arguments(int argc, char *argv[],
 		case 'u':
 			cfg->unload = true;
 			break;
+		case 'f':
+			cfg->flush_hook = true;
+			break;
 		default:
 			print_usage(argv);
 			fprintf(stderr, "Unknown option %s\n", argv[optind]);
@@ -133,13 +138,16 @@ get_bpf_skel_object(struct user_config *cfg)
 	return obj;
 }
 
-int teardown(struct user_config *cfg)
+int teardown_hook(struct user_config *cfg)
 {
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook,
 			    .attach_point = BPF_TC_EGRESS,
 			    .ifindex = cfg->ifindex);
 	int err;
 
+	/* When destroying the hook, any and ALL attached TC-BPF (filter)
+	 * programs are also detached.
+	 */
 	err = bpf_tc_hook_destroy(&hook);
 	if (err)
 		fprintf(stderr, "Couldn't remove clsact qdisc on %s\n", cfg->ifname);
@@ -192,6 +200,7 @@ int main(int argc, char *argv[])
 {
 	struct user_config cfg = {
 		.unload = false,
+		.flush_hook = false,
 	};
 	struct tc_txq_policy_kern *obj; /* Skeleton gave us this */
 	int err;
@@ -200,8 +209,8 @@ int main(int argc, char *argv[])
 	if (err)
 		return EXIT_FAILURE;
 
-	if (cfg.unload)
-		return teardown(&cfg);
+	if (cfg.flush_hook)
+		return teardown_hook(&cfg);
 
 	obj = get_bpf_skel_object(&cfg);
 	if (obj == NULL)
