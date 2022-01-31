@@ -139,7 +139,12 @@ start_epping() {
     sleep 2 # Give pping some time to set up
 }
 
-stop_pping() {
+stop_epping() {
+    echo "${M2}: Stopping pping..."
+    ssh $M2 "sudo pkill --signal SIGINT -f 'pping -i $IFACE'"
+}
+
+stop_kpping() {
     echo "${M2}: Stopping pping..."
     ssh $M2 "sudo pkill -f 'pping -i $IFACE'"
 }
@@ -153,9 +158,7 @@ run_test() {
     start_iperf3_servers
     start_system_monitoring $1
 
-    #log_start ${1}/test_interval.log
     run_iperf3_clients $1 $2
-    #log_end ${1}/test_interval.log
 
     stop_system_monitoring
     stop_iperf3_servers
@@ -192,7 +195,7 @@ echo -e "\n\nRunning test with Kathie's pping..."
 SPATH="${1}/k_pping"
 start_kpping $SPATH
 run_test $SPATH $2
-stop_pping
+stop_kpping
 copy_back_results $SPATH
 
 sleep $INTERTEST_INTERVAL
@@ -201,7 +204,7 @@ echo -e "\n\nRunning test with my eBPF pping..."
 SPATH="${1}/e_pping"
 start_epping $SPATH
 run_test $SPATH $2
-stop_pping
+stop_epping
 copy_back_results $SPATH
 
 IFACE=$IFACE ./plot_results.sh $1 $IP_TARGET
