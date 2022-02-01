@@ -71,4 +71,6 @@ The main part of the script is:
 #+end_src
 
 Or as oneliner:
- * =bpftrace -e 't:net:net_dev_start_xmit {@txq[str(args->name, 15)]=lhist(args->queue_mapping, 0,32,1)}'=
+#+begin_src sh
+ bpftrace -e 't:net:net_dev_start_xmit {@txq[str(args->name, 15)]=lhist(args->queue_mapping, 0,32,1)}'
+#+end_src
