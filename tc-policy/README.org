@@ -87,3 +87,32 @@ Or as oneliner:
 #+begin_src sh
  bpftrace -e 't:net:net_dev_start_xmit {@txq[str(args->name, 15)]=lhist(args->queue_mapping, 0,32,1)}'
 #+end_src
+
+* Inspecting loaded BPF
+
+How do you see if these BPF TC-hook programs are loaded?
+
+** bpftool
+
+The cmdline =bpftool net= can list any network related BPF program:
+
+#+begin_example
+ root@main-ctrl2:~ # bpftool net
+ xdp:
+ eth1(5) driver id 59
+
+ tc:
+ eth1(5) clsact/egress not_txq_zero:[17] id 17
+#+end_example
+
+There we see both the *XDP* BPF-program used by AF_XDP to redirect frames, and
+the *TC* hook BPF-prog loaded and attached.
+
+** tc egress
+
+The tc command need to be longer and more explicit:
+#+begin_example
+ root@main-ctrl2:~ # tc filter show dev eth1 egress
+ filter protocol all pref 49199 bpf chain 0
+ filter protocol all pref 49199 bpf chain 0 handle 0x1 not_txq_zero:[17] direct-action not_in_hw id 17 tag a761e11074b78959 jited
+#+end_example
