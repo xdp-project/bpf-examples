@@ -70,5 +70,11 @@ int not_txq_zero (struct __sk_buff *skb)
 	if (skb->queue_mapping == 1)
 		skb->queue_mapping = 4;
 
+	/* If queue_mapping was not set by skb_record_rx_queue(),
+	 * e.g. locally generated traffic
+	 */
+	if (skb->queue_mapping == 0)
+		skb->queue_mapping = 3;
+
 	return TC_ACT_OK;
 }

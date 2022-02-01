@@ -7,7 +7,7 @@
 
 tracepoint:net:net_dev_start_xmit {
 	$qm = args->queue_mapping;
-	$dev = str(args->name, 15);
+	$dev = str(args->name, 16);
 
 	@stat_txq_usage[$dev] = lhist($qm, 0,32,1);
 }
