@@ -1,0 +1,26 @@
+#!/usr/bin/bpftrace
+
+//BEGIN {
+//	printf("Monitor TXQ usage\n");
+//	printf(" - Remember: BPF set queue_mapping is one-less here (zero-indexed)\n");
+//}
+
+tracepoint:net:net_dev_start_xmit {
+	$qm = args->queue_mapping;
+	$dev = str(args->name, 16);
+
+	@stat_txq_usage[$dev] = lhist($qm, 0,32,1);
+}
+
+/* Periodically print stats */
+interval:s:3
+{
+	printf("\nPeriodic show stats - time: ");
+        time();
+	print(@stat_txq_usage);
+}
+
+/* Default bpftrace will print all remaining maps at END */
+//END {
+//	printf("END stats:\n");
+//}
