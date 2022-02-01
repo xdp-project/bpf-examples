@@ -29,6 +29,19 @@ the TC-hook, without depending on =tc= command util. Furthermore, the loader
 uses =bpftool= skeleton feature (to generate a header file) allowing to create a
 binary that contains the BPF-object itself, making it self-contained.
 
+* Gotchas: XPS
+
+For TXQ (=queue_mapping=) overwrite to work, you need to *disable* XPS (Transmit
+Packet Steering), as XSP will have higher precedence than our BPF change to
+=queue_mapping=. This is done by writing 0 into each =/sys/class/net/= tx-queue
+file =/sys/class/net/DEV/queues/tx-*/xps_cpus=.
+
+A script for configuring and disabling XPS is provided here: [[file:xps_setup_ash.sh]].
+
+Script command line to disable XPS:
+#+begin_src sh
+ sudo ./xps_setup_ash.sh --dev DEVICE --default --disable
+#+end_src
 
 * Different ways to view queue_mapping
 
