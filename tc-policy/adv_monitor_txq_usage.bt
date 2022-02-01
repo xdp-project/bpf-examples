@@ -1,0 +1,42 @@
+#!/usr/bin/bpftrace
+
+//BEGIN {
+//	printf("Monitor TXQ usage\n");
+//	printf(" - Remember: BPF set queue_mapping is one-less here (zero-indexed)\n");
+//}
+
+tracepoint:net:net_dev_start_xmit {
+	$qm = args->queue_mapping;
+	$dev = str(args->name, 16);
+
+	@stat_txq_usage[$dev] = lhist($qm, 0,32,1);
+}
+
+/*
+ * More precisely we actually want to see what netdev_pick_tx() is
+ * selecting, as sockets can possibly return another queue_id.
+ */
+
+kprobe:netdev_pick_tx {
+	$dev = ((struct net_device *)arg0)->name;
+	@record[cpu] = $dev;
+}
+
+kretprobe:netdev_pick_tx {
+	$dev = @record[cpu];
+	@netdev_pick_tx[$dev] = lhist(retval, 0,32,1);
+}
+
+/* Periodically print stats */
+interval:s:3
+{
+	printf("\nPeriodic show stats - time: ");
+        time();
+	print(@stat_txq_usage);
+	print(@netdev_pick_tx);
+}
+
+/* Default bpftrace will print all remaining maps at END */
+//END {
+//	printf("END stats:\n");
+//}
