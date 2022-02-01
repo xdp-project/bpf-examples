@@ -52,3 +52,23 @@ int queue_map_4 (struct __sk_buff *skb)
 	
 	return TC_ACT_OK;
 }
+
+/*
+ * Section name "tc" is preferred over "classifier" as its being deprecated
+ *  https://github.com/libbpf/libbpf/wiki/Libbpf-1.0-migration-guide#bpf-program-sec-annotation-deprecations
+ */
+
+SEC("tc")
+int not_txq_zero (struct __sk_buff *skb)
+{
+	/* Existing skb->queue_mapping can come from skb_record_rx_queue() which
+	 * is usually called by drivers in early RX handling when creating SKB.
+	 */
+
+	/* At this stage queue_mapping is 1-indexed.
+	 * Thus, code is changing TXQ zero to be remapped to TXQ 3. */
+	if (skb->queue_mapping == 1)
+		skb->queue_mapping = 4;
+
+	return TC_ACT_OK;
+}

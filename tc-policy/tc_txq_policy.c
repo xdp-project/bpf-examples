@@ -212,7 +212,8 @@ int tc_attach_egress(struct user_config *cfg, struct tc_txq_policy_kern *obj)
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_egress);
 
 	/* Selecting BPF-prog here: */
-	fd = bpf_program__fd(obj->progs.queue_map_4);
+	//fd = bpf_program__fd(obj->progs.queue_map_4);
+	fd = bpf_program__fd(obj->progs.not_txq_zero);
 	if (fd < 0) {
 		fprintf(stderr, "Couldn't find egress program\n");
 		err = -ENOENT;
