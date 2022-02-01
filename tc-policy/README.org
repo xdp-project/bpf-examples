@@ -54,3 +54,21 @@ You can now use it in all perf tools, such as:
 #+end_src
 
 Afterwards run =perf script= and see results.
+
+** bpftrace
+
+It is also possible to monitor TXQ usage via a =bpftrace= script.
+ * see [[file:monitor_txq_usage.bt]].
+
+The main part of the script is:
+#+begin_src sh
+ tracepoint:net:net_dev_start_xmit {
+	$qm = args->queue_mapping;
+	$dev = str(args->name, 15);
+
+	@stat_txq_usage[$dev] = lhist($qm, 0,32,1);
+ }
+#+end_src
+
+Or as oneliner:
+ * =bpftrace -e 't:net:net_dev_start_xmit {@txq[str(args->name, 15)]=lhist(args->queue_mapping, 0,32,1)}'=
