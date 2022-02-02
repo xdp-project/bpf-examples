@@ -104,6 +104,8 @@ static const struct option long_options[] = {
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
+	{ "tcp",              no_argument,       NULL, 'T' }, // Calculate and report RTTs for TCP traffic (with TCP timestamps)
+	{ "icmp",             no_argument,       NULL, 'C' }, // Calculate and report RTTs for ICMP echo-reply traffic
 	{ 0, 0, NULL, 0 }
 };
 
@@ -169,8 +171,10 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 	config->ifindex = 0;
 	config->force = false;
+	config->bpf_config.track_tcp = false;
+	config->bpf_config.track_icmp = false;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:I:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfTCi:r:c:F:I:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -235,6 +239,12 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			config->force = true;
 			config->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
 			break;
+		case 'T':
+			config->bpf_config.track_tcp = true;
+			break;
+		case 'C':
+			config->bpf_config.track_icmp = true;
+			break;
 		case 'h':
 			printf("HELP:\n");
 			print_usage(argv);
@@ -252,6 +262,23 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	}
 
 	return 0;
+}
+
+const char *tracked_protocols_to_str(struct pping_config *config)
+{
+	bool tcp = config->bpf_config.track_tcp;
+	bool icmp = config->bpf_config.track_icmp;
+	return tcp && icmp ? "TCP, ICMP" : tcp ? "TCP" : "ICMP";
+}
+
+const char *output_format_to_str(enum PPING_OUTPUT_FORMAT format)
+{
+	switch (format) {
+	case PPING_OUTPUT_STANDARD: return "standard";
+	case PPING_OUTPUT_JSON: return "json";
+	case PPING_OUTPUT_PPVIZ: return "ppviz";
+	default: return "unkown format";
+	}
 }
 
 void abort_program(int sig)
@@ -985,6 +1012,14 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	if (!config.bpf_config.track_tcp && !config.bpf_config.track_icmp)
+		config.bpf_config.track_tcp = true;
+
+	if (config.bpf_config.track_icmp &&
+	    config.output_format == PPING_OUTPUT_PPVIZ)
+		fprintf(stderr,
+			"Warning: ppviz format mainly intended for TCP traffic, but may now include ICMP traffic as well\n");
+
 	switch (config.output_format) {
 	case PPING_OUTPUT_STANDARD:
 		print_event_func = print_event_standard;
@@ -996,6 +1031,10 @@ int main(int argc, char *argv[])
 		print_event_func = print_event_ppviz;
 		break;
 	}
+
+	fprintf(stderr, "Starting ePPing in %s mode tracking %s on %s\n",
+		output_format_to_str(config.output_format),
+		tracked_protocols_to_str(&config), config.ifname);
 
 	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {

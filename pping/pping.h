@@ -34,6 +34,9 @@ enum __attribute__((__packed__)) flow_event_source {
 
 struct bpf_config {
 	__u64 rate_limit;
+	bool track_tcp;
+	bool track_icmp;
+	__u8 reserved[6];
 };
 
 /*

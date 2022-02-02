@@ -286,14 +286,15 @@ static int parse_packet_identifier(struct parsing_context *ctx,
 	}
 
 	// Parse identifer from suitable protocol
-	if (p_id->flow.proto == IPPROTO_TCP)
+	if (config.track_tcp && p_id->flow.proto == IPPROTO_TCP)
 		err = parse_tcp_identifier(ctx, &saddr->port, &daddr->port, fei,
 					   &p_id->identifier);
-	else if (p_id->flow.proto == IPPROTO_ICMPV6 &&
+	else if (config.track_icmp && p_id->flow.proto == IPPROTO_ICMPV6 &&
 		 p_id->flow.ipv == AF_INET6)
 		err = parse_icmp6_identifier(ctx, &saddr->port, &daddr->port,
 					     fei, &p_id->identifier);
-	else if (p_id->flow.proto == IPPROTO_ICMP && p_id->flow.ipv == AF_INET)
+	else if (config.track_icmp && p_id->flow.proto == IPPROTO_ICMP &&
+		 p_id->flow.ipv == AF_INET)
 		err = parse_icmp_identifier(ctx, &saddr->port, &daddr->port,
 					    fei, &p_id->identifier);
 	else
