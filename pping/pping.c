@@ -821,6 +821,15 @@ static void print_event_json(const union pping_event *e)
 	jsonw_end_object(json_ctx);
 }
 
+static void warn_map_full(const struct map_full_event *e)
+{
+	print_ns_datetime(stderr, e->timestamp);
+	fprintf(stderr, " Warning: Unable to create %s entry for flow ",
+		e->map == PPING_MAP_FLOWSTATE ? "flow" : "timestamp");
+	print_flow_ppvizformat(stderr, &e->flow);
+	fprintf(stderr, "\n");
+}
+
 static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
 {
 	const union pping_event *e = data;
@@ -829,6 +838,9 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
 		return;
 
 	switch (e->event_type) {
+	case EVENT_TYPE_MAP_FULL:
+		warn_map_full(&e->map_event);
+		break;
 	case EVENT_TYPE_RTT:
 	case EVENT_TYPE_FLOW:
 		print_event_func(e);

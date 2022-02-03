@@ -28,6 +28,9 @@
 // Mask for IPv6 flowlabel + traffic class -  used in fib lookup
 #define IPV6_FLOWINFO_MASK __cpu_to_be32(0x0FFFFFFF)
 
+// Emit a warning max once per second when failing to add entry to map
+#define WARN_MAP_FULL_INTERVAL 1000000000UL
+
 /*
  * This struct keeps track of the data and data_end pointers from the xdp_md or
  * __skb_buff contexts, as well as a currently parsed to position kept in nh.
@@ -78,6 +81,8 @@ struct packet_info {
 char _license[] SEC("license") = "GPL";
 // Global config struct - set from userspace
 static volatile const struct bpf_config config = {};
+static volatile __u64 last_warn_time[2] = { 0 };
+
 
 // Map definitions
 struct {
@@ -442,10 +447,34 @@ static void send_flow_event(void *ctx, struct packet_info *p_info,
 }
 
 /*
+ * Send a map-full event for the map.
+ * Will only trigger once every WARN_MAP_FULL_INTERVAL
+ */
+static void send_map_full_event(void *ctx, struct packet_info *p_info,
+				enum pping_map map)
+{
+	struct map_full_event me;
+
+	if (p_info->time < last_warn_time[map] ||
+	    p_info->time - last_warn_time[map] < WARN_MAP_FULL_INTERVAL)
+		return;
+
+	last_warn_time[map] = p_info->time;
+
+	__builtin_memset(&me, 0, sizeof(me));
+	me.event_type = EVENT_TYPE_MAP_FULL;
+	me.timestamp = p_info->time;
+	me.flow = p_info->pid.flow;
+	me.map = map;
+
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &me, sizeof(me));
+}
+
+/*
  * Attempt to create a new flow-state.
  * Returns a pointer to the flow_state if successful, NULL otherwise
  */
-static struct flow_state *create_flow(struct packet_info *p_info)
+static struct flow_state *create_flow(void *ctx, struct packet_info *p_info)
 {
 	struct flow_state new_state = { 0 };
 
@@ -455,8 +484,10 @@ static struct flow_state *create_flow(struct packet_info *p_info)
 					       EVENT_REASON_FIRST_OBS_PCKT;
 
 	if (bpf_map_update_elem(&flow_state, &p_info->pid.flow, &new_state,
-				BPF_NOEXIST) != 0)
+				BPF_NOEXIST) != 0) {
+		send_map_full_event(ctx, p_info, PPING_MAP_FLOWSTATE);
 		return NULL;
+	}
 
 	return bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
 }
@@ -474,7 +505,7 @@ static struct flow_state *update_flow(void *ctx, struct packet_info *p_info,
 	    !(p_info->event_type == FLOW_EVENT_CLOSING ||
 	      p_info->event_type == FLOW_EVENT_CLOSING_BOTH)) {
 		*new_flow = true;
-		f_state = create_flow(p_info);
+		f_state = create_flow(ctx, p_info);
 	}
 
 	if (!f_state)
@@ -610,8 +641,9 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 	 */
 	f_state->last_timestamp = p_info->time;
 
-	bpf_map_update_elem(&packet_ts, &p_info->pid, &p_info->time,
-			    BPF_NOEXIST);
+	if (bpf_map_update_elem(&packet_ts, &p_info->pid, &p_info->time,
+				BPF_NOEXIST) != 0)
+		send_map_full_event(ctx, p_info, PPING_MAP_PACKETTS);
 }
 
 /*

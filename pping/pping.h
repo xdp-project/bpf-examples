@@ -14,6 +14,7 @@ typedef __u64 fixpoint64;
 /* For the event_type members of rtt_event and flow_event */
 #define EVENT_TYPE_FLOW 1
 #define EVENT_TYPE_RTT 2
+#define EVENT_TYPE_MAP_FULL 3
 
 enum __attribute__((__packed__)) flow_event_type {
 	FLOW_EVENT_NONE,
@@ -35,6 +36,11 @@ enum __attribute__((__packed__)) flow_event_source {
 	EVENT_SOURCE_PKT_SRC,
 	EVENT_SOURCE_PKT_DEST,
 	EVENT_SOURCE_USERSPACE
+};
+
+enum __attribute__((__packed__)) pping_map {
+	PPING_MAP_FLOWSTATE = 0,
+	PPING_MAP_PACKETTS
 };
 
 struct bpf_config {
@@ -133,10 +139,23 @@ struct flow_event {
 	__u8 reserved;
 };
 
+/*
+ * An event indicating that a new entry could not be created the map due to the
+ * map being full.
+ */
+struct map_full_event {
+	__u64 event_type;
+	__u64 timestamp;
+	struct network_tuple flow;
+	enum pping_map map;
+	__u8 reserved[3];
+};
+
 union pping_event {
 	__u64 event_type;
 	struct rtt_event rtt_event;
 	struct flow_event flow_event;
+	struct map_full_event map_event;
 };
 
 /*
