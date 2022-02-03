@@ -253,6 +253,20 @@ estimate anyways (may never calculate RTT for packet with the true minimum
 RTT). And even without sampling there is some inherent sampling due to TCP
 timestamps only being updated at a limited rate (1000 Hz).
 
+#### Outputting flow opening/closing events
+A flow is not considered opened until a reply has been seen for it. The
+`flow_state` map keeps information about if the flow has been opened or not,
+which is checked and updated for each reply. The check and update of this
+information is not performed atomically, which may result in multiple replies
+thinking they are the first, emitting multiple flow-opened events, in case they
+are processed concurrently.
+
+Likewise, when flows are closed it checks if the flow has been opened to
+determine if a flow closing message should be sent. If multiple replies are
+processed concurrently, it's possible one of them will update the flow-open
+information and emit a flow opening message, but another reply closing the flow
+without thinking it's ever been opened, thus not sending a flow closing message.
+
 ## Similar projects
 Passively measuring the RTT for TCP traffic is not a novel concept, and there
 exists a number of other tools that can do so. A good overview of how passive
