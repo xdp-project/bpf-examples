@@ -91,7 +91,7 @@ struct pping_config {
 
 static volatile int keep_running = 1;
 static json_writer_t *json_ctx = NULL;
-static void (*print_event_func)(void *, int, void *, __u32) = NULL;
+static void (*print_event_func)(const union pping_event *) = NULL;
 
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
@@ -511,7 +511,7 @@ static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 			fe.flow_event_type = FLOW_EVENT_CLOSING;
 			fe.reason = EVENT_REASON_FLOW_TIMEOUT;
 			fe.source = EVENT_SOURCE_USERSPACE;
-			print_event_func(NULL, 0, &fe, sizeof(fe));
+			print_event_func((union pping_event *)&fe);
 		}
 		return true;
 	}
@@ -722,11 +722,8 @@ static void print_ns_datetime(FILE *stream, __u64 monotonic_ns)
 	fprintf(stream, "%s.%09llu", timestr, ts % NS_PER_SECOND);
 }
 
-static void print_event_standard(void *ctx, int cpu, void *data,
-				 __u32 data_size)
+static void print_event_standard(const union pping_event *e)
 {
-	const union pping_event *e = data;
-
 	if (e->event_type == EVENT_TYPE_RTT) {
 		print_ns_datetime(stdout, e->rtt_event.timestamp);
 		printf(" %llu.%06llu ms %llu.%06llu ms %s ",
@@ -748,19 +745,19 @@ static void print_event_standard(void *ctx, int cpu, void *data,
 	}
 }
 
-static void print_event_ppviz(void *ctx, int cpu, void *data, __u32 data_size)
+static void print_event_ppviz(const union pping_event *e)
 {
-	const struct rtt_event *e = data;
-	__u64 time = convert_monotonic_to_realtime(e->timestamp);
-
 	// ppviz format does not support flow events
 	if (e->event_type != EVENT_TYPE_RTT)
 		return;
 
+	const struct rtt_event *re = &e->rtt_event;
+	__u64 time = convert_monotonic_to_realtime(re->timestamp);
+
 	printf("%llu.%09llu %llu.%09llu %llu.%09llu ", time / NS_PER_SECOND,
-	       time % NS_PER_SECOND, e->rtt / NS_PER_SECOND,
-	       e->rtt % NS_PER_SECOND, e->min_rtt / NS_PER_SECOND, e->min_rtt);
-	print_flow_ppvizformat(stdout, &e->flow);
+	       time % NS_PER_SECOND, re->rtt / NS_PER_SECOND,
+	       re->rtt % NS_PER_SECOND, re->min_rtt / NS_PER_SECOND, re->min_rtt);
+	print_flow_ppvizformat(stdout, &re->flow);
 	printf("\n");
 }
 
@@ -805,10 +802,8 @@ static void print_flowevent_fields_json(json_writer_t *ctx,
 	jsonw_string_field(ctx, "triggered_by", eventsource_to_str(fe->source));
 }
 
-static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
+static void print_event_json(const union pping_event *e)
 {
-	const union pping_event *e = data;
-
 	if (e->event_type != EVENT_TYPE_RTT && e->event_type != EVENT_TYPE_FLOW)
 		return;
 
@@ -826,9 +821,27 @@ static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
 	jsonw_end_object(json_ctx);
 }
 
-static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
+static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
 {
-	fprintf(stderr, "Lost %llu RTT events on CPU %d\n", lost_cnt, cpu);
+	const union pping_event *e = data;
+
+	if (data_size < sizeof(e->event_type))
+		return;
+
+	switch (e->event_type) {
+	case EVENT_TYPE_RTT:
+	case EVENT_TYPE_FLOW:
+		print_event_func(e);
+		break;
+	default:
+		fprintf(stderr, "Warning: Unknown event type %llu\n",
+			e->event_type);
+	};
+}
+
+static void handle_missed_events(void *ctx, int cpu, __u64 lost_cnt)
+{
+	fprintf(stderr, "Lost %llu events on CPU %d\n", lost_cnt, cpu);
 }
 
 /*
@@ -1081,8 +1094,8 @@ int main(int argc, char *argv[])
 	// Set up perf buffer
 	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
 							      config.event_map),
-			      PERF_BUFFER_PAGES, print_event_func,
-			      handle_missed_rtt_event, NULL, NULL);
+			      PERF_BUFFER_PAGES, handle_event,
+			      handle_missed_events, NULL, NULL);
 	err = libbpf_get_error(pb);
 	if (err) {
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",

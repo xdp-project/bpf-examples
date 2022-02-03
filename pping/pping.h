@@ -93,10 +93,15 @@ struct packet_id {
 };
 
 /*
- * An RTT event message that can be passed from the bpf-programs to user-space.
+ * Events that can be passed from the BPF-programs to the user space
+ * application.
  * The initial event_type memeber is used to allow multiplexing between
  * different event types in a single perf buffer. Memebers up to and including
- * flow are identical to other event types.
+ * flow are identical for all event types.
+ */
+
+/*
+ * An RTT event message passed when an RTT has been calculated
  * Uses explicit padding instead of packing based on recommendations in cilium's
  * BPF reference documentation at https://docs.cilium.io/en/stable/bpf/#llvm.
  */
@@ -116,10 +121,7 @@ struct rtt_event {
 };
 
 /*
- * A flow event message that can be passed from the bpf-programs to user-space.
- * The initial event_type memeber is used to allow multiplexing between
- * different event types in a single perf buffer. Memebers up to and including
- * flow are identical to other event types.
+ * A flow event message passed when a flow has changed state (opened/closed)
  */
 struct flow_event {
 	__u64 event_type;
