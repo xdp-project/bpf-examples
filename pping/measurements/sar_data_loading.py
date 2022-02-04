@@ -40,7 +40,7 @@ def load_sar_network_data(filename):
 
 def _load_sar_cpu_data(filename):
 
-    p = subprocess.run(["sadf", "-j", filename, "--", "-P", "ALL"],
+    p = subprocess.run(["sadf", "-j", filename, "--", "-P", "ALL", "-u", "ALL"],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode != 0:
         raise ChildProcessError("sadf failed: {}".format(p.stderr))
