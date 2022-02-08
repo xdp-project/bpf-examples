@@ -21,22 +21,22 @@ def load_ss_tcp_data(filename, filter_timerange=None, norm_timestamps=True,
     will be ignored.
     """
     flow_data = dict()
-    flow_bytes_history = dict()
-    fields = ["throughput", "rtt", "rttvar"]
+
     current_ts = None
 
     with util.open_compressed_file(filename, mode="rt") as file:
         for line in file:
-            tcp_info = parse_tcp_entry(line, flow_bytes_history)
+            tcp_info = parse_tcp_entry(line)
             current_ts = tcp_info.get("timestamp", current_ts)
-            if not all(f in tcp_info for f in fields) or current_ts is None:
+            if "flow" not in tcp_info:
                 continue
             flow = tcp_info["flow"]
             if dst is not None and not flow.split("+")[1].startswith(dst):
                 continue
 
             if flow not in flow_data:
-                flow_data[flow] = {field: [] for field in ["timestamp"] + fields}
+                fields = set(list(tcp_info.keys())) - set(["timestamp", "flow"])
+                flow_data[flow] = {field: [] for field in fields.union(set(["timestamp"]))}
 
             flow_data[flow]["timestamp"].append(tcp_info.get("timestamp", current_ts))
             for field in fields:
@@ -47,28 +47,21 @@ def load_ss_tcp_data(filename, filter_timerange=None, norm_timestamps=True,
 
     # Convert to dataframe and apply filters
     flow_dfs = dict()
-    if filter_main_flows:
-        filt_flows = filter_likely_main_flows(flow_data, **kwargs)
-        if len(filt_flows) > 0:
-            flow_data = filt_flows
-        else:
-            print("Warning: Attempting to filter main flows yielded no valid flows. Skipping this step")
 
     time_ref = (min(data["timestamp"][0] for data in flow_data.values())
                 if filter_timerange is None else filter_timerange[0])
 
     for flow, data in flow_data.items():
-        df = pd.DataFrame(data)
-
-        if filter_timerange is not None:
-            df = df.loc[df["timestamp"].between(*filter_timerange)]
-            df.reset_index(drop=True, inplace=True)
-
-        if norm_timestamps:
-            df["timestamp"] = util.normalize_timestamps(df["timestamp"],
-                                                        time_ref)
+        df = _dict_to_df(data, filter_timerange, norm_timestamps, time_ref)
         if len(df) > 0:
             flow_dfs[flow] = df
+
+    if filter_main_flows:
+        filt_flows = filter_likely_main_flows(flow_dfs, **kwargs)
+        if len(filt_flows) > 0:
+            flow_dfs = filt_flows
+        else:
+            print("Warning: Attempting to filter main flows yielded no valid flows. Skipping this step")
 
     if sum_flows:
         flow_dfs["all"] = summarize_flows(flow_dfs)
@@ -76,14 +69,88 @@ def load_ss_tcp_data(filename, filter_timerange=None, norm_timestamps=True,
     return flow_dfs
 
 
-def parse_tcp_entry(line, flow_bytes_history=None):
+def _dict_to_df(ss_dict, filter_timerange, norm_timestamps, time_ref=None):
+    df = pd.DataFrame(ss_dict)
+
+    interval_lengths = np.empty(len(df), dtype=float)
+    interval_lengths[0] = np.inf
+    interval_lengths[1:] = np.diff(df["timestamp"].values)/np.timedelta64(1, "s")
+
+    bytes_inc = df["bytes_sent"].values.copy()
+    bytes_inc[1:] = np.diff(bytes_inc)
+    bytes_inc[bytes_inc < 0] = 0
+    df["throughput"] = bytes_inc * 8 / interval_lengths
+
+    retrans_inc = df["retrans_tot"].values.copy()
+    retrans_inc[1:] = np.diff(retrans_inc)
+    retrans_inc[retrans_inc < 0] = 0
+    df["retrans/s"] = retrans_inc / interval_lengths
+
+    invalid_mask = bytes_inc == 0
+    df["rtt"].values[invalid_mask] = np.nan
+    df["rttvar"].values[invalid_mask] = np.nan
+    df["delivery_rate"].values[invalid_mask] = 0
+
+    if filter_timerange is not None:
+        df = df.loc[df["timestamp"].between(*filter_timerange)]
+        df.reset_index(drop=True, inplace=True)
+
+    if norm_timestamps:
+        df["timestamp"] = util.normalize_timestamps(df["timestamp"], time_ref)
+
+    return df
+
+
+def summarize_flows(flow_dfs, stepsize=np.timedelta64(1, "s")):
+    sum_fields = ("throughput", "delivery_rate", "retrans/s")
+    mean_fields = ("rtt", "rttvar")
+    fields = sum_fields + mean_fields
+    if len(flow_dfs) < 1:
+        return None
+
+    start = min(df["timestamp"].values[0] for df in flow_dfs.values())
+    end = max(df["timestamp"].values[-1] for df in flow_dfs.values())
+
+    step = stepsize if np.issubdtype(start, np.datetime64) else stepsize/np.timedelta64(1, "s")
+    ts = np.arange(start, end+1, step)
+
+    ts_entries = {t: {field: {"sum": 0, "n": 0} for field in fields} for t in ts}
+
+    for flow, df in flow_dfs.items():
+        for row in range(len(df)):
+            t = df["timestamp"].values[row]
+            for field in fields:
+                val = df[field].values[row]
+                if not np.isnan(val):
+                    ts_entries[t][field]["sum"] += val
+                    ts_entries[t][field]["n"] += 1
+
+    cleaned_entries = {t: dict() for t in ts_entries.keys()}
+    for t, entry in ts_entries.items():
+        for field, val in entry.items():
+            if field in mean_fields:
+                cleaned_entries[t][field] = val["sum"]/val["n"] if val["n"] > 0 else np.nan
+            else:
+                cleaned_entries[t][field] = val["sum"]
+
+    sum_df = pd.DataFrame.from_dict(cleaned_entries, orient="index")
+    sum_df.index.name = "timestamp"
+    sum_df.reset_index(inplace=True)
+    return sum_df
+
+
+def filter_likely_main_flows(flow_dfs, thresh=1e6, min_entries=10,
+                             agg_func=np.median):
+    return {flow: data for flow, data in flow_dfs.items()
+            if agg_func(data["throughput"]) > thresh and
+            len(data["throughput"]) > min_entries}
+
+
+def parse_tcp_entry(line):
     """
-    Parses a line from the output of ss -tiO.
-    May optionally be prependeded by a timestamp
+    Parses a line from the output of ss -tiO, may optionally be prepended by a timestamp.
     """
     info = dict()
-    tp = dict()
-    bytes_sent = 0
 
     parts = line.rstrip("\n").split()
     if len(parts) < 1:
@@ -105,102 +172,85 @@ def parse_tcp_entry(line, flow_bytes_history=None):
     # Parse TCP fields
     info["flow"] = parts[estab_idx + 3] + "+" + parts[estab_idx + 4]
 
-    for i, part in enumerate(parts):
-        if part == "send":
-            tp["send"] = bps_str_to_numeric(parts[i+1])
-        if part == "delivery_rate":
-            tp["delivery_rate"] = bps_str_to_numeric(parts[i+1])
-        if part.startswith("rtt:"):
-            rtt, rttvar = part.split("rtt:")[1].split("/")
-            info["rtt"] = float(rtt)
-            info["rttvar"] = float(rttvar)
-        if part.startswith("bytes_sent:"):
-            bytes_sent = int(part.split("bytes_sent:")[1])
+    parts = parts[estab_idx + 4:]
 
-    info["bytes_sent"] = bytes_sent
-
-    # The delivery_rate provided by tcp_info seems more accurate than
-    # the send rate calculated by ss, so prefer delivery_rate if available
-    if len(tp) > 0:
-        info["throughput"] = tp.get("delivery_rate", tp.get("send"))
-
-    # If application doesn't send data, it apparently reuses
-    # stats from when application last sent data (so these stats are
-    # not really valid)
-    if flow_bytes_history is not None:
-        last_bytes_sent = flow_bytes_history.get(info["flow"], 0)
-        if last_bytes_sent == bytes_sent:
-            info.pop("throughput", None)
-            info.pop("rtt", None)
-            info.pop("rttvar", None)
-        flow_bytes_history[info["flow"]] = bytes_sent
+    info["bytes_sent"] = parse_bytes_sent(parts)
+    info["delivery_rate"] = parse_delivery_rate(parts)
+    rtt, rttvar = parse_rtt(parts)
+    info["rtt"] = rtt
+    info["rttvar"] = rttvar
+    retrans, retrans_tot = parse_retrans(parts)
+    info["curr_retrans"] = retrans
+    info["retrans_tot"] = retrans_tot
 
     return info
+
+
+def find_tcp_value(keyword, words, not_found_val=None):
+    colon_scheme = True if keyword.endswith(":") else False
+
+    for i, word in enumerate(words):
+        if colon_scheme:
+            if word.startswith(keyword):
+                return word[len(keyword):]
+        else:
+            if word == keyword:
+                return words[i+1]
+    return not_found_val
 
 
 def bps_str_to_numeric(bps_str):
     for prefix, factor in (("M", 1e6), ("K", 1e3), ("", 1)):
         if bps_str.endswith(prefix + "bps"):
             return float(bps_str[:-3 - len(prefix)]) * factor
-    raise ValueError("{} format does not appear to be a valid bps string".format(bps_str))
+    raise ValueError("{} does not appear to be a valid bps string".format(bps_str))
 
 
-def filter_likely_main_flows(flow_dfs, thresh=1e6, min_entries=5,
-                             agg_func=np.median):
-    return {flow: data for flow, data in flow_dfs.items()
-            if agg_func(data["throughput"]) > thresh and
-            len(data["throughput"]) > min_entries}
+def parse_bytes_sent(words):
+    return int(find_tcp_value("bytes_sent:", words, "0"))
 
 
-def summarize_flows(flow_dfs):
-    fields = ("throughput", "rtt", "rttvar")
-    mean_fields = ("rtt", "rttvar")
-    if len(flow_dfs) < 1:
-        return None
+def parse_rtt(words):
+    rtt, rttvar = find_tcp_value("rtt:", words, "NaN/NaN").split("/")
+    return float(rtt), float(rttvar)
 
-    start = min(df["timestamp"].values[0] for df in flow_dfs.values())
-    end = max(df["timestamp"].values[-1] for df in flow_dfs.values())
 
-    step = np.timedelta64(1, "s") if np.issubdtype(start, np.datetime64) else 1.0
-    ts = np.arange(start, end+1, step)
+def parse_retrans(words):
+    retrans, retrans_total = find_tcp_value("retrans:", words, "0/0").split("/")
+    return int(retrans), int(retrans_total)
 
-    ts_entries = {t: {field: {"sum": 0, "n": 0} for field in fields} for t in ts}
 
-    for flow, df in flow_dfs.items():
-        for row in range(len(df)):
-            t = df["timestamp"].values[row]
-            for field in fields:
-                val = df[field].values[row]
-                ts_entries[t][field]["sum"] += val
-                ts_entries[t][field]["n"] += 1
-
-    cleaned_entries = {t: dict() for t in ts_entries.keys()}
-    for t, entry in ts_entries.items():
-        for field, val in entry.items():
-            if val["n"] < 1:
-                cleaned_entries.pop(t, None)
-                break
-            cleaned_entries[t][field] = val["sum"]/val["n"] if field in mean_fields else val["sum"]
-
-    sum_df = pd.DataFrame.from_dict(cleaned_entries, orient="index")
-    sum_df.index.name = "timestamp"
-    sum_df.reset_index(inplace=True)
-    return sum_df
+def parse_delivery_rate(words):
+    return bps_str_to_numeric(find_tcp_value("delivery_rate", words, "0bps"))
 
 
 def plot_throughput_timeseries(flow_dfs, max_groups=0, stat_kwargs=None,
-                               **kwargs):
+                               plot_retrans=True, legend=True, **kwargs):
     if "all" not in flow_dfs:
         flow_dfs["all"] = summarize_flows(flow_dfs)
+
     stat_kws = {"fmt": "{:.4e}"}
     if stat_kwargs is not None:
         stat_kws.update(stat_kwargs)
     axes = complot.plot_pergroup_timeseries(flow_dfs, "throughput",
                                             max_groups=max_groups,
-                                            stat_kwargs=stat_kws, **kwargs)
+                                            stat_kwargs=stat_kws,
+                                            legend=False, **kwargs)
+
+    if plot_retrans:
+        ax2 = axes.twinx()
+        ax2.plot(flow_dfs["all"]["timestamp"].values, flow_dfs["all"]["retrans/s"].values,
+                 color="k", linestyle="--", zorder=2.5)
+        ax2.set_ylabel("Retransmissions")
+        ax2.set_ylim(0)
+        axes.plot([], [], color="k", linestyle="--", label="retrans/s") # legend hack
+
     axes.set_ylabel("Throughput (bps)")
     _, ymax = axes.get_ylim()
     axes.set_ylim(0, 1.05*ymax)
+    if legend:
+        axes.legend()
+
     return axes
 
 

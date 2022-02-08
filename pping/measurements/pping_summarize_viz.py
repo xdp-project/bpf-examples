@@ -59,7 +59,7 @@ def get_ss_tcp_file(subfolder):
     return tcpfiles[0] if len(tcpfiles) > 0 else None
 
 
-def read_tcp_data(root_folder, omit=0):
+def read_tcp_data(root_folder, omit=0, dst=None):
     tcp_dict = dict()
     for label, folder in label_folder_map.items():
         subfolder = os.path.join(root_folder, folder)
@@ -70,14 +70,14 @@ def read_tcp_data(root_folder, omit=0):
 
         data = ss_tcp_viz.load_ss_tcp_data(tcpfile, norm_timestamps=True,
                                            filter_timerange=test_interval,
-                                           sum_flows=True,
+                                           sum_flows=True, dst=dst,
                                            filter_main_flows=True)
         tcp_dict[label] = data["all"].copy()
     return tcp_dict
 
 
-def read_all_tcp_data(root_folder, omit=0):
-    return _read_all_data(root_folder, read_tcp_data, omit=omit)
+def read_all_tcp_data(root_folder, omit=0, dst=None):
+    return _read_all_data(root_folder, read_tcp_data, omit=omit, dst=dst)
 
 
 def read_all_pping_reports(root_folder, **kwargs):
@@ -154,7 +154,7 @@ def plot_summarized_network(net_data):
 
 
 def plot_summarized_tcp_info(tcp_data):
-    fig, axes = plt.subplots(2, 2, figsize=(16, 9), constrained_layout=True)
+    fig, axes = plt.subplots(2, 3, figsize=(24, 9), constrained_layout=True)
     complot.plot_pergroup_cdf(tcp_data, "throughput", axes=axes[0, 0],
                               print_stats=True, stat_kwargs={"fmt": "{:.4e}"})
     complot.plot_pergroup_histogram(tcp_data, "throughput", axes=axes[1, 0],
@@ -166,6 +166,12 @@ def plot_summarized_tcp_info(tcp_data):
     complot.plot_pergroup_histogram(tcp_data, "rtt", axes=axes[1, 1],
                                     print_stats=False)
     axes[1, 1].set_xlabel("TCP RTT (ms)")
+
+    complot.plot_pergroup_cdf(tcp_data, "retrans/s", axes=axes[0, 2],
+                              print_stats=True, stat_kwargs={"fmt": "{:.2f}"})
+    complot.plot_pergroup_histogram(tcp_data, "retrans/s", axes=axes[1, 2],
+                                    print_stats=False)
+    axes[1, 2].set_xlabel("Retrans/s")
 
     fig.canvas.draw()
     fig.canvas.draw()
@@ -238,7 +244,7 @@ def main():
         fig.savefig(os.path.join(args.input, "network_" + n_streams + "." +
                                  args.fileformat), bbox_inches="tight")
 
-    tcp_data = read_all_tcp_data(args.input, omit=args.omit)
+    tcp_data = read_all_tcp_data(args.input, omit=args.omit, dst=args.source_ip)
     for n_streams, data in tcp_data.items():
         if len(data) < 1:
             continue
