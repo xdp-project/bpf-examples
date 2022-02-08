@@ -47,7 +47,7 @@ def group_df_to_single_df(groupwise_df, col):
 def plot_pergroup_timeseries(group_dfs, col, axes=None, max_groups=10,
                              normalize_all=True, print_stats=True,
                              stats_only_all="auto", grid=True, alpha="auto",
-                             legend="auto", stat_kwargs=None, **kwargs):
+                             legend=True, stat_kwargs=None, **kwargs):
     if axes is None:
         axes = plt.gca()
 
@@ -56,26 +56,22 @@ def plot_pergroup_timeseries(group_dfs, col, axes=None, max_groups=10,
     many_groups = get_n_groups(group_dfs) > max_groups
     if stats_only_all == "auto":
         stats_only_all = many_groups
-    if legend == "auto":
-        legend = not many_groups
     if alpha == "auto":
         alpha = auto_alpha(get_n_groups(group_dfs))
 
     for group, data in group_dfs.items():
         if group == "all":
-            axes.plot(data["timestamp"].values, data[col].values/norm, label="average",
-                      color="k", linewidth=2, zorder=2.5)
+            axes.plot(data["timestamp"].values, data[col].values/norm,
+                      label="average", color="k", linewidth=2, zorder=2.5)
         else:
-            if many_groups:
-                axes.plot(data["timestamp"].values, data[col].values, label=group, color="C0",
-                          alpha=alpha, **kwargs)
-            else:
-                axes.plot(data["timestamp"].values, data[col].values, label=group, alpha=alpha,
-                          **kwargs)
+            color = "C0" if many_groups else None
+            label = None if many_groups else group
+            axes.plot(data["timestamp"].values, data[col].values, label=label,
+                      color=color, alpha=alpha, **kwargs)
 
     axes.grid(grid)
     axes.set_xlabel("Time")
-    if legend:
+    if legend and len(axes.get_legend_handles_labels()[0]) > 0:
         axes.legend()
 
     if print_stats:
@@ -103,8 +99,8 @@ def plot_cdf(x, axes=None, **kwargs):
 
 
 def plot_pergroup_cdf(group_dfs, col, axes=None, normalize_all=True,
-                      print_stats=False, stats_only_all=False, grid=True,
-                      legend=True, stat_kwargs=None, **kwargs):
+                      print_stats=False, grid=True, legend=True,
+                      stat_kwargs=None, **kwargs):
     if axes is None:
         axes = plt.gca()
 
@@ -132,10 +128,10 @@ def plot_pergroup_cdf(group_dfs, col, axes=None, normalize_all=True,
 
 
 def plot_pergroup_histogram(group_dfs, col, axes=None, normalize_all=True,
-                            print_stats=False, stats_only_all=False,
-                            bins="auto", n_bins=100, alpha="auto",
-                            histtype="step", density=True, grid=True,
-                            legend=True, stat_kwargs=None, **kwargs):
+                            print_stats=False, bins="auto", n_bins=100,
+                            alpha="auto", histtype="step", density=True,
+                            grid=True, legend=True, stat_kwargs=None,
+                            **kwargs):
     if axes is None:
         axes = plt.gca()
 
