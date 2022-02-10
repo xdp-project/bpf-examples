@@ -100,6 +100,8 @@ static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
 	{ "interface",        required_argument, NULL, 'i' }, // Name of interface to run on
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
+	{ "rtt-rate",         required_argument, NULL, 'R' }, // Sampling rate in terms of flow-RTT (ex 1 sample per RTT-interval)
+	{ "rtt-type",         required_argument, NULL, 't' }, // What type of RTT the RTT-rate should be applied to ("min" or "smoothed"), only relevant if rtt-rate is provided
 	{ "force",            no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
@@ -167,14 +169,14 @@ static int parse_bounded_double(double *res, const char *str, double low,
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 {
 	int err, opt;
-	double rate_limit_ms, cleanup_interval_s;
+	double rate_limit_ms, cleanup_interval_s, rtt_rate;
 
 	config->ifindex = 0;
 	config->force = false;
 	config->bpf_config.track_tcp = false;
 	config->bpf_config.track_icmp = false;
 
-	while ((opt = getopt_long(argc, argv, "hfTCi:r:c:F:I:", long_options,
+	while ((opt = getopt_long(argc, argv, "hfTCi:r:R:t:c:F:I:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -202,6 +204,26 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 			config->bpf_config.rate_limit =
 				rate_limit_ms * NS_PER_MS;
+			break;
+		case 'R':
+			err = parse_bounded_double(&rtt_rate, optarg, 0, 10000,
+						   "rtt-rate");
+			if (err)
+				return -EINVAL;
+			config->bpf_config.rtt_rate =
+				DOUBLE_TO_FIXPOINT(rtt_rate);
+			break;
+		case 't':
+			if (strcmp(optarg, "min") == 0) {
+				config->bpf_config.use_srtt = false;
+			}
+			else if (strcmp(optarg, "smoothed") == 0) {
+				config->bpf_config.use_srtt = true;
+			} else {
+				fprintf(stderr,
+					"rtt-type must be \"min\" or \"smoothed\"\n");
+				return -EINVAL;
+			}
 			break;
 		case 'c':
 			err = parse_bounded_double(&cleanup_interval_s, optarg,
@@ -482,7 +504,7 @@ static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 		if (print_event_func) {
 			fe.event_type = EVENT_TYPE_FLOW;
 			fe.timestamp = now;
-			memcpy(&fe.flow, key_ptr, sizeof(struct network_tuple));
+			fe.flow = *(struct network_tuple *)key_ptr;
 			fe.event_info.event = FLOW_EVENT_CLOSING;
 			fe.event_info.reason = EVENT_REASON_FLOW_TIMEOUT;
 			fe.source = EVENT_SOURCE_USERSPACE;
@@ -976,7 +998,9 @@ int main(int argc, char *argv[])
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_egress_opts);
 
 	struct pping_config config = {
-		.bpf_config = { .rate_limit = 100 * NS_PER_MS },
+		.bpf_config = { .rate_limit = 100 * NS_PER_MS,
+				.rtt_rate = 0,
+				.use_srtt = false },
 		.cleanup_interval = 1 * NS_PER_SECOND,
 		.object_path = "pping_kern.o",
 		.ingress_prog = "pping_xdp_ingress",
