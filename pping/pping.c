@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 static const char *__doc__ =
-	"Passive Ping - monitor flow RTT based on TCP timestamps";
+	"Passive Ping - monitor flow RTT based on header inspection";
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -15,11 +15,8 @@ static const char *__doc__ =
 #include <unistd.h>
 #include <getopt.h>
 #include <stdbool.h>
-#include <limits.h>
 #include <signal.h> // For detecting Ctrl-C
 #include <sys/resource.h> // For setting rlmit
-#include <sys/wait.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -51,16 +48,16 @@ enum PPING_OUTPUT_FORMAT {
 };
 
 /* 
- * BPF implementation of pping using libbpf
- * Uses TC-BPF for egress and XDP for ingress
- * - On egrees, packets are parsed for TCP TSval, 
- *   if found added to hashmap using flow+TSval as key, 
- *   and current time as value
- * - On ingress, packets are parsed for TCP TSecr, 
- *   if found looksup hashmap using reverse-flow+TSecr as key, 
- *   and calculates RTT as different between now map value
- * - Calculated RTTs are pushed to userspace 
- *   (together with the related flow) and printed out 
+ * BPF implementation of pping using libbpf.
+ * Uses TC-BPF for egress and XDP for ingress.
+ * - On egrees, packets are parsed for an identifer,
+ *   if found added to hashmap using flow+identifier as key,
+ *   and current time as value.
+ * - On ingress, packets are parsed for reply identifer,
+ *   if found looksup hashmap using reverse-flow+identifier as key,
+ *   and calculates RTT as different between now and stored timestamp.
+ * - Calculated RTTs are pushed to userspace
+ *   (together with the related flow) and printed out.
  */
 
 // Structure to contain arguments for clean_map (for passing to pthread_create)
@@ -94,16 +91,21 @@ struct pping_config {
 
 static volatile int keep_running = 1;
 static json_writer_t *json_ctx = NULL;
-static void (*print_event_func)(void *, int, void *, __u32) = NULL;
+static void (*print_event_func)(const union pping_event *) = NULL;
 
 static const struct option long_options[] = {
 	{ "help",             no_argument,       NULL, 'h' },
 	{ "interface",        required_argument, NULL, 'i' }, // Name of interface to run on
 	{ "rate-limit",       required_argument, NULL, 'r' }, // Sampling rate-limit in ms
+	{ "rtt-rate",         required_argument, NULL, 'R' }, // Sampling rate in terms of flow-RTT (ex 1 sample per RTT-interval)
+	{ "rtt-type",         required_argument, NULL, 't' }, // What type of RTT the RTT-rate should be applied to ("min" or "smoothed"), only relevant if rtt-rate is provided
 	{ "force",            no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
+	{ "tcp",              no_argument,       NULL, 'T' }, // Calculate and report RTTs for TCP traffic (with TCP timestamps)
+	{ "icmp",             no_argument,       NULL, 'C' }, // Calculate and report RTTs for ICMP echo-reply traffic
+	{ "include-local",    no_argument,       NULL, 'l' }, // Also report "internal" RTTs
 	{ 0, 0, NULL, 0 }
 };
 
@@ -165,12 +167,15 @@ static int parse_bounded_double(double *res, const char *str, double low,
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 {
 	int err, opt;
-	double rate_limit_ms, cleanup_interval_s;
+	double rate_limit_ms, cleanup_interval_s, rtt_rate;
 
 	config->ifindex = 0;
+	config->bpf_config.localfilt = true;
 	config->force = false;
+	config->bpf_config.track_tcp = false;
+	config->bpf_config.track_icmp = false;
 
-	while ((opt = getopt_long(argc, argv, "hfi:r:c:F:I:", long_options,
+	while ((opt = getopt_long(argc, argv, "hflTCi:r:R:t:c:F:I:", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -198,6 +203,26 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 
 			config->bpf_config.rate_limit =
 				rate_limit_ms * NS_PER_MS;
+			break;
+		case 'R':
+			err = parse_bounded_double(&rtt_rate, optarg, 0, 10000,
+						   "rtt-rate");
+			if (err)
+				return -EINVAL;
+			config->bpf_config.rtt_rate =
+				DOUBLE_TO_FIXPOINT(rtt_rate);
+			break;
+		case 't':
+			if (strcmp(optarg, "min") == 0) {
+				config->bpf_config.use_srtt = false;
+			}
+			else if (strcmp(optarg, "smoothed") == 0) {
+				config->bpf_config.use_srtt = true;
+			} else {
+				fprintf(stderr,
+					"rtt-type must be \"min\" or \"smoothed\"\n");
+				return -EINVAL;
+			}
 			break;
 		case 'c':
 			err = parse_bounded_double(&cleanup_interval_s, optarg,
@@ -231,9 +256,18 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				return -EINVAL;
 			}
 			break;
+		case 'l':
+			config->bpf_config.localfilt = false;
+			break;
 		case 'f':
 			config->force = true;
 			config->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
+			break;
+		case 'T':
+			config->bpf_config.track_tcp = true;
+			break;
+		case 'C':
+			config->bpf_config.track_icmp = true;
 			break;
 		case 'h':
 			printf("HELP:\n");
@@ -252,6 +286,23 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	}
 
 	return 0;
+}
+
+const char *tracked_protocols_to_str(struct pping_config *config)
+{
+	bool tcp = config->bpf_config.track_tcp;
+	bool icmp = config->bpf_config.track_icmp;
+	return tcp && icmp ? "TCP, ICMP" : tcp ? "TCP" : "ICMP";
+}
+
+const char *output_format_to_str(enum PPING_OUTPUT_FORMAT format)
+{
+	switch (format) {
+	case PPING_OUTPUT_STANDARD: return "standard";
+	case PPING_OUTPUT_JSON: return "json";
+	case PPING_OUTPUT_PPVIZ: return "ppviz";
+	default: return "unkown format";
+	}
 }
 
 void abort_program(int sig)
@@ -449,17 +500,18 @@ static bool packet_ts_timeout(void *key_ptr, void *val_ptr, __u64 now)
 static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
 {
 	struct flow_event fe;
-	__u64 ts = ((struct flow_state *)val_ptr)->last_timestamp;
+	struct flow_state *f_state = val_ptr;
 
-	if (now > ts && now - ts > FLOW_LIFETIME) {
-		if (print_event_func) {
+	if (now > f_state->last_timestamp &&
+	    now - f_state->last_timestamp > FLOW_LIFETIME) {
+		if (print_event_func && f_state->has_opened) {
 			fe.event_type = EVENT_TYPE_FLOW;
 			fe.timestamp = now;
-			memcpy(&fe.flow, key_ptr, sizeof(struct network_tuple));
-			fe.event_info.event = FLOW_EVENT_CLOSING;
-			fe.event_info.reason = EVENT_REASON_FLOW_TIMEOUT;
+			reverse_flow(&fe.flow, key_ptr);
+			fe.flow_event_type = FLOW_EVENT_CLOSING;
+			fe.reason = EVENT_REASON_FLOW_TIMEOUT;
 			fe.source = EVENT_SOURCE_USERSPACE;
-			print_event_func(NULL, 0, &fe, sizeof(fe));
+			print_event_func((union pping_event *)&fe);
 		}
 		return true;
 	}
@@ -608,6 +660,7 @@ static const char *flowevent_to_str(enum flow_event_type fe)
 	case FLOW_EVENT_OPENING:
 		return "opening";
 	case FLOW_EVENT_CLOSING:
+	case FLOW_EVENT_CLOSING_BOTH:
 		return "closing";
 	default:
 		return "unknown";
@@ -625,8 +678,6 @@ static const char *eventreason_to_str(enum flow_event_reason er)
 		return "first observed packet";
 	case EVENT_REASON_FIN:
 		return "FIN";
-	case EVENT_REASON_FIN_ACK:
-		return "FIN-ACK";
 	case EVENT_REASON_RST:
 		return "RST";
 	case EVENT_REASON_FLOW_TIMEOUT:
@@ -639,9 +690,9 @@ static const char *eventreason_to_str(enum flow_event_reason er)
 static const char *eventsource_to_str(enum flow_event_source es)
 {
 	switch (es) {
-	case EVENT_SOURCE_EGRESS:
+	case EVENT_SOURCE_PKT_SRC:
 		return "src";
-	case EVENT_SOURCE_INGRESS:
+	case EVENT_SOURCE_PKT_DEST:
 		return "dest";
 	case EVENT_SOURCE_USERSPACE:
 		return "userspace-cleanup";
@@ -671,43 +722,42 @@ static void print_ns_datetime(FILE *stream, __u64 monotonic_ns)
 	fprintf(stream, "%s.%09llu", timestr, ts % NS_PER_SECOND);
 }
 
-static void print_event_standard(void *ctx, int cpu, void *data,
-				 __u32 data_size)
+static void print_event_standard(const union pping_event *e)
 {
-	const union pping_event *e = data;
-
 	if (e->event_type == EVENT_TYPE_RTT) {
 		print_ns_datetime(stdout, e->rtt_event.timestamp);
-		printf(" %llu.%06llu ms %llu.%06llu ms ",
+		printf(" %llu.%06llu ms %llu.%06llu ms %s ",
 		       e->rtt_event.rtt / NS_PER_MS,
 		       e->rtt_event.rtt % NS_PER_MS,
 		       e->rtt_event.min_rtt / NS_PER_MS,
-		       e->rtt_event.min_rtt % NS_PER_MS);
+		       e->rtt_event.min_rtt % NS_PER_MS,
+		       proto_to_str(e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stdout, &e->rtt_event.flow);
 		printf("\n");
 	} else if (e->event_type == EVENT_TYPE_FLOW) {
 		print_ns_datetime(stdout, e->flow_event.timestamp);
-		printf(" ");
+		printf(" %s ", proto_to_str(e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stdout, &e->flow_event.flow);
 		printf(" %s due to %s from %s\n",
-		       flowevent_to_str(e->flow_event.event_info.event),
-		       eventreason_to_str(e->flow_event.event_info.reason),
+		       flowevent_to_str(e->flow_event.flow_event_type),
+		       eventreason_to_str(e->flow_event.reason),
 		       eventsource_to_str(e->flow_event.source));
 	}
 }
 
-static void print_event_ppviz(void *ctx, int cpu, void *data, __u32 data_size)
+static void print_event_ppviz(const union pping_event *e)
 {
-	const struct rtt_event *e = data;
-	__u64 time = convert_monotonic_to_realtime(e->timestamp);
-
+	// ppviz format does not support flow events
 	if (e->event_type != EVENT_TYPE_RTT)
 		return;
 
+	const struct rtt_event *re = &e->rtt_event;
+	__u64 time = convert_monotonic_to_realtime(re->timestamp);
+
 	printf("%llu.%09llu %llu.%09llu %llu.%09llu ", time / NS_PER_SECOND,
-	       time % NS_PER_SECOND, e->rtt / NS_PER_SECOND,
-	       e->rtt % NS_PER_SECOND, e->min_rtt / NS_PER_SECOND, e->min_rtt);
-	print_flow_ppvizformat(stdout, &e->flow);
+	       time % NS_PER_SECOND, re->rtt / NS_PER_SECOND,
+	       re->rtt % NS_PER_SECOND, re->min_rtt / NS_PER_SECOND, re->min_rtt);
+	print_flow_ppvizformat(stdout, &re->flow);
 	printf("\n");
 }
 
@@ -739,22 +789,21 @@ static void print_rttevent_fields_json(json_writer_t *ctx,
 	jsonw_u64_field(ctx, "sent_bytes", re->sent_bytes);
 	jsonw_u64_field(ctx, "rec_packets", re->rec_pkts);
 	jsonw_u64_field(ctx, "rec_bytes", re->rec_bytes);
+	jsonw_bool_field(ctx, "match_on_egress", re->match_on_egress);
 }
 
 static void print_flowevent_fields_json(json_writer_t *ctx,
 					const struct flow_event *fe)
 {
 	jsonw_string_field(ctx, "flow_event",
-			   flowevent_to_str(fe->event_info.event));
+			   flowevent_to_str(fe->flow_event_type));
 	jsonw_string_field(ctx, "reason",
-			   eventreason_to_str(fe->event_info.reason));
+			   eventreason_to_str(fe->reason));
 	jsonw_string_field(ctx, "triggered_by", eventsource_to_str(fe->source));
 }
 
-static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
+static void print_event_json(const union pping_event *e)
 {
-	const union pping_event *e = data;
-
 	if (e->event_type != EVENT_TYPE_RTT && e->event_type != EVENT_TYPE_FLOW)
 		return;
 
@@ -772,9 +821,39 @@ static void print_event_json(void *ctx, int cpu, void *data, __u32 data_size)
 	jsonw_end_object(json_ctx);
 }
 
-static void handle_missed_rtt_event(void *ctx, int cpu, __u64 lost_cnt)
+static void warn_map_full(const struct map_full_event *e)
 {
-	fprintf(stderr, "Lost %llu RTT events on CPU %d\n", lost_cnt, cpu);
+	print_ns_datetime(stderr, e->timestamp);
+	fprintf(stderr, " Warning: Unable to create %s entry for flow ",
+		e->map == PPING_MAP_FLOWSTATE ? "flow" : "timestamp");
+	print_flow_ppvizformat(stderr, &e->flow);
+	fprintf(stderr, "\n");
+}
+
+static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
+{
+	const union pping_event *e = data;
+
+	if (data_size < sizeof(e->event_type))
+		return;
+
+	switch (e->event_type) {
+	case EVENT_TYPE_MAP_FULL:
+		warn_map_full(&e->map_event);
+		break;
+	case EVENT_TYPE_RTT:
+	case EVENT_TYPE_FLOW:
+		print_event_func(e);
+		break;
+	default:
+		fprintf(stderr, "Warning: Unknown event type %llu\n",
+			e->event_type);
+	};
+}
+
+static void handle_missed_events(void *ctx, int cpu, __u64 lost_cnt)
+{
+	fprintf(stderr, "Lost %llu events on CPU %d\n", lost_cnt, cpu);
 }
 
 /*
@@ -947,7 +1026,9 @@ int main(int argc, char *argv[])
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_egress_opts);
 
 	struct pping_config config = {
-		.bpf_config = { .rate_limit = 100 * NS_PER_MS },
+		.bpf_config = { .rate_limit = 100 * NS_PER_MS,
+				.rtt_rate = 0,
+				.use_srtt = false },
 		.cleanup_interval = 1 * NS_PER_SECOND,
 		.object_path = "pping_kern.o",
 		.ingress_prog = "pping_xdp_ingress",
@@ -983,6 +1064,14 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	if (!config.bpf_config.track_tcp && !config.bpf_config.track_icmp)
+		config.bpf_config.track_tcp = true;
+
+	if (config.bpf_config.track_icmp &&
+	    config.output_format == PPING_OUTPUT_PPVIZ)
+		fprintf(stderr,
+			"Warning: ppviz format mainly intended for TCP traffic, but may now include ICMP traffic as well\n");
+
 	switch (config.output_format) {
 	case PPING_OUTPUT_STANDARD:
 		print_event_func = print_event_standard;
@@ -994,6 +1083,10 @@ int main(int argc, char *argv[])
 		print_event_func = print_event_ppviz;
 		break;
 	}
+
+	fprintf(stderr, "Starting ePPing in %s mode tracking %s on %s\n",
+		output_format_to_str(config.output_format),
+		tracked_protocols_to_str(&config), config.ifname);
 
 	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
@@ -1013,8 +1106,8 @@ int main(int argc, char *argv[])
 	// Set up perf buffer
 	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
 							      config.event_map),
-			      PERF_BUFFER_PAGES, print_event_func,
-			      handle_missed_rtt_event, NULL, NULL);
+			      PERF_BUFFER_PAGES, handle_event,
+			      handle_missed_events, NULL, NULL);
 	err = libbpf_get_error(pb);
 	if (err) {
 		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
