@@ -33,9 +33,11 @@
 #define WARN_MAP_FULL_INTERVAL 1000000000UL
 
 // Time before map entry is considered old and can safetly be removed
-#define TIMESTAMP_LIFETIME (10 * NS_PER_SECOND)
-#define FLOW_LIFETIME (300 * NS_PER_SECOND)
-
+#define TIMESTAMP_LIFETIME (10 * NS_PER_SECOND) // Clear any timestamp older than this
+#define TIMESTAMP_RTT_LIFETIME 8 // Clear timestamp once it is this many times older than RTT
+#define FLOW_LIFETIME (300 * NS_PER_SECOND) // Clear any flow that's been inactive this long
+#define ICMP_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear any ICMP flows if they're inactive this long
+#define UNOPENED_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear out flows that have not seen a response after this long
 
 /*
  * Structs for map iteration programs
@@ -811,9 +813,11 @@ SEC("iter/bpf_map_elem")
 int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 {
 	struct packet_id local_pid;
+	struct flow_state *f_state;
 	struct packet_id *pid = ctx->key;
 	__u64 *timestamp = ctx->value;
 	__u64 now = bpf_ktime_get_ns();
+	__u64 rtt;
 
 	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
 				    ctx->meta->seq_num, now,
@@ -821,12 +825,17 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 
 	if (!pid || !timestamp)
 		return 0;
+	if (now <= *timestamp)
+		return 0;
 
-	if (now > *timestamp && now - *timestamp > TIMESTAMP_LIFETIME) {
-		/* Seems like the key for map lookup operations must be
-		   on the stack, so copy pid to local_pid. */
-		__builtin_memcpy(&local_pid, pid, sizeof(local_pid));
+	/* Seems like the key for map lookup operations must be
+	   on the stack, so copy pid to local_pid. */
+	__builtin_memcpy(&local_pid, pid, sizeof(local_pid));
+	f_state = bpf_map_lookup_elem(&flow_state, &local_pid.flow);
+	rtt = f_state ? f_state->srtt : 0;
 
+	if ((rtt && now - *timestamp > rtt * TIMESTAMP_RTT_LIFETIME) ||
+	    now - *timestamp > TIMESTAMP_LIFETIME) {
 		if (bpf_map_delete_elem(&packet_ts, &local_pid) == 0)
 			debug_increment_timeoutdel(PPING_MAP_PACKETTS);
 	}
@@ -843,6 +852,7 @@ int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 	struct flow_event fe;
 	__u64 now = bpf_ktime_get_ns();
 	bool has_opened;
+	__u64 age;
 
 	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
 				    ctx->meta->seq_num, now,
@@ -850,9 +860,17 @@ int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 
 	if (!flow || !f_state)
 		return 0;
+	if (now < f_state->last_timestamp)
+		return 0;
 
-	if (now > f_state->last_timestamp &&
-	    now - f_state->last_timestamp > FLOW_LIFETIME) {
+	// Check if flow is too old for unopned/ICMP/other flow type
+	age = now - f_state->last_timestamp;
+	has_opened = f_state->has_opened;
+
+	if ((!has_opened && age > UNOPENED_FLOW_LIFETIME) ||
+	    ((flow->proto == IPPROTO_ICMP || flow->proto == IPPROTO_ICMPV6) &&
+	     age > ICMP_FLOW_LIFETIME) ||
+	    age > FLOW_LIFETIME) {
 		__builtin_memcpy(&local_flow, flow, sizeof(local_flow));
 		has_opened = f_state->has_opened;
 
