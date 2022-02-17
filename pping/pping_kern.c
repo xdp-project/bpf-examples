@@ -20,6 +20,7 @@
 
 #include <xdp/parsing_helpers.h>
 #include "pping.h"
+#include "pping_debug_cleanup.h"
 
 #define AF_INET 2
 #define AF_INET6 10
@@ -126,6 +127,7 @@ struct {
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(__u32));
 } events SEC(".maps");
+
 
 // Help functions
 
@@ -587,18 +589,22 @@ static void delete_closed_flows(void *ctx, struct packet_info *p_info,
 	if (flow && (p_info->event_type == FLOW_EVENT_CLOSING ||
 		     p_info->event_type == FLOW_EVENT_CLOSING_BOTH)) {
 		has_opened = flow->has_opened;
-		if (!bpf_map_delete_elem(&flow_state, &p_info->pid.flow) &&
-		    has_opened)
-			send_flow_event(ctx, p_info, false);
+		if (bpf_map_delete_elem(&flow_state, &p_info->pid.flow) == 0) {
+			debug_increment_autodel(PPING_MAP_FLOWSTATE);
+			if (has_opened)
+				send_flow_event(ctx, p_info, false);
+		}
 	}
 
 	// Also close reverse flow
 	if (rev_flow && p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
 		has_opened = rev_flow->has_opened;
-		if (!bpf_map_delete_elem(&flow_state,
-					 &p_info->reply_pid.flow) &&
-		    has_opened)
-			send_flow_event(ctx, p_info, true);
+		if (bpf_map_delete_elem(&flow_state, &p_info->reply_pid.flow) ==
+		    0) {
+			debug_increment_autodel(PPING_MAP_FLOWSTATE);
+			if (has_opened)
+				send_flow_event(ctx, p_info, true);
+		}
 	}
 }
 
@@ -701,8 +707,10 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 		return;
 
 	re.rtt = p_info->time - *p_ts;
+
 	// Delete timestamp entry as soon as RTT is calculated
-	bpf_map_delete_elem(&packet_ts, &p_info->reply_pid);
+	if (bpf_map_delete_elem(&packet_ts, &p_info->reply_pid) == 0)
+		debug_increment_autodel(PPING_MAP_PACKETTS);
 
 	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
 		f_state->min_rtt = re.rtt;
@@ -807,6 +815,10 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 	__u64 *timestamp = ctx->value;
 	__u64 now = bpf_ktime_get_ns();
 
+	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
+				    ctx->meta->seq_num, now,
+				    PPING_MAP_PACKETTS);
+
 	if (!pid || !timestamp)
 		return 0;
 
@@ -814,7 +826,9 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 		/* Seems like the key for map lookup operations must be
 		   on the stack, so copy pid to local_pid. */
 		__builtin_memcpy(&local_pid, pid, sizeof(local_pid));
-		bpf_map_delete_elem(&packet_ts, &local_pid);
+
+		if (bpf_map_delete_elem(&packet_ts, &local_pid) == 0)
+			debug_increment_timeoutdel(PPING_MAP_PACKETTS);
 	}
 
 	return 0;
@@ -830,6 +844,10 @@ int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 	__u64 now = bpf_ktime_get_ns();
 	bool has_opened;
 
+	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
+				    ctx->meta->seq_num, now,
+				    PPING_MAP_FLOWSTATE);
+
 	if (!flow || !f_state)
 		return 0;
 
@@ -838,17 +856,21 @@ int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 		__builtin_memcpy(&local_flow, flow, sizeof(local_flow));
 		has_opened = f_state->has_opened;
 
-		if (bpf_map_delete_elem(&flow_state, &local_flow) == 0 &&
-		    has_opened) {
-			reverse_flow(&fe.flow, &local_flow);
-			fe.event_type = EVENT_TYPE_FLOW;
-			fe.timestamp = now;
-			fe.flow_event_type = FLOW_EVENT_CLOSING;
-			fe.reason = EVENT_REASON_FLOW_TIMEOUT;
-			fe.source = EVENT_SOURCE_GC;
-			fe.reserved = 0;
-			bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-					      &fe, sizeof(fe));
+		if (bpf_map_delete_elem(&flow_state, &local_flow) == 0) {
+			debug_increment_timeoutdel(PPING_MAP_FLOWSTATE);
+
+			if (has_opened) {
+				reverse_flow(&fe.flow, &local_flow);
+				fe.event_type = EVENT_TYPE_FLOW;
+				fe.timestamp = now;
+				fe.flow_event_type = FLOW_EVENT_CLOSING;
+				fe.reason = EVENT_REASON_FLOW_TIMEOUT;
+				fe.source = EVENT_SOURCE_GC;
+				fe.reserved = 0;
+				bpf_perf_event_output(ctx, &events,
+						      BPF_F_CURRENT_CPU, &fe,
+						      sizeof(fe));
+			}
 		}
 	}
 

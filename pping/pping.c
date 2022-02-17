@@ -37,7 +37,7 @@ enum PPING_OUTPUT_FORMAT {
 	PPING_OUTPUT_PPVIZ
 };
 
-/* 
+/*
  * BPF implementation of pping using libbpf.
  * Uses TC-BPF for egress and XDP for ingress.
  * - On egrees, packets are parsed for an identifer,
@@ -801,6 +801,16 @@ static void warn_map_full(const struct map_full_event *e)
 	fprintf(stderr, "\n");
 }
 
+static void print_map_clean_info(const struct map_clean_event *e)
+{
+	fprintf(stderr,
+		"%s: cycle: %u, entries: %u, time: %llu, timeout: %u, tot timeout: %llu, selfdel: %u, tot selfdel: %llu\n",
+		e->map == PPING_MAP_PACKETTS ? "packet_ts" : "flow_state",
+		e->clean_cycles, e->last_processed_entries, e->last_runtime,
+		e->last_timeout_del, e->tot_timeout_del, e->last_auto_del,
+		e->tot_auto_del);
+}
+
 static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
 {
 	const union pping_event *e = data;
@@ -811,6 +821,9 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
 	switch (e->event_type) {
 	case EVENT_TYPE_MAP_FULL:
 		warn_map_full(&e->map_event);
+		break;
+	case EVENT_TYPE_MAP_CLEAN:
+		print_map_clean_info(&e->map_clean_event);
 		break;
 	case EVENT_TYPE_RTT:
 	case EVENT_TYPE_FLOW:
