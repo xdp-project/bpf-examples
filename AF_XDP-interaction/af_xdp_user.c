@@ -884,8 +884,9 @@ static int tx_pkt(struct config *cfg, struct xsk_socket_info *xsk)
 		if (ret != 1) {
 			/* No more transmit slots, drop the packet */
 			mem_free_umem_frame(&umem->mem, pkt_addr);
-			fprintf(stderr, "ERR - %s() failed transmit\n",
+			fprintf(stderr, "ERR: %s() failed transmit, no slots\n",
 				__func__);
+			return ENOSPC;
 		}
 
 		xsk_ring_prod__tx_desc(&xsk->tx, tx_idx)->addr = pkt_addr;
