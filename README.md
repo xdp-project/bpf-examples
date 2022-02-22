@@ -4,8 +4,8 @@ This git repository contains a diverse set of **practical BPF examples** that
 solve (or demonstrate) a specific use-case using BPF.
 
 It is meant to ease doing **rapid prototyping and development**, writing C-code
-BPF programs using libbpf.  The goal is to make it **easier for developers** to
-get started coding.
+BPF programs using libbpf, or Rust BPF programs using Aya.
+The goal is to make it **easier for developers** to get started coding.
 
 Many developers struggle to get a working BPF build environment.  The repo
 enviroment makes it easy to build/compile BPF programs by doing the necessary

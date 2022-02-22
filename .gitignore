@@ -4,3 +4,9 @@ compile_commands.json
 *.ll
 *.o
 *.skel.h
+
+# Rust
+**/debug/
+**/target/
+**/Cargo.lock
+**/*.rs.bk

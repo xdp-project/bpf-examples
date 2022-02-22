@@ -1,0 +1,16 @@
+[package]
+name = "echo"
+version = "0.1.0"
+edition = "2018"
+publish = false
+
+[dependencies]
+aya = { git = "https://github.com/aya-rs/aya", branch="main" }
+anyhow = "1.0.42"
+ctrlc = "3.2"
+structopt = { version = "0.3"}
+tokio = { version = "1.9.0", features = ["full"] }
+
+[[bin]]
+name = "echo"
+path = "src/main.rs"
