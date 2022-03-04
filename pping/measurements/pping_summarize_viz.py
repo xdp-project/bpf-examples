@@ -1,109 +1,11 @@
 #!/bin/env python3
 
-import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import argparse
-import pathlib
 
 import common_plotting as complot
-import pping_compare_viz as pping_comp
-import ss_tcp_viz
-
-label_folder_map = {"baseline": "no_pping", "PPing": "k_pping", "ePPing": "e_pping"}
-
-
-def _read_all_data(root_folder, read_func, **kwargs):
-    all_data = dict()
-    path = root_folder
-    for run in os.listdir(root_folder):
-        path = os.path.join(root_folder, run)
-        if run.startswith("run_") and os.path.isdir(path):
-
-            for n_streams in os.listdir(path):
-                path = os.path.join(root_folder, run, n_streams)
-                if n_streams.endswith("_streams") and os.path.isdir(path):
-                    if n_streams not in all_data:
-                        all_data[n_streams] = dict()
-
-                    data = read_func(path, **kwargs)
-                    for setup, sdata in data.items():
-                        if setup not in all_data[n_streams]:
-                            all_data[n_streams][setup] = []
-                        all_data[n_streams][setup].append(sdata)
-
-    for stream_data in all_data.values():
-        for setup in stream_data.keys():
-            if len(stream_data[setup]) > 0:
-                stream_data[setup] = pd.concat(
-                    stream_data[setup]).reset_index(drop=True)
-            else:
-                del stream_data[setup]
-    return all_data
-
-
-def read_all_cpu_data(root_folder, omit=0):
-    return _read_all_data(root_folder, pping_comp.load_cpu_data, omit=omit)
-
-
-def read_all_network_data(root_folder, interface="ens192", omit=0):
-    return _read_all_data(root_folder, pping_comp.load_network_data,
-                          interface=interface, omit=omit)
-
-
-def get_ss_tcp_file(subfolder):
-    tcpfiles = list(pathlib.Path(subfolder, "M1").glob("ss_tcp.log*"))
-    if len(tcpfiles) > 1:
-        print("Warning: Multiple tcp-files in {}, returning first".format(
-            os.path.join(subfolder, "M1")))
-    return tcpfiles[0] if len(tcpfiles) > 0 else None
-
-
-def read_tcp_data(root_folder, omit=0, dst=None):
-    tcp_dict = dict()
-    for label, folder in label_folder_map.items():
-        subfolder = os.path.join(root_folder, folder)
-        test_interval = pping_comp.get_test_interval(subfolder, omit=omit)
-        tcpfile = get_ss_tcp_file(subfolder)
-        if tcpfile is None:
-            continue
-
-        data = ss_tcp_viz.load_ss_tcp_data(tcpfile, norm_timestamps=True,
-                                           filter_timerange=test_interval,
-                                           sum_flows=True, dst=dst,
-                                           filter_main_flows=True)
-        tcp_dict[label] = data["all"].copy()
-    return tcp_dict
-
-
-def read_all_tcp_data(root_folder, omit=0, dst=None):
-    return _read_all_data(root_folder, read_tcp_data, omit=omit, dst=dst)
-
-
-def read_all_pping_reports(root_folder, **kwargs):
-    all_data = dict()
-    path = root_folder
-    for run in os.listdir(root_folder):
-        path = os.path.join(root_folder, run)
-        if run.startswith("run_") and os.path.isdir(path):
-
-            for n_streams in os.listdir(path):
-                path = os.path.join(root_folder, run, n_streams)
-                if n_streams.endswith("_streams") and os.path.isdir(path):
-                    if n_streams not in all_data:
-                        all_data[n_streams] = {"PPing": list(), "ePPing": list()}
-
-                    all_data[n_streams]["PPing"].append(
-                        pping_comp.count_kpping_messages(path, **kwargs))
-
-                    all_data[n_streams]["ePPing"].append(
-                        pping_comp.count_epping_messages(path, **kwargs))
-
-    for stream_data in all_data.values():
-        for setup in stream_data.keys():
-            stream_data[setup] = pd.concat(
-                stream_data[setup]).reset_index(drop=True)
-    return all_data
+import process_data as prodat
 
 
 def plot_summarized_cpu_util(cpu_data):
@@ -227,7 +129,7 @@ def main():
                         required=False, default=0)
     args = parser.parse_args()
 
-    cpu_data = read_all_cpu_data(args.input, omit=args.omit)
+    cpu_data = prodat.load_all_cpu_data(args.input, omit=args.omit)
     for n_streams, data in cpu_data.items():
         if len(data) < 1:
             continue
@@ -235,8 +137,8 @@ def main():
         fig.savefig(os.path.join(args.input, "cpu_" + n_streams + "." +
                                  args.fileformat), bbox_inches="tight")
 
-    net_data = read_all_network_data(args.input, interface=args.interface,
-                                     omit=args.omit)
+    net_data = prodat.load_all_network_data(args.input, interface=args.interface,
+                                            omit=args.omit)
     for n_streams, data in net_data.items():
         if len(data) < 1:
             continue
@@ -244,20 +146,51 @@ def main():
         fig.savefig(os.path.join(args.input, "network_" + n_streams + "." +
                                  args.fileformat), bbox_inches="tight")
 
-    tcp_data = read_all_tcp_data(args.input, omit=args.omit, dst=args.source_ip)
+    tcp_data = prodat.load_all_tcp_data(args.input, omit=args.omit,
+                                        dst=args.source_ip,
+                                        include_individual_flows=False)
     for n_streams, data in tcp_data.items():
         if len(data) < 1:
             continue
         fig, axes = plot_summarized_tcp_info(data)
-        fig.savefig(os.path.join(args.input, "tcp_" + n_streams + "." +
+        fig.savefig(os.path.join(args.input, "tcp_summarized_" + n_streams + "." +
                                  args.fileformat), bbox_inches="tight")
 
-    report_data = read_all_pping_reports(args.input, src_ip=args.source_ip,
-                                         omit=args.omit)
+    tcp_perflow_data = prodat.load_all_tcp_data(args.input, omit=args.omit,
+                                                dst=args.source_ip,
+                                                include_individual_flows=True)
+    for n_streams, data in tcp_perflow_data.items():
+        if len(data) < 1:
+            continue
+        for setup in data.keys():
+            df = data[setup]
+            data[setup] = df.loc[df["flow"] != "all"]
+        fig, axes = plot_summarized_tcp_info(data)
+        fig.savefig(os.path.join(args.input, "tcp_perflow_" + n_streams + "." +
+                                 args.fileformat), bbox_inches="tight")
+
+    report_data = prodat.load_all_pping_reports(args.input, src_ip=args.source_ip,
+                                                omit=args.omit)
     for n_streams, data in report_data.items():
+        if len(data) < 1:
+            continue
         fig, axes = plot_summarized_reports(data)
         fig.savefig(os.path.join(args.input, "reports_" + n_streams + "." +
                                  args.fileformat), bbox_inches="tight")
+
+    all_data = dict()
+    if len(cpu_data) > 0:
+        all_data["cpu"] = cpu_data
+    if len(net_data) > 0:
+        all_data["network"] = net_data
+    if len(tcp_data) > 0:
+        all_data["tcp"] = tcp_data
+    if len(report_data) > 0:
+        all_data["pping"] = report_data
+
+    if len(all_data) > 0:
+        merged_data = prodat.merge_all_data(all_data)
+        merged_data.to_csv(os.path.join(args.input, "data.csv.xz"))
 
 
 if __name__ == "__main__":

@@ -45,11 +45,14 @@ def group_df_to_single_df(groupwise_df, col):
 
 
 def plot_pergroup_timeseries(group_dfs, col, axes=None, max_groups=10,
-                             normalize_all=True, print_stats=True,
+                             groups=None, normalize_all=True, print_stats=True,
                              stats_only_all="auto", grid=True, alpha="auto",
                              legend=True, stat_kwargs=None, **kwargs):
     if axes is None:
         axes = plt.gca()
+
+    if groups is not None:
+        group_dfs = {group: group_dfs[group] for group in groups}
 
     norm = max(1, get_n_groups(group_dfs)) if normalize_all else 1
 
@@ -98,11 +101,14 @@ def plot_cdf(x, axes=None, **kwargs):
     return axes
 
 
-def plot_pergroup_cdf(group_dfs, col, axes=None, normalize_all=True,
-                      print_stats=False, grid=True, legend=True,
-                      stat_kwargs=None, **kwargs):
+def plot_pergroup_cdf(group_dfs, col, axes=None, groups=None,
+                      normalize_all=True, print_stats=False, grid=True,
+                      legend=True, stat_kwargs=None, **kwargs):
     if axes is None:
         axes = plt.gca()
+
+    if groups is not None:
+        group_dfs = {group: group_dfs[group] for group in groups}
 
     norm = max(1, get_n_groups(group_dfs)) if normalize_all else 1
 
@@ -127,13 +133,16 @@ def plot_pergroup_cdf(group_dfs, col, axes=None, normalize_all=True,
     return axes
 
 
-def plot_pergroup_histogram(group_dfs, col, axes=None, normalize_all=True,
-                            print_stats=False, bins="auto", n_bins=100,
-                            alpha="auto", histtype="step", density=True,
-                            grid=True, legend=True, stat_kwargs=None,
-                            **kwargs):
+def plot_pergroup_histogram(group_dfs, col, axes=None, groups=None,
+                            normalize_all=True, print_stats=False, bins="auto",
+                            n_bins=100, alpha="auto", histtype="step",
+                            density=True, grid=True, legend=True,
+                            stat_kwargs=None, **kwargs):
     if axes is None:
         axes = plt.gca()
+
+    if groups is not None:
+        group_dfs = {group: group_dfs[group] for group in groups}
 
     if bins == "auto":
         gmin = min(data[col].min() for data in group_dfs.values())
