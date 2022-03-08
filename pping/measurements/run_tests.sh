@@ -122,7 +122,7 @@ start_kpping() {
     echo "${M2}: Setting up Kathie's pping on ${IFACE}..."
 
     local CMD="mkdir -p $1; "
-    CMD+="TZ=UTC sudo nohup ./pping/pping -i $IFACE $KPPING_FLAGS > ${1}/pping.out 2> ${1}/pping.err &"
+    CMD+="TZ=UTC sudo nohup taskset -c 0 ./pping/pping -i $IFACE $KPPING_FLAGS > ${1}/pping.out 2> ${1}/pping.err &"
     ssh $M2 "$CMD"
     sleep 2 # Give pping some time to set up
 }
@@ -134,7 +134,7 @@ start_epping() {
     echo "${M2}: Settig up eBPF pping on ${IFACE}..."
 
     local CMD="mkdir -p $1; cd bpf-examples/pping; "
-    CMD+="TZ=UTC sudo nohup ./pping -i $IFACE $EPPING_FLAGS > ../../${1}/pping.out 2> ../../${1}/pping.err &"
+    CMD+="TZ=UTC sudo nohup taskset -c 0 ./pping -i $IFACE $EPPING_FLAGS > ../../${1}/pping.out 2> ../../${1}/pping.err &"
     ssh $M2 "$CMD"
     sleep 2 # Give pping some time to set up
 }
