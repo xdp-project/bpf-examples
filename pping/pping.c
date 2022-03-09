@@ -72,7 +72,7 @@ struct pping_config {
 	struct bpf_config bpf_config;
 	struct bpf_tc_opts tc_ingress_opts;
 	struct bpf_tc_opts tc_egress_opts;
-	__u64 cleanup_interval;
+	struct map_cleanup_args clean_args;
 	char *object_path;
 	char *ingress_prog;
 	char *egress_prog;
@@ -231,7 +231,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			if (err)
 				return -EINVAL;
 
-			config->cleanup_interval =
+			config->clean_args.cleanup_interval =
 				cleanup_interval_s * NS_PER_SECOND;
 			break;
 		case 'F':
@@ -977,35 +977,30 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 					 struct pping_config *config)
 {
 	pthread_t tid;
-	struct map_cleanup_args clean_args = {
-		.cleanup_interval = config->cleanup_interval
-	};
-	int err;
+	int map_fd, err;
 
-	if (!clean_args.cleanup_interval) {
+	if (!config->clean_args.cleanup_interval) {
 		fprintf(stderr, "Periodic map cleanup disabled\n");
 		return 0;
 	}
 
-	clean_args.packet_map_fd =
-		bpf_object__find_map_fd_by_name(obj, config->packet_map);
-	if (clean_args.packet_map_fd < 0) {
+	map_fd = bpf_object__find_map_fd_by_name(obj, config->packet_map);
+	if (map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
-			config->packet_map,
-			get_libbpf_strerror(clean_args.packet_map_fd));
-		return clean_args.packet_map_fd;
+			config->packet_map, get_libbpf_strerror(map_fd));
+		return map_fd;
 	}
+	config->clean_args.packet_map_fd = map_fd;
 
-	clean_args.flow_map_fd =
-		bpf_object__find_map_fd_by_name(obj, config->flow_map);
-	if (clean_args.flow_map_fd < 0) {
+	map_fd = bpf_object__find_map_fd_by_name(obj, config->flow_map);
+	if (map_fd < 0) {
 		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
-			config->flow_map,
-			get_libbpf_strerror(clean_args.flow_map_fd));
-		return clean_args.flow_map_fd;
+			config->flow_map, get_libbpf_strerror(map_fd));
+		return map_fd;
 	}
+	config->clean_args.flow_map_fd = map_fd;
 
-	err = pthread_create(&tid, NULL, periodic_map_cleanup, &clean_args);
+	err = pthread_create(&tid, NULL, periodic_map_cleanup, &config->clean_args);
 	if (err) {
 		fprintf(stderr,
 			"Failed starting thread to perform periodic map cleanup: %s\n",
@@ -1029,7 +1024,7 @@ int main(int argc, char *argv[])
 		.bpf_config = { .rate_limit = 100 * NS_PER_MS,
 				.rtt_rate = 0,
 				.use_srtt = false },
-		.cleanup_interval = 1 * NS_PER_SECOND,
+		.clean_args = { .cleanup_interval = 1 * NS_PER_SECOND },
 		.object_path = "pping_kern.o",
 		.ingress_prog = "pping_xdp_ingress",
 		.egress_prog = "pping_tc_egress",
