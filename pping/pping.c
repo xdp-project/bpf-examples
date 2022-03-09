@@ -60,11 +60,14 @@ enum PPING_OUTPUT_FORMAT {
  *   (together with the related flow) and printed out.
  */
 
-// Structure to contain arguments for clean_map (for passing to pthread_create)
+// Structure to contain arguments for periodic_map_cleanup (for passing to pthread_create)
+// Also keeps information about the thread in which the cleanup function runs
 struct map_cleanup_args {
+	pthread_t tid;
 	__u64 cleanup_interval;
 	int packet_map_fd;
 	int flow_map_fd;
+	bool valid_thread;
 };
 
 // Store configuration values in struct to easily pass around
@@ -89,7 +92,7 @@ struct pping_config {
 	bool created_tc_hook;
 };
 
-static volatile int keep_running = 1;
+static volatile sig_atomic_t keep_running = 1;
 static json_writer_t *json_ctx = NULL;
 static void (*print_event_func)(const union pping_event *) = NULL;
 
@@ -976,8 +979,13 @@ ingress_err:
 static int setup_periodical_map_cleaning(struct bpf_object *obj,
 					 struct pping_config *config)
 {
-	pthread_t tid;
 	int map_fd, err;
+
+	if (config->clean_args.valid_thread) {
+		fprintf(stderr,
+			"There already exists a thread for the map cleanup\n");
+		return -EINVAL;
+	}
 
 	if (!config->clean_args.cleanup_interval) {
 		fprintf(stderr, "Periodic map cleanup disabled\n");
@@ -1000,7 +1008,8 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 	}
 	config->clean_args.flow_map_fd = map_fd;
 
-	err = pthread_create(&tid, NULL, periodic_map_cleanup, &config->clean_args);
+	err = pthread_create(&config->clean_args.tid, NULL,
+			     periodic_map_cleanup, &config->clean_args);
 	if (err) {
 		fprintf(stderr,
 			"Failed starting thread to perform periodic map cleanup: %s\n",
@@ -1008,6 +1017,7 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 		return err;
 	}
 
+	config->clean_args.valid_thread = true;
 	return 0;
 }
 
@@ -1024,7 +1034,8 @@ int main(int argc, char *argv[])
 		.bpf_config = { .rate_limit = 100 * NS_PER_MS,
 				.rtt_rate = 0,
 				.use_srtt = false },
-		.clean_args = { .cleanup_interval = 1 * NS_PER_SECOND },
+		.clean_args = { .cleanup_interval = 1 * NS_PER_SECOND,
+				.valid_thread = false },
 		.object_path = "pping_kern.o",
 		.ingress_prog = "pping_xdp_ingress",
 		.egress_prog = "pping_tc_egress",
@@ -1083,19 +1094,16 @@ int main(int argc, char *argv[])
 		output_format_to_str(config.output_format),
 		tracked_protocols_to_str(&config), config.ifname);
 
+	// Allow program to perform cleanup on Ctrl-C
+	signal(SIGINT, abort_program);
+	signal(SIGTERM, abort_program);
+
 	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
 			config.object_path);
 		return EXIT_FAILURE;
-	}
-
-	err = setup_periodical_map_cleaning(obj, &config);
-	if (err) {
-		fprintf(stderr, "Failed setting up map cleaning: %s\n",
-			get_libbpf_strerror(err));
-		goto cleanup_attached_progs;
 	}
 
 	// Set up perf buffer
@@ -1110,9 +1118,12 @@ int main(int argc, char *argv[])
 		goto cleanup_attached_progs;
 	}
 
-	// Allow program to perform cleanup on Ctrl-C
-	signal(SIGINT, abort_program);
-	signal(SIGTERM, abort_program);
+	err = setup_periodical_map_cleaning(obj, &config);
+	if (err) {
+		fprintf(stderr, "Failed setting up map cleaning: %s\n",
+			get_libbpf_strerror(err));
+		goto cleanup_perf_buffer;
+	}
 
 	// Main loop
 	while (keep_running) {
@@ -1131,6 +1142,12 @@ int main(int argc, char *argv[])
 		jsonw_destroy(&json_ctx);
 	}
 
+	if (config.clean_args.valid_thread) {
+		pthread_cancel(config.clean_args.tid);
+		pthread_join(config.clean_args.tid, NULL);
+	}
+
+cleanup_perf_buffer:
 	perf_buffer__free(pb);
 
 cleanup_attached_progs:
