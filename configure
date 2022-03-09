@@ -159,17 +159,17 @@ EOF
 
     compile_err=$($CLANG -target bpf -c $TMPDIR/bpf_use_errno_test.c 2>&1)
     if [ "$?" -ne "0" ]; then
-	echo "*** ERROR - Clang BPF-prog cannot include <errno.h>"
-	echo "          - Install missing userspace header file"
-	echo ""
-	echo "Compile error: $compile_err"
-	echo ""
-	echo " On Fedora install:"
-	echo "   dnf install glibc-devel.i686"
-	echo " On Debian install:"
-	echo "   apt install libc6-dev-i386"
-	echo ""
-	exit 1
+        echo "*** ERROR - Clang BPF-prog cannot include <errno.h>"
+        echo "          - Install missing userspace header file"
+        echo ""
+        echo "Compile error: $compile_err"
+        echo ""
+        echo " On Fedora install:"
+        echo "   dnf install glibc-devel.i686"
+        echo " On Debian install:"
+        echo "   apt install libc6-dev-i386"
+        echo ""
+        exit 1
     fi
 }
 
