@@ -94,9 +94,10 @@ struct flow_state {
 	__u64 rec_pkts;
 	__u64 rec_bytes;
 	__u32 last_id;
+	__u32 outstanding_timestamps;
 	bool has_opened;
 	enum flow_event_reason opening_reason;
-	__u16 reserved;
+	__u8 reserved[6];
 };
 
 struct packet_id {

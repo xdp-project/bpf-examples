@@ -687,7 +687,9 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 	f_state->last_timestamp = p_info->time;
 
 	if (bpf_map_update_elem(&packet_ts, &p_info->pid, &p_info->time,
-				BPF_NOEXIST) != 0)
+				BPF_NOEXIST) == 0)
+		__sync_fetch_and_add(&f_state->outstanding_timestamps, 1);
+	else
 		send_map_full_event(ctx, p_info, PPING_MAP_PACKETTS);
 }
 
@@ -704,6 +706,9 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	if (!f_state || !p_info->reply_pid_valid)
 		return;
 
+	if (f_state->outstanding_timestamps == 0)
+		return;
+
 	p_ts = bpf_map_lookup_elem(&packet_ts, &p_info->reply_pid);
 	if (!p_ts || p_info->time < *p_ts)
 		return;
@@ -711,8 +716,10 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	re.rtt = p_info->time - *p_ts;
 
 	// Delete timestamp entry as soon as RTT is calculated
-	if (bpf_map_delete_elem(&packet_ts, &p_info->reply_pid) == 0)
+	if (bpf_map_delete_elem(&packet_ts, &p_info->reply_pid) == 0) {
+		__sync_fetch_and_add(&f_state->outstanding_timestamps, -1);
 		debug_increment_autodel(PPING_MAP_PACKETTS);
+	}
 
 	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
 		f_state->min_rtt = re.rtt;
@@ -836,8 +843,13 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 
 	if ((rtt && now - *timestamp > rtt * TIMESTAMP_RTT_LIFETIME) ||
 	    now - *timestamp > TIMESTAMP_LIFETIME) {
-		if (bpf_map_delete_elem(&packet_ts, &local_pid) == 0)
+		if (bpf_map_delete_elem(&packet_ts, &local_pid) == 0) {
 			debug_increment_timeoutdel(PPING_MAP_PACKETTS);
+
+			if (f_state)
+				__sync_fetch_and_add(
+					&f_state->outstanding_timestamps, -1);
+		}
 	}
 
 	return 0;
