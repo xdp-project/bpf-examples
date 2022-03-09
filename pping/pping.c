@@ -23,16 +23,6 @@ static const char *__doc__ =
 #include "json_writer.h"
 #include "pping.h" //common structs for user-space and BPF parts
 
-#define NS_PER_SECOND 1000000000UL
-#define NS_PER_MS 1000000UL
-#define MS_PER_S 1000UL
-#define S_PER_DAY (24*3600UL)
-
-#define TIMESTAMP_LIFETIME                                                     \
-	(10 * NS_PER_SECOND) // Clear out packet timestamps if they're over 10 seconds
-#define FLOW_LIFETIME                                                          \
-	(300 * NS_PER_SECOND) // Clear out flows if they're inactive over 300 seconds
-
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
 #define PERF_POLL_TIMEOUT_MS 100
 
@@ -64,9 +54,9 @@ enum PPING_OUTPUT_FORMAT {
 // Also keeps information about the thread in which the cleanup function runs
 struct map_cleanup_args {
 	pthread_t tid;
+	struct bpf_link *tsclean_link;
+	struct bpf_link *flowclean_link;
 	__u64 cleanup_interval;
-	int packet_map_fd;
-	int flow_map_fd;
 	bool valid_thread;
 };
 
@@ -79,6 +69,8 @@ struct pping_config {
 	char *object_path;
 	char *ingress_prog;
 	char *egress_prog;
+	char *cleanup_ts_prog;
+	char *cleanup_flow_prog;
 	char *packet_map;
 	char *flow_map;
 	char *event_map;
@@ -480,6 +472,61 @@ static int tc_detach(int ifindex, enum bpf_tc_attach_point attach_point,
 }
 
 /*
+ * Attach program prog_name (of typer iter/bpf_map_elem) from obj to map_name
+ */
+static int iter_map_attach(struct bpf_object *obj, const char *prog_name,
+			   const char *map_name, struct bpf_link **link)
+{
+	struct bpf_program *prog;
+	struct bpf_link *linkptr;
+	union bpf_iter_link_info linfo = { 0 };
+	int map_fd, err;
+	DECLARE_LIBBPF_OPTS(bpf_iter_attach_opts, iter_opts,
+			    .link_info = &linfo,
+			    .link_info_len = sizeof(linfo));
+
+	map_fd = bpf_object__find_map_fd_by_name(obj, map_name);
+	if (map_fd < 0)
+		return map_fd;
+	linfo.map.map_fd = map_fd;
+
+	prog = bpf_object__find_program_by_name(obj, prog_name);
+	err = libbpf_get_error(prog);
+	if (err)
+		return err;
+
+	linkptr = bpf_program__attach_iter(prog, &iter_opts);
+	err = libbpf_get_error(linkptr);
+	if (err)
+		return err;
+
+	*link = linkptr;
+	return 0;
+}
+
+/*
+ * Execute the iter/bpf_map_elem program attached through link on map elements
+ */
+static int iter_map_execute(struct bpf_link *link)
+{
+	int iter_fd, err;
+	char buf[64];
+
+	if (!link)
+		return -EINVAL;
+
+	iter_fd = bpf_iter_create(bpf_link__fd(link));
+	if (iter_fd < 0)
+		return iter_fd;
+
+	while ((err = read(iter_fd, &buf, sizeof(buf))) > 0)
+		;
+
+	close(iter_fd);
+	return err;
+}
+
+/*
  * Returns time as nanoseconds in a single __u64.
  * On failure, the value 0 is returned (and errno will be set).
  */
@@ -492,111 +539,32 @@ static __u64 get_time_ns(clockid_t clockid)
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
-static bool packet_ts_timeout(void *key_ptr, void *val_ptr, __u64 now)
-{
-	__u64 ts = *(__u64 *)val_ptr;
-	if (now > ts && now - ts > TIMESTAMP_LIFETIME)
-		return true;
-	return false;
-}
-
-static bool flow_timeout(void *key_ptr, void *val_ptr, __u64 now)
-{
-	struct flow_event fe;
-	struct flow_state *f_state = val_ptr;
-
-	if (now > f_state->last_timestamp &&
-	    now - f_state->last_timestamp > FLOW_LIFETIME) {
-		if (print_event_func && f_state->has_opened) {
-			fe.event_type = EVENT_TYPE_FLOW;
-			fe.timestamp = now;
-			reverse_flow(&fe.flow, key_ptr);
-			fe.flow_event_type = FLOW_EVENT_CLOSING;
-			fe.reason = EVENT_REASON_FLOW_TIMEOUT;
-			fe.source = EVENT_SOURCE_USERSPACE;
-			print_event_func((union pping_event *)&fe);
-		}
-		return true;
-	}
-	return false;
-}
-
-/*
- * Loops through all entries in a map, running del_decision_func(value, time)
- * on every entry, and deleting those for which it returns true.
- * On sucess, returns the number of entries deleted, otherwise returns the
- * (negative) error code.
- */
-//TODO - maybe add some pointer to arguments for del_decision_func?
-static int clean_map(int map_fd, size_t key_size, size_t value_size,
-		     bool (*del_decision_func)(void *, void *, __u64))
-{
-	int removed = 0;
-	void *key, *prev_key, *value;
-	bool delete_prev = false;
-	__u64 now_nsec = get_time_ns(CLOCK_MONOTONIC);
-
-#ifdef DEBUG
-	int entries = 0;
-	__u64 duration;
-#endif
-
-	if (now_nsec == 0)
-		return -errno;
-
-	key = malloc(key_size);
-	prev_key = malloc(key_size);
-	value = malloc(value_size);
-	if (!key || !prev_key || !value) {
-		removed = -ENOMEM;
-		goto cleanup;
-	}
-
-	// Cannot delete current key because then loop will reset, see https://www.bouncybouncy.net/blog/bpf_map_get_next_key-pitfalls/
-	while (bpf_map_get_next_key(map_fd, prev_key, key) == 0) {
-		if (delete_prev) {
-			bpf_map_delete_elem(map_fd, prev_key);
-			removed++;
-			delete_prev = false;
-		}
-
-		if (bpf_map_lookup_elem(map_fd, key, value) == 0)
-			delete_prev = del_decision_func(key, value, now_nsec);
-#ifdef DEBUG
-		entries++;
-#endif
-		memcpy(prev_key, key, key_size);
-	}
-	if (delete_prev) {
-		bpf_map_delete_elem(map_fd, prev_key);
-		removed++;
-	}
-#ifdef DEBUG
-	duration = get_time_ns(CLOCK_MONOTONIC) - now_nsec;
-	fprintf(stderr,
-		"%d: Gone through %d entries and removed %d of them in %llu.%09llu s\n",
-		map_fd, entries, removed, duration / NS_PER_SECOND,
-		duration % NS_PER_SECOND);
-#endif
-cleanup:
-	free(key);
-	free(prev_key);
-	free(value);
-	return removed;
-}
-
 static void *periodic_map_cleanup(void *args)
 {
 	struct map_cleanup_args *argp = args;
 	struct timespec interval;
 	interval.tv_sec = argp->cleanup_interval / NS_PER_SECOND;
 	interval.tv_nsec = argp->cleanup_interval % NS_PER_SECOND;
+	char buf[256];
+	int err;
 
 	while (keep_running) {
-		clean_map(argp->packet_map_fd, sizeof(struct packet_id),
-			  sizeof(__u64), packet_ts_timeout);
-		clean_map(argp->flow_map_fd, sizeof(struct network_tuple),
-			  sizeof(struct flow_state), flow_timeout);
+		err = iter_map_execute(argp->tsclean_link);
+		if (err) {
+			// Running in separate thread so can't use get_libbpf_strerror
+			libbpf_strerror(err, buf, sizeof(buf));
+			fprintf(stderr,
+				"Error while cleaning timestamp map: %s\n",
+				buf);
+		}
+
+		err = iter_map_execute(argp->flowclean_link);
+		if (err) {
+			libbpf_strerror(err, buf, sizeof(buf));
+			fprintf(stderr, "Error while cleaning flow map: %s\n",
+				buf);
+		}
+
 		nanosleep(&interval, NULL);
 	}
 	pthread_exit(NULL);
@@ -697,8 +665,8 @@ static const char *eventsource_to_str(enum flow_event_source es)
 		return "src";
 	case EVENT_SOURCE_PKT_DEST:
 		return "dest";
-	case EVENT_SOURCE_USERSPACE:
-		return "userspace-cleanup";
+	case EVENT_SOURCE_GC:
+		return "garbage collection";
 	default:
 		return "unknown";
 	}
@@ -979,7 +947,7 @@ ingress_err:
 static int setup_periodical_map_cleaning(struct bpf_object *obj,
 					 struct pping_config *config)
 {
-	int map_fd, err;
+	int err;
 
 	if (config->clean_args.valid_thread) {
 		fprintf(stderr,
@@ -992,21 +960,23 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 		return 0;
 	}
 
-	map_fd = bpf_object__find_map_fd_by_name(obj, config->packet_map);
-	if (map_fd < 0) {
-		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
-			config->packet_map, get_libbpf_strerror(map_fd));
-		return map_fd;
+	err = iter_map_attach(obj, config->cleanup_ts_prog, config->packet_map,
+			      &config->clean_args.tsclean_link);
+	if (err) {
+		fprintf(stderr,
+			"Failed attaching cleanup program to timestamp map: %s\n",
+			get_libbpf_strerror(err));
+		return err;
 	}
-	config->clean_args.packet_map_fd = map_fd;
 
-	map_fd = bpf_object__find_map_fd_by_name(obj, config->flow_map);
-	if (map_fd < 0) {
-		fprintf(stderr, "Could not get file descriptor of map %s: %s\n",
-			config->flow_map, get_libbpf_strerror(map_fd));
-		return map_fd;
+	err = iter_map_attach(obj, config->cleanup_flow_prog, config->flow_map,
+			      &config->clean_args.flowclean_link);
+	if (err) {
+		fprintf(stderr,
+			"Failed attaching cleanup program to flow map: %s\n",
+			get_libbpf_strerror(err));
+		goto destroy_ts_link;
 	}
-	config->clean_args.flow_map_fd = map_fd;
 
 	err = pthread_create(&config->clean_args.tid, NULL,
 			     periodic_map_cleanup, &config->clean_args);
@@ -1014,11 +984,17 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 		fprintf(stderr,
 			"Failed starting thread to perform periodic map cleanup: %s\n",
 			get_libbpf_strerror(err));
-		return err;
+		goto destroy_links;
 	}
 
 	config->clean_args.valid_thread = true;
 	return 0;
+
+destroy_links:
+	bpf_link__destroy(config->clean_args.flowclean_link);
+destroy_ts_link:
+	bpf_link__destroy(config->clean_args.tsclean_link);
+	return err;
 }
 
 int main(int argc, char *argv[])
@@ -1039,6 +1015,8 @@ int main(int argc, char *argv[])
 		.object_path = "pping_kern.o",
 		.ingress_prog = "pping_xdp_ingress",
 		.egress_prog = "pping_tc_egress",
+		.cleanup_ts_prog = "tsmap_cleanup",
+		.cleanup_flow_prog = "flowmap_cleanup",
 		.packet_map = "packet_ts",
 		.flow_map = "flow_state",
 		.event_map = "events",
@@ -1145,6 +1123,9 @@ int main(int argc, char *argv[])
 	if (config.clean_args.valid_thread) {
 		pthread_cancel(config.clean_args.tid);
 		pthread_join(config.clean_args.tid, NULL);
+
+		bpf_link__destroy(config.clean_args.tsclean_link);
+		bpf_link__destroy(config.clean_args.flowclean_link);
 	}
 
 cleanup_perf_buffer:

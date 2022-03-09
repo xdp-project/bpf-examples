@@ -6,6 +6,11 @@
 #include <linux/in6.h>
 #include <stdbool.h>
 
+#define NS_PER_SECOND 1000000000UL
+#define NS_PER_MS 1000000UL
+#define MS_PER_S 1000UL
+#define S_PER_DAY (24*3600UL)
+
 typedef __u64 fixpoint64;
 #define FIXPOINT_SHIFT 16
 #define DOUBLE_TO_FIXPOINT(X) ((fixpoint64)((X) * (1UL << FIXPOINT_SHIFT)))
@@ -35,7 +40,7 @@ enum __attribute__((__packed__)) flow_event_reason {
 enum __attribute__((__packed__)) flow_event_source {
 	EVENT_SOURCE_PKT_SRC,
 	EVENT_SOURCE_PKT_DEST,
-	EVENT_SOURCE_USERSPACE
+	EVENT_SOURCE_GC
 };
 
 enum __attribute__((__packed__)) pping_map {
@@ -157,20 +162,5 @@ union pping_event {
 	struct flow_event flow_event;
 	struct map_full_event map_event;
 };
-
-/*
- * Convenience function for getting the corresponding reverse flow.
- * PPing needs to keep track of flow in both directions, and sometimes
- * also needs to reverse the flow to report the "correct" (consistent
- * with Kathie's PPing) src and dest address.
- */
-static void reverse_flow(struct network_tuple *dest, struct network_tuple *src)
-{
-	dest->ipv = src->ipv;
-	dest->proto = src->proto;
-	dest->saddr = src->daddr;
-	dest->daddr = src->saddr;
-	dest->reserved = 0;
-}
 
 #endif
