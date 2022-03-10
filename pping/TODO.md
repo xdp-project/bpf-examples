@@ -66,6 +66,9 @@
     - Keeping entries around for a long time allows the map to grow
     unnecessarily large, which slows down the cleaning and may block
     new entries
+- [x] Keep track of outstanding timestamps, only match when necessary
+  - Can avoid doing lookups in timestamp hash map if we know that
+  there are no outstanding (unmatched) timestamps for the flow
 
 
 # Potential issues
