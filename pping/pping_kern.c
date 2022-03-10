@@ -20,6 +20,7 @@
 
 #include <xdp/parsing_helpers.h>
 #include "pping.h"
+#include "pping_debug_cleanup.h"
 
 #define AF_INET 2
 #define AF_INET6 10
@@ -30,6 +31,30 @@
 
 // Emit a warning max once per second when failing to add entry to map
 #define WARN_MAP_FULL_INTERVAL 1000000000UL
+
+// Time before map entry is considered old and can safetly be removed
+#define TIMESTAMP_LIFETIME (10 * NS_PER_SECOND) // Clear any timestamp older than this
+#define TIMESTAMP_RTT_LIFETIME 8 // Clear timestamp once it is this many times older than RTT
+#define FLOW_LIFETIME (300 * NS_PER_SECOND) // Clear any flow that's been inactive this long
+#define ICMP_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear any ICMP flows if they're inactive this long
+#define UNOPENED_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear out flows that have not seen a response after this long
+
+/*
+ * Structs for map iteration programs
+ * Copied from /tools/testing/selftest/bpf/progs/bpf_iter.h
+ */
+struct bpf_iter_meta {
+	struct seq_file *seq;
+	__u64 session_id;
+	__u64 seq_num;
+} __attribute__((preserve_access_index));
+
+struct bpf_iter__bpf_map_elem {
+	struct bpf_iter_meta *meta;
+	struct bpf_map *map;
+	void *key;
+	void *value;
+};
 
 /*
  * This struct keeps track of the data and data_end pointers from the xdp_md or
@@ -105,6 +130,7 @@ struct {
 	__uint(value_size, sizeof(__u32));
 } events SEC(".maps");
 
+
 // Help functions
 
 /*
@@ -126,6 +152,21 @@ static __u32 remaining_pkt_payload(struct parsing_context *ctx)
 	// data + pkt_len - pos fails on (data+pkt_len) - pos due to math between pkt_pointer and unbounded register
 	__u32 parsed_bytes = ctx->nh.pos - ctx->data;
 	return parsed_bytes < ctx->pkt_len ? ctx->pkt_len - parsed_bytes : 0;
+}
+
+/*
+ * Convenience function for getting the corresponding reverse flow.
+ * PPing needs to keep track of flow in both directions, and sometimes
+ * also needs to reverse the flow to report the "correct" (consistent
+ * with Kathie's PPing) src and dest address.
+ */
+static void reverse_flow(struct network_tuple *dest, struct network_tuple *src)
+{
+	dest->ipv = src->ipv;
+	dest->proto = src->proto;
+	dest->saddr = src->daddr;
+	dest->daddr = src->saddr;
+	dest->reserved = 0;
 }
 
 /*
@@ -550,18 +591,22 @@ static void delete_closed_flows(void *ctx, struct packet_info *p_info,
 	if (flow && (p_info->event_type == FLOW_EVENT_CLOSING ||
 		     p_info->event_type == FLOW_EVENT_CLOSING_BOTH)) {
 		has_opened = flow->has_opened;
-		if (!bpf_map_delete_elem(&flow_state, &p_info->pid.flow) &&
-		    has_opened)
-			send_flow_event(ctx, p_info, false);
+		if (bpf_map_delete_elem(&flow_state, &p_info->pid.flow) == 0) {
+			debug_increment_autodel(PPING_MAP_FLOWSTATE);
+			if (has_opened)
+				send_flow_event(ctx, p_info, false);
+		}
 	}
 
 	// Also close reverse flow
 	if (rev_flow && p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
 		has_opened = rev_flow->has_opened;
-		if (!bpf_map_delete_elem(&flow_state,
-					 &p_info->reply_pid.flow) &&
-		    has_opened)
-			send_flow_event(ctx, p_info, true);
+		if (bpf_map_delete_elem(&flow_state, &p_info->reply_pid.flow) ==
+		    0) {
+			debug_increment_autodel(PPING_MAP_FLOWSTATE);
+			if (has_opened)
+				send_flow_event(ctx, p_info, true);
+		}
 	}
 }
 
@@ -664,8 +709,10 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 		return;
 
 	re.rtt = p_info->time - *p_ts;
+
 	// Delete timestamp entry as soon as RTT is calculated
-	bpf_map_delete_elem(&packet_ts, &p_info->reply_pid);
+	if (bpf_map_delete_elem(&packet_ts, &p_info->reply_pid) == 0)
+		debug_increment_autodel(PPING_MAP_PACKETTS);
 
 	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
 		f_state->min_rtt = re.rtt;
@@ -760,4 +807,90 @@ int pping_xdp_ingress(struct xdp_md *ctx)
 	pping(ctx, &pctx);
 
 	return XDP_PASS;
+}
+
+SEC("iter/bpf_map_elem")
+int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
+{
+	struct packet_id local_pid;
+	struct flow_state *f_state;
+	struct packet_id *pid = ctx->key;
+	__u64 *timestamp = ctx->value;
+	__u64 now = bpf_ktime_get_ns();
+	__u64 rtt;
+
+	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
+				    ctx->meta->seq_num, now,
+				    PPING_MAP_PACKETTS);
+
+	if (!pid || !timestamp)
+		return 0;
+	if (now <= *timestamp)
+		return 0;
+
+	/* Seems like the key for map lookup operations must be
+	   on the stack, so copy pid to local_pid. */
+	__builtin_memcpy(&local_pid, pid, sizeof(local_pid));
+	f_state = bpf_map_lookup_elem(&flow_state, &local_pid.flow);
+	rtt = f_state ? f_state->srtt : 0;
+
+	if ((rtt && now - *timestamp > rtt * TIMESTAMP_RTT_LIFETIME) ||
+	    now - *timestamp > TIMESTAMP_LIFETIME) {
+		if (bpf_map_delete_elem(&packet_ts, &local_pid) == 0)
+			debug_increment_timeoutdel(PPING_MAP_PACKETTS);
+	}
+
+	return 0;
+}
+
+SEC("iter/bpf_map_elem")
+int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
+{
+	struct network_tuple local_flow;
+	struct network_tuple *flow = ctx->key;
+	struct flow_state *f_state = ctx->value;
+	struct flow_event fe;
+	__u64 now = bpf_ktime_get_ns();
+	bool has_opened;
+	__u64 age;
+
+	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
+				    ctx->meta->seq_num, now,
+				    PPING_MAP_FLOWSTATE);
+
+	if (!flow || !f_state)
+		return 0;
+	if (now < f_state->last_timestamp)
+		return 0;
+
+	// Check if flow is too old for unopned/ICMP/other flow type
+	age = now - f_state->last_timestamp;
+	has_opened = f_state->has_opened;
+
+	if ((!has_opened && age > UNOPENED_FLOW_LIFETIME) ||
+	    ((flow->proto == IPPROTO_ICMP || flow->proto == IPPROTO_ICMPV6) &&
+	     age > ICMP_FLOW_LIFETIME) ||
+	    age > FLOW_LIFETIME) {
+		__builtin_memcpy(&local_flow, flow, sizeof(local_flow));
+		has_opened = f_state->has_opened;
+
+		if (bpf_map_delete_elem(&flow_state, &local_flow) == 0) {
+			debug_increment_timeoutdel(PPING_MAP_FLOWSTATE);
+
+			if (has_opened) {
+				reverse_flow(&fe.flow, &local_flow);
+				fe.event_type = EVENT_TYPE_FLOW;
+				fe.timestamp = now;
+				fe.flow_event_type = FLOW_EVENT_CLOSING;
+				fe.reason = EVENT_REASON_FLOW_TIMEOUT;
+				fe.source = EVENT_SOURCE_GC;
+				fe.reserved = 0;
+				bpf_perf_event_output(ctx, &events,
+						      BPF_F_CURRENT_CPU, &fe,
+						      sizeof(fe));
+			}
+		}
+	}
+
+	return 0;
 }

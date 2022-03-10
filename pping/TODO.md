@@ -35,11 +35,6 @@
     - Original pping checks if flow is bi-directional before adding
       timestamps, but this could miss shorter flows
 - [ ] Dynamically grow the maps if they are starting to get full
-- [ ] Improve map cleaning: Use a dynamic time to live for map entries
-      based on flow's RTT, instead of static 10s limit
-  - Keeping entries around for a long time allows the map to grow
-    unnecessarily large, which slows down the cleaning and may block
-    new entries
 - [ ] Use libxdp to load XDP program
 
 ## Done
@@ -63,6 +58,15 @@
 - [x] Add timestamps to output (as original pping)
 - [x] Add support for other hooks
   - TC-BFP on ingress instead of XDP
+- [x] Improve map cleaning:
+  - [x] Use BPF iter to clean up maps with BPF programs instead of
+        looping through entries in userspace.
+  - [x] Use a dynamic time to live for map entries based on flow's RTT
+        instead of static 10s limit
+    - Keeping entries around for a long time allows the map to grow
+    unnecessarily large, which slows down the cleaning and may block
+    new entries
+
 
 # Potential issues
 ## Limited information in different output formats
@@ -90,10 +94,10 @@ delete its flow-state entry (and send a timely flow closing event).
 
 A consequence of this is that the ICMP flow entries will stick around
 and occupy a space in the flow state map until they are cleaned out by
-the periodic cleanup process. The current timeout for inactive flows
-is a very generous 5 minutes, which means a lot of short ICMP flows
-could quickly fill up the flow map and potentially block other flows
-for a long while.
+the periodic cleanup process. The current timeout for ICMP flows is 30
+seconds, which means a lot of short ICMP flows could quickly fill up
+the flow map and potentially block other flows for a considerable
+time.
 
 ## RTT-based sampling
 The RTT-based sampling features means that timestamp entries may only
@@ -110,6 +114,57 @@ sRTT which may grow. In this case the sRTT will generally be prone to
 growing faster than it shrinks, as if it starts with a low RTT it will
 quickly update it to higher RTTs, but with high RTTs it will take
 longer for it do decrease to a lower RTT again.
+
+## Losing debug/warning information
+The "map full" and "map cleaning" events are pushed through the same
+perf-buffer as the rtt and flow events. Just like rtt events may be
+lost if too many of them are pushed, these debug/warning messages may
+also be lost if there's a lot of other events being pushed. In case
+one considers these debug/warning messages more critical than the
+normal RTT reports, it may be worth considering pushing them through a
+separate channel to make it less likely that they are lost.
+
+## RTT-based cleanup of timestamp entries
+For most flows the RTT will likely be well below one second, which
+allows for removing timestamp entries much earlier than the 10s static
+limit. This helps keep the timestamp map size down, thereby decreasing
+the risk of there being no room for new entries as well as reducing
+the number of entries the cleanup process must go through. However, if
+the RTT for a flow grows quickly (due to ex. buffer bloat) then the
+actual RTT of the flow may increase to beyond 8 times the initial RTT
+before ePPing has collected enough RTT samples to increase sRTT to a
+similar level. This may cause timestamps being deleted too early
+before they have time to actually match against a reply, in which case
+one also loses the RTT sample that would be used to update the sRTT
+causing the sRTT to remain too low.
+
+In practice this issue is limited by the fact that the cleanup process
+only runs periodically, so even for flows with a very low RTT the
+average time to delete a timestamp entry would still be 500ms (at
+default rate of running at 1Hz). But this also limits the usefulness
+of trying to delete entries earlier.
+
+Overall, a better approach in the future might be to get rid of the
+periodic cleanup process entirely, and instead only evict old entries
+if they're blocking a new entry from being inserted. This would be
+similar to using LRU maps, but would need some way to prevent an
+existing entry from being removed in case it's too young.
+
+## Periodical map cleanup may miss entries on delete
+Due to how the hash map traversal is implemented, all entries may not
+be traversed each time a map is iterated through. Specifically, if an
+entry is deleted and there are other entries remaining in the same
+bucket, those remaining entries will not be traversed. As the
+periodical cleanup may delete entries as it is traversing the map,
+this may result in some of the entries which share the bucket
+with deleted entries not always be traversed.
+
+In general this should not cause a large problem as those entries will
+simply be traversed the next time the map is iterated over
+instead. However, it may cause certain entries to remain in the hash
+map a bit longer than expected (and if the map is full subsequently
+block new entries from being created for that duration)
+
 
 ## Concurrency issues
 
