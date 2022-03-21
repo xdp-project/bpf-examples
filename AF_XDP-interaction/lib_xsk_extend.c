@@ -171,10 +171,11 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 			   const char *xdp_hints_name,
 			   struct xsk_btf_info **xbi)
 {
+	struct xsk_btf_member btf_id;
 	const struct btf_member *m;
 	const struct btf_type *t;
 	unsigned short vlen;
-	int i, id, ret = 0;
+	int i, id, err = 0;
 
 	if (!xbi)
 		return -EINVAL;
@@ -182,7 +183,7 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 	/* Require XDP-hints are defined as a struct */
 	id = btf__find_by_name_kind(btf_obj, xdp_hints_name, BTF_KIND_STRUCT);
 	if (id < 0) {
-		ret = id;
+		err = id;
 		goto error_btf;
 	}
 
@@ -190,7 +191,7 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 
 	*xbi = malloc(sizeof(**xbi));
 	if (!*xbi) {
-		ret = -ENOMEM;
+		err = -ENOMEM;
 		goto error_btf;
 	}
 
@@ -201,7 +202,7 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 	vlen = BTF_INFO_VLEN(t->info);
 	for (i = 0; i < vlen; i++, m++) {
 		if (BTF_MEMBER_BITFIELD_SIZE(m->offset)) {
-			ret = -ENOTSUP;
+			err = -ENOTSUP;
 			goto error_entry;
 		}
 	}
@@ -210,12 +211,19 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 	(*xbi)->type = t;
 	(*xbi)->btf_type_id = id;
 
-	return ret;
+	/* Validate 'btf_id' member MUST exist */
+	err = __xsk_btf_field_entry((*xbi), "btf_id", &btf_id);
+	if (err)
+		goto error_entry;
+
+	/* TODO: Validate 'btf_id' member is last member */
+
+	return 0;
 
 error_entry:
 	__xsk_btf_free_hash(*xbi);
 	free(*xbi);
 
 error_btf:
-	return ret;
+	return err;
 }
