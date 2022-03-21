@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 
 USER_TARGETS   := af_xdp_user
+USER_TARGETS   += btf_unit_test
 BPF_TARGETS    := af_xdp_kern
 
 # Define C-code objects USER_TARGETS needs

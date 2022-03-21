@@ -216,7 +216,7 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 	if (err)
 		goto error_entry;
 
-	/* TODO: Validate 'btf_id' member is last member */
+	/* TODO: Validate 'btf_id' is last member */
 
 	return 0;
 
