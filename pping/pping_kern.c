@@ -95,12 +95,24 @@ struct packet_info {
 	};
 	__u64 time;                  // Arrival time of packet
 	__u32 payload;               // Size of packet data (excluding headers)
-	struct packet_id pid;        // identifier to timestamp (ex. TSval)
-	struct packet_id reply_pid;  // identifier to match against (ex. TSecr)
+	struct packet_id pid;        // flow + identifier to timestamp (ex. TSval)
+	struct packet_id reply_pid;  // rev. flow + identifier to match against (ex. TSecr)
 	bool pid_valid;              // identifier can be used to timestamp packet
 	bool reply_pid_valid;        // reply_identifier can be used to match packet
 	enum flow_event_type event_type; // flow event triggered by packet
 	enum flow_event_reason event_reason; // reason for triggering flow event
+};
+
+/*
+ * Struct filled in by protocol id parsers (ex. parse_tcp_identifier)
+ */
+struct protocol_info {
+	__u32 pid;
+	__u32 reply_pid;
+	bool pid_valid;
+	bool reply_pid_valid;
+	enum flow_event_type event_type;
+	enum flow_event_reason event_reason;
 };
 
 char _license[] SEC("license") = "GPL";
@@ -230,46 +242,48 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
  * Will use the TSval as pid and TSecr as reply_pid, and the TCP source and dest
  * as port numbers.
  *
- * If successful, the pid (identifer + flow.port), reply_pid, pid_valid,
- * reply_pid_valid, event_type and event_reason members of p_info will be set
+ * If successful, tcph, sport, dport and proto_info will be set
  * appropriately and 0 will be returned.
- * On failure -1 will be returned (no guarantees on values set in p_info).
+ * On failure -1 will be returned (and arguments will not be set).
  */
 static int parse_tcp_identifier(struct parsing_context *pctx,
-				struct packet_info *p_info)
+				struct tcphdr **tcph, __u16 *sport,
+				__u16 *dport, struct protocol_info *proto_info)
 {
-	if (parse_tcphdr(&pctx->nh, pctx->data_end, &p_info->tcph) < 0)
+	struct tcphdr *hdr;
+	if (parse_tcphdr(&pctx->nh, pctx->data_end, &hdr) < 0)
 		return -1;
 
-	if (parse_tcp_ts(p_info->tcph, pctx->data_end, &p_info->pid.identifier,
-			 &p_info->reply_pid.identifier) < 0)
+	if (parse_tcp_ts(hdr, pctx->data_end, &proto_info->pid,
+			 &proto_info->reply_pid) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead
 
-	p_info->pid.flow.saddr.port = p_info->tcph->source;
-	p_info->pid.flow.daddr.port = p_info->tcph->dest;
-
 	// Do not timestamp pure ACKs (no payload)
-	p_info->pid_valid =
-		pctx->nh.pos - pctx->data < pctx->pkt_len || p_info->tcph->syn;
+	proto_info->pid_valid =
+		pctx->nh.pos - pctx->data < pctx->pkt_len || hdr->syn;
 
 	// Do not match on non-ACKs (TSecr not valid)
-	p_info->reply_pid_valid = p_info->tcph->ack;
+	proto_info->reply_pid_valid = hdr->ack;
 
 	// Check if connection is opening/closing
-	if (p_info->tcph->rst) {
-		p_info->event_type = FLOW_EVENT_CLOSING_BOTH;
-		p_info->event_reason = EVENT_REASON_RST;
-	} else if (p_info->tcph->fin) {
-		p_info->event_type = FLOW_EVENT_CLOSING;
-		p_info->event_reason = EVENT_REASON_FIN;
-	} else if (p_info->tcph->syn) {
-		p_info->event_type = FLOW_EVENT_OPENING;
-		p_info->event_reason = p_info->tcph->ack ?
-					       EVENT_REASON_SYN_ACK :
-						     EVENT_REASON_SYN;
+	if (hdr->rst) {
+		proto_info->event_type = FLOW_EVENT_CLOSING_BOTH;
+		proto_info->event_reason = EVENT_REASON_RST;
+	} else if (hdr->fin) {
+		proto_info->event_type = FLOW_EVENT_CLOSING;
+		proto_info->event_reason = EVENT_REASON_FIN;
+	} else if (hdr->syn) {
+		proto_info->event_type = FLOW_EVENT_OPENING;
+		proto_info->event_reason =
+			hdr->ack ? EVENT_REASON_SYN_ACK : EVENT_REASON_SYN;
 	} else {
-		p_info->event_type = FLOW_EVENT_NONE;
+		proto_info->event_type = FLOW_EVENT_NONE;
+		proto_info->event_reason = EVENT_REASON_NONE;
 	}
+
+	*sport = hdr->source;
+	*dport = hdr->dest;
+	*tcph = hdr;
 
 	return 0;
 }
@@ -279,41 +293,48 @@ static int parse_tcp_identifier(struct parsing_context *pctx,
  * request/reply sequence number.
  *
  * Will use the echo sequence number as pid/reply_pid and the echo identifier
- * as port numbers. Echo requests will only generate a valid pid and echo
- * replies will only generate a valid reply_pid.
+ * as both src and dst port numbers. Echo requests will only generate a valid
+ * pid and echo replies will only generate a valid reply_pid.
  *
- * If successful, the pid (identifier + flow.port), reply_pid, pid_valid,
- * reply pid_valid and event_type of p_info will be set appropriately and 0
- * will be returned.
- * On failure, -1 will be returned (no guarantees on p_info members).
+ * If successful, icmp6h, sport, dport and proto_info will be set appropriately
+ * and 0 will be returned.
+ * On failure, -1 will be returned (and arguments will not be set).
  *
  * Note: Will store the 16-bit sequence number in network byte order
- * in the 32-bit (reply_)pid.identifier.
+ * in the 32-bit proto_info->(reply_)pid.
  */
 static int parse_icmp6_identifier(struct parsing_context *pctx,
-				  struct packet_info *p_info)
+				  struct icmp6hdr **icmp6h, __u16 *sport,
+				  __u16 *dport,
+				  struct protocol_info *proto_info)
 {
-	if (parse_icmp6hdr(&pctx->nh, pctx->data_end, &p_info->icmp6h) < 0)
+	struct icmp6hdr *hdr;
+	if (parse_icmp6hdr(&pctx->nh, pctx->data_end, &hdr) < 0)
 		return -1;
 
-	if (p_info->icmp6h->icmp6_code != 0)
+	if (hdr->icmp6_code != 0)
 		return -1;
 
-	if (p_info->icmp6h->icmp6_type == ICMPV6_ECHO_REQUEST) {
-		p_info->pid.identifier = p_info->icmp6h->icmp6_sequence;
-		p_info->pid_valid = true;
-		p_info->reply_pid_valid = false;
-	} else if (p_info->icmp6h->icmp6_type == ICMPV6_ECHO_REPLY) {
-		p_info->reply_pid.identifier = p_info->icmp6h->icmp6_sequence;
-		p_info->reply_pid_valid = true;
-		p_info->pid_valid = false;
+	if (hdr->icmp6_type == ICMPV6_ECHO_REQUEST) {
+		proto_info->pid = hdr->icmp6_sequence;
+		proto_info->pid_valid = true;
+		proto_info->reply_pid = 0;
+		proto_info->reply_pid_valid = false;
+	} else if (hdr->icmp6_type == ICMPV6_ECHO_REPLY) {
+		proto_info->reply_pid = hdr->icmp6_sequence;
+		proto_info->reply_pid_valid = true;
+		proto_info->pid = 0;
+		proto_info->pid_valid = false;
 	} else {
 		return -1;
 	}
 
-	p_info->event_type = FLOW_EVENT_NONE;
-	p_info->pid.flow.saddr.port = p_info->icmp6h->icmp6_identifier;
-	p_info->pid.flow.daddr.port = p_info->pid.flow.saddr.port;
+	proto_info->event_type = FLOW_EVENT_NONE;
+	proto_info->event_reason = EVENT_REASON_NONE;
+	*sport = hdr->icmp6_identifier;
+	*dport = hdr->icmp6_identifier;
+	*icmp6h = hdr;
+
 	return 0;
 }
 
@@ -321,29 +342,36 @@ static int parse_icmp6_identifier(struct parsing_context *pctx,
  * Same as parse_icmp6_identifier, but for an ICMP(v4) header instead.
  */
 static int parse_icmp_identifier(struct parsing_context *pctx,
-				 struct packet_info *p_info)
+				 struct icmphdr **icmph, __u16 *sport,
+				 __u16 *dport, struct protocol_info *proto_info)
 {
-	if (parse_icmphdr(&pctx->nh, pctx->data_end, &p_info->icmph) < 0)
+	struct icmphdr *hdr;
+	if (parse_icmphdr(&pctx->nh, pctx->data_end, &hdr) < 0)
 		return -1;
 
-	if (p_info->icmph->code != 0)
+	if (hdr->code != 0)
 		return -1;
 
-	if (p_info->icmph->type == ICMP_ECHO) {
-		p_info->pid.identifier = p_info->icmph->un.echo.sequence;
-		p_info->pid_valid = true;
-		p_info->reply_pid_valid = false;
-	} else if (p_info->icmph->type == ICMP_ECHOREPLY) {
-		p_info->reply_pid.identifier = p_info->icmph->un.echo.sequence;
-		p_info->reply_pid_valid = true;
-		p_info->pid_valid = false;
+	if (hdr->type == ICMP_ECHO) {
+		proto_info->pid = hdr->un.echo.sequence;
+		proto_info->pid_valid = true;
+		proto_info->reply_pid = 0;
+		proto_info->reply_pid_valid = false;
+	} else if (hdr->type == ICMP_ECHOREPLY) {
+		proto_info->reply_pid = hdr->un.echo.sequence;
+		proto_info->reply_pid_valid = true;
+		proto_info->pid = 0;
+		proto_info->pid_valid = false;
 	} else {
 		return -1;
 	}
 
-	p_info->event_type = FLOW_EVENT_NONE;
-	p_info->pid.flow.saddr.port = p_info->icmph->un.echo.id;
-	p_info->pid.flow.daddr.port = p_info->pid.flow.saddr.port;
+	proto_info->event_type = FLOW_EVENT_NONE;
+	proto_info->event_reason = EVENT_REASON_NONE;
+	*sport = hdr->un.echo.id;
+	*dport = hdr->un.echo.id;
+	*icmph = hdr;
+
 	return 0;
 }
 
@@ -360,6 +388,7 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 {
 	int proto, err;
 	struct ethhdr *eth;
+	struct protocol_info proto_info;
 
 	p_info->time = bpf_ktime_get_ns();
 	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
@@ -379,20 +408,36 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 
 	// Parse identifer from suitable protocol
 	if (config.track_tcp && p_info->pid.flow.proto == IPPROTO_TCP)
-		err = parse_tcp_identifier(pctx, p_info);
+		err = parse_tcp_identifier(pctx, &p_info->tcph,
+					   &p_info->pid.flow.saddr.port,
+					   &p_info->pid.flow.daddr.port,
+					   &proto_info);
 	else if (config.track_icmp &&
 		 p_info->pid.flow.proto == IPPROTO_ICMPV6 &&
 		 p_info->pid.flow.ipv == AF_INET6)
-		err = parse_icmp6_identifier(pctx, p_info);
+		err = parse_icmp6_identifier(pctx, &p_info->icmp6h,
+					     &p_info->pid.flow.saddr.port,
+					     &p_info->pid.flow.daddr.port,
+					     &proto_info);
 	else if (config.track_icmp && p_info->pid.flow.proto == IPPROTO_ICMP &&
 		 p_info->pid.flow.ipv == AF_INET)
-		err = parse_icmp_identifier(pctx, p_info);
+		err = parse_icmp_identifier(pctx, &p_info->icmph,
+					    &p_info->pid.flow.saddr.port,
+					    &p_info->pid.flow.daddr.port,
+					    &proto_info);
 	else
 		return -1; // No matching protocol
 	if (err)
 		return -1; // Failed parsing protocol
 
-	// Sucessfully parsed packet identifier - fill in IP-addresses and return
+	// Sucessfully parsed packet identifier - fill in remaining members and return
+	p_info->pid.identifier = proto_info.pid;
+	p_info->pid_valid = proto_info.pid_valid;
+	p_info->reply_pid.identifier = proto_info.reply_pid;
+	p_info->reply_pid_valid = proto_info.reply_pid_valid;
+	p_info->event_type = proto_info.event_type;
+	p_info->event_reason = proto_info.event_reason;
+
 	if (p_info->pid.flow.ipv == AF_INET) {
 		map_ipv4_to_ipv6(&p_info->pid.flow.saddr.ip,
 				 p_info->iph->saddr);

@@ -30,6 +30,7 @@ enum __attribute__((__packed__)) flow_event_type {
 };
 
 enum __attribute__((__packed__)) flow_event_reason {
+	EVENT_REASON_NONE,
 	EVENT_REASON_SYN,
 	EVENT_REASON_SYN_ACK,
 	EVENT_REASON_FIRST_OBS_PCKT,

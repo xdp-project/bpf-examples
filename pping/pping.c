@@ -647,6 +647,8 @@ static const char *flowevent_to_str(enum flow_event_type fe)
 static const char *eventreason_to_str(enum flow_event_reason er)
 {
 	switch (er) {
+	case EVENT_REASON_NONE:
+		return "none";
 	case EVENT_REASON_SYN:
 		return "SYN";
 	case EVENT_REASON_SYN_ACK:
