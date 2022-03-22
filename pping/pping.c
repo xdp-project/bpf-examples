@@ -143,7 +143,7 @@ static const char *get_libbpf_strerror(int err)
 }
 
 static int parse_bounded_double(double *res, const char *str, double low,
-				   double high, const char *name)
+				double high, const char *name)
 {
 	char *endptr;
 	*res = strtod(str, &endptr);
@@ -170,8 +170,8 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	config->bpf_config.track_tcp = false;
 	config->bpf_config.track_icmp = false;
 
-	while ((opt = getopt_long(argc, argv, "hflTCi:r:R:t:c:F:I:", long_options,
-				  NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hflTCi:r:R:t:c:F:I:",
+				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
 			if (strlen(optarg) > IF_NAMESIZE) {
@@ -185,7 +185,8 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				err = -errno;
 				fprintf(stderr,
 					"Could not get index of interface %s: %s\n",
-					config->ifname, get_libbpf_strerror(err));
+					config->ifname,
+					get_libbpf_strerror(err));
 				return err;
 			}
 			break;
@@ -210,8 +211,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 		case 't':
 			if (strcmp(optarg, "min") == 0) {
 				config->bpf_config.use_srtt = false;
-			}
-			else if (strcmp(optarg, "smoothed") == 0) {
+			} else if (strcmp(optarg, "smoothed") == 0) {
 				config->bpf_config.use_srtt = true;
 			} else {
 				fprintf(stderr,
@@ -237,7 +237,8 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			} else if (strcmp(optarg, "ppviz") == 0) {
 				config->output_format = PPING_OUTPUT_PPVIZ;
 			} else {
-				fprintf(stderr, "format must be \"standard\", \"json\" or \"ppviz\"\n");
+				fprintf(stderr,
+					"format must be \"standard\", \"json\" or \"ppviz\"\n");
 				return -EINVAL;
 			}
 			break;
@@ -247,7 +248,8 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			} else if (strcmp(optarg, "tc") == 0) {
 				config->ingress_prog = "pping_tc_ingress";
 			} else {
-				fprintf(stderr, "ingress-hook must be \"xdp\" or \"tc\"\n");
+				fprintf(stderr,
+					"ingress-hook must be \"xdp\" or \"tc\"\n");
 				return -EINVAL;
 			}
 			break;
@@ -293,10 +295,14 @@ const char *tracked_protocols_to_str(struct pping_config *config)
 const char *output_format_to_str(enum PPING_OUTPUT_FORMAT format)
 {
 	switch (format) {
-	case PPING_OUTPUT_STANDARD: return "standard";
-	case PPING_OUTPUT_JSON: return "json";
-	case PPING_OUTPUT_PPVIZ: return "ppviz";
-	default: return "unkown format";
+	case PPING_OUTPUT_STANDARD:
+		return "standard";
+	case PPING_OUTPUT_JSON:
+		return "json";
+	case PPING_OUTPUT_PPVIZ:
+		return "ppviz";
+	default:
+		return "unkown format";
 	}
 }
 
@@ -599,8 +605,8 @@ static int format_ip_address(char *buf, size_t size, int af,
 			     const struct in6_addr *addr)
 {
 	if (af == AF_INET)
-		return inet_ntop(af, &addr->s6_addr[12],
-				 buf, size) ? -errno : 0;
+		return inet_ntop(af, &addr->s6_addr[12], buf, size) ? -errno :
+									    0;
 	else if (af == AF_INET6)
 		return inet_ntop(af, addr, buf, size) ? -errno : 0;
 	return -EINVAL;
@@ -672,7 +678,8 @@ static const char *eventsource_to_str(enum flow_event_source es)
 	}
 }
 
-static void print_flow_ppvizformat(FILE *stream, const struct network_tuple *flow)
+static void print_flow_ppvizformat(FILE *stream,
+				   const struct network_tuple *flow)
 {
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
@@ -727,7 +734,8 @@ static void print_event_ppviz(const union pping_event *e)
 
 	printf("%llu.%09llu %llu.%09llu %llu.%09llu ", time / NS_PER_SECOND,
 	       time % NS_PER_SECOND, re->rtt / NS_PER_SECOND,
-	       re->rtt % NS_PER_SECOND, re->min_rtt / NS_PER_SECOND, re->min_rtt);
+	       re->rtt % NS_PER_SECOND, re->min_rtt / NS_PER_SECOND,
+	       re->min_rtt);
 	print_flow_ppvizformat(stdout, &re->flow);
 	printf("\n");
 }
@@ -768,8 +776,7 @@ static void print_flowevent_fields_json(json_writer_t *ctx,
 {
 	jsonw_string_field(ctx, "flow_event",
 			   flowevent_to_str(fe->flow_event_type));
-	jsonw_string_field(ctx, "reason",
-			   eventreason_to_str(fe->reason));
+	jsonw_string_field(ctx, "reason", eventreason_to_str(fe->reason));
 	jsonw_string_field(ctx, "triggered_by", eventsource_to_str(fe->source));
 }
 

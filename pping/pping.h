@@ -9,7 +9,7 @@
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
 #define MS_PER_S 1000UL
-#define S_PER_DAY (24*3600UL)
+#define S_PER_DAY (24 * 3600UL)
 
 typedef __u64 fixpoint64;
 #define FIXPOINT_SHIFT 16

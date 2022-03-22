@@ -265,7 +265,7 @@ static int parse_tcp_identifier(struct parsing_context *pctx,
 	} else if (p_info->tcph->syn) {
 		p_info->event_type = FLOW_EVENT_OPENING;
 		p_info->event_reason = p_info->tcph->ack ?
-						     EVENT_REASON_SYN_ACK :
+					       EVENT_REASON_SYN_ACK :
 						     EVENT_REASON_SYN;
 	} else {
 		p_info->event_type = FLOW_EVENT_NONE;
@@ -521,8 +521,8 @@ static struct flow_state *create_flow(void *ctx, struct packet_info *p_info)
 
 	new_state.last_timestamp = p_info->time;
 	new_state.opening_reason = p_info->event_type == FLOW_EVENT_OPENING ?
-					       p_info->event_reason :
-					       EVENT_REASON_FIRST_OBS_PCKT;
+					   p_info->event_reason :
+						 EVENT_REASON_FIRST_OBS_PCKT;
 
 	if (bpf_map_update_elem(&flow_state, &p_info->pid.flow, &new_state,
 				BPF_NOEXIST) != 0) {
@@ -745,10 +745,10 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 static void pping(void *ctx, struct parsing_context *pctx)
 {
 	struct packet_info p_info = { 0 };
-	struct flow_state *flow, *rev_flow;;
+	struct flow_state *flow, *rev_flow;
 	bool new_flow;
 
- 	if (parse_packet_identifier(pctx, &p_info) < 0)
+	if (parse_packet_identifier(pctx, &p_info) < 0)
 		return;
 
 	flow = update_flow(ctx, &p_info, &new_flow);
@@ -758,7 +758,6 @@ static void pping(void *ctx, struct parsing_context *pctx)
 	pping_match_packet(rev_flow, ctx, pctx, &p_info);
 
 	delete_closed_flows(ctx, &p_info, flow, rev_flow);
-
 }
 
 // Programs
