@@ -39,6 +39,8 @@
 #define ICMP_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear any ICMP flows if they're inactive this long
 #define UNOPENED_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear out flows that have not seen a response after this long
 
+#define MAX_MEMCMP_SIZE 128
+
 /*
  * Structs for map iteration programs
  * Copied from /tools/testing/selftest/bpf/progs/bpf_iter.h
@@ -97,6 +99,7 @@ struct packet_info {
 	__u32 payload;               // Size of packet data (excluding headers)
 	struct packet_id pid;        // flow + identifier to timestamp (ex. TSval)
 	struct packet_id reply_pid;  // rev. flow + identifier to match against (ex. TSecr)
+	bool pid_flow_is_dfkey;      // Used to determine which member of dualflow state to use for forward direction
 	bool pid_valid;              // identifier can be used to timestamp packet
 	bool reply_pid_valid;        // reply_identifier can be used to match packet
 	enum flow_event_type event_type; // flow event triggered by packet
@@ -132,7 +135,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct network_tuple);
-	__type(value, struct flow_state);
+	__type(value, struct dual_flow_state);
 	__uint(max_entries, 16384);
 } flow_state SEC(".maps");
 
@@ -179,6 +182,83 @@ static void reverse_flow(struct network_tuple *dest, struct network_tuple *src)
 	dest->saddr = src->daddr;
 	dest->daddr = src->saddr;
 	dest->reserved = 0;
+}
+
+/*
+ * Can't seem to get __builtin_memcmp to work, so hacking my own
+ *
+ * Based on https://githubhot.com/repo/iovisor/bcc/issues/3559,
+ * __builtin_memcmp should work constant size but I still get the "failed to
+ * find BTF for extern" error.
+ */
+static int my_memcmp(const void *s1_, const void *s2_, __u32 size)
+{
+	const __u8 *s1 = s1_, *s2 = s2_;
+	int i;
+
+	for (i = 0; i < MAX_MEMCMP_SIZE && i < size; i++) {
+		if (s1[i] != s2[i])
+			return s1[i] > s2[i] ? 1 : -1;
+	}
+
+	return 0;
+}
+
+static bool is_dualflow_key(struct network_tuple *flow)
+{
+	return my_memcmp(&flow->saddr, &flow->daddr, sizeof(flow->saddr)) <= 0;
+}
+
+static void make_dualflow_key(struct network_tuple *key,
+			      struct network_tuple *flow)
+{
+	if (is_dualflow_key(flow))
+		*key = *flow;
+	else
+		reverse_flow(key, flow);
+}
+
+static struct flow_state *fstate_from_dfkey(struct dual_flow_state *df_state,
+					    bool is_dfkey)
+{
+	if (!df_state)
+		return NULL;
+
+	return is_dfkey ? &df_state->dir1 : &df_state->dir2;
+}
+
+/*
+ * Get the flow state for flow-direction from df_state
+ *
+ * Note: Does not validate that any of the entries in df_state actually matches
+ * flow, just selects the direction in df_state that best fits the flow.
+ */
+static struct flow_state *
+get_flowstate_from_dualflow(struct dual_flow_state *df_state,
+			    struct network_tuple *flow)
+{
+	return fstate_from_dfkey(df_state, is_dualflow_key(flow));
+}
+
+static struct flow_state *
+get_flowstate_from_packet(struct dual_flow_state *df_state,
+			  struct packet_info *p_info)
+{
+	return fstate_from_dfkey(df_state, p_info->pid_flow_is_dfkey);
+}
+
+static struct flow_state *
+get_reverse_flowstate_from_packet(struct dual_flow_state *df_state,
+				  struct packet_info *p_info)
+{
+	return fstate_from_dfkey(df_state, !p_info->pid_flow_is_dfkey);
+}
+
+static struct network_tuple *
+get_dualflow_key_from_packet(struct packet_info *p_info)
+{
+	return p_info->pid_flow_is_dfkey ? &p_info->pid.flow :
+						 &p_info->reply_pid.flow;
 }
 
 /*
@@ -448,6 +528,8 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 		p_info->pid.flow.daddr.ip = p_info->ip6h->daddr;
 	}
 
+	p_info->pid_flow_is_dfkey = is_dualflow_key(&p_info->pid.flow);
+
 	reverse_flow(&p_info->reply_pid.flow, &p_info->pid.flow);
 	p_info->payload = remaining_pkt_payload(pctx);
 
@@ -557,101 +639,149 @@ static void send_map_full_event(void *ctx, struct packet_info *p_info,
 }
 
 /*
- * Attempt to create a new flow-state.
- * Returns a pointer to the flow_state if successful, NULL otherwise
+ * Initilizes an "empty" flow state based on the forward direction of the
+ * current packet
  */
-static struct flow_state *create_flow(void *ctx, struct packet_info *p_info)
+static void init_flowstate(struct flow_state *f_state,
+			   struct packet_info *p_info)
 {
-	struct flow_state new_state = { 0 };
+	f_state->is_empty = false;
+	f_state->last_timestamp = p_info->time;
+	f_state->has_opened = false;
+	f_state->opening_reason = p_info->event_type == FLOW_EVENT_OPENING ?
+					  p_info->event_reason :
+						EVENT_REASON_FIRST_OBS_PCKT;
+}
 
-	new_state.last_timestamp = p_info->time;
-	new_state.opening_reason = p_info->event_type == FLOW_EVENT_OPENING ?
-					   p_info->event_reason :
-						 EVENT_REASON_FIRST_OBS_PCKT;
+static void init_empty_flowstate(struct flow_state *f_state)
+{
+	f_state->is_empty = true;
+}
 
-	if (bpf_map_update_elem(&flow_state, &p_info->pid.flow, &new_state,
-				BPF_NOEXIST) != 0) {
+/*
+ * Initilize a new (assumed 0-initlized) dual flow state based on the current
+ * packet.
+ */
+static void init_dualflow_state(struct dual_flow_state *df_state,
+				struct packet_info *p_info)
+{
+	struct flow_state *fw_state =
+		get_flowstate_from_packet(df_state, p_info);
+	struct flow_state *rev_state =
+		get_reverse_flowstate_from_packet(df_state, p_info);
+
+	init_flowstate(fw_state, p_info);
+	init_empty_flowstate(rev_state);
+}
+
+static struct dual_flow_state *
+create_dualflow_state(void *ctx, struct packet_info *p_info, bool *new_flow)
+{
+	struct network_tuple *key = get_dualflow_key_from_packet(p_info);
+	struct dual_flow_state new_state = { 0 };
+
+	init_dualflow_state(&new_state, p_info);
+
+	if (bpf_map_update_elem(&flow_state, key, &new_state, BPF_NOEXIST) ==
+	    0) {
+		if (new_flow)
+			*new_flow = true;
+	} else {
 		send_map_full_event(ctx, p_info, PPING_MAP_FLOWSTATE);
 		return NULL;
 	}
 
-	return bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
+	return bpf_map_lookup_elem(&flow_state, key);
 }
 
-static struct flow_state *update_flow(void *ctx, struct packet_info *p_info,
-				      bool *new_flow)
+static struct dual_flow_state *
+lookup_or_create_dualflow_state(void *ctx, struct packet_info *p_info,
+				bool *new_flow)
 {
-	struct flow_state *f_state;
-	*new_flow = false;
+	struct dual_flow_state *df_state;
 
-	f_state = bpf_map_lookup_elem(&flow_state, &p_info->pid.flow);
+	df_state = bpf_map_lookup_elem(&flow_state,
+				       get_dualflow_key_from_packet(p_info));
 
-	// Attempt to create flow if it does not exist
-	if (!f_state && p_info->pid_valid &&
-	    !(p_info->event_type == FLOW_EVENT_CLOSING ||
-	      p_info->event_type == FLOW_EVENT_CLOSING_BOTH)) {
-		*new_flow = true;
-		f_state = create_flow(ctx, p_info);
+	if (df_state)
+		return df_state;
+
+	// Only try to create new state if we have a valid pid
+	if (!p_info->pid_valid || p_info->event_type == FLOW_EVENT_CLOSING ||
+	    p_info->event_type == FLOW_EVENT_CLOSING_BOTH)
+		return NULL;
+
+	return create_dualflow_state(ctx, p_info, new_flow);
+}
+
+static bool is_flowstate_active(struct flow_state *f_state)
+{
+	return !f_state->is_empty && !f_state->has_closed;
+}
+
+static void update_forward_flowstate(struct packet_info *p_info,
+				     struct flow_state *f_state, bool *new_flow)
+{
+	// "Create" flowstate if it's empty
+	if (f_state->is_empty && p_info->pid_valid) {
+		init_flowstate(f_state, p_info);
+		if (new_flow)
+			*new_flow = true;
 	}
 
-	if (!f_state)
-		return NULL;
-
-	// Update flow state
-	f_state->sent_pkts++;
-	f_state->sent_bytes += p_info->payload;
-
-	return f_state;
+	if (is_flowstate_active(f_state)) {
+		f_state->sent_pkts++;
+		f_state->sent_bytes += p_info->payload;
+	}
 }
 
-static struct flow_state *update_rev_flow(void *ctx, struct packet_info *p_info)
+static void update_reverse_flowstate(void *ctx, struct packet_info *p_info,
+				     struct flow_state *f_state)
 {
-	struct flow_state *f_state;
+	if (!is_flowstate_active(f_state))
+		return;
 
-	f_state = bpf_map_lookup_elem(&flow_state, &p_info->reply_pid.flow);
-	if (!f_state)
-		return NULL;
-
-	// Is a new flow, push opening flow message
+	// First time we see reply for flow?
 	if (!f_state->has_opened &&
 	    p_info->event_type != FLOW_EVENT_CLOSING_BOTH) {
 		f_state->has_opened = true;
 		send_flow_open_event(ctx, p_info, f_state);
 	}
 
-	// Update flow state
 	f_state->rec_pkts++;
 	f_state->rec_bytes += p_info->payload;
-
-	return f_state;
 }
 
-static void delete_closed_flows(void *ctx, struct packet_info *p_info,
-				struct flow_state *flow,
-				struct flow_state *rev_flow)
+static bool should_notify_closing(struct flow_state *f_state)
 {
-	bool has_opened;
+	return f_state->has_opened && !f_state->has_closed;
+}
 
-	// Flow closing - try to delete flow state and push closing-event
-	if (flow && (p_info->event_type == FLOW_EVENT_CLOSING ||
-		     p_info->event_type == FLOW_EVENT_CLOSING_BOTH)) {
-		has_opened = flow->has_opened;
-		if (bpf_map_delete_elem(&flow_state, &p_info->pid.flow) == 0) {
-			debug_increment_autodel(PPING_MAP_FLOWSTATE);
-			if (has_opened)
-				send_flow_event(ctx, p_info, false);
-		}
+static void close_and_delete_flows(void *ctx, struct packet_info *p_info,
+				   struct flow_state *fw_flow,
+				   struct flow_state *rev_flow)
+{
+	// Forward flow closing
+	if (p_info->event_type == FLOW_EVENT_CLOSING ||
+	    p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
+		if (should_notify_closing(fw_flow))
+			send_flow_event(ctx, p_info, false);
+		fw_flow->has_closed = true;
 	}
 
-	// Also close reverse flow
-	if (rev_flow && p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
-		has_opened = rev_flow->has_opened;
-		if (bpf_map_delete_elem(&flow_state, &p_info->reply_pid.flow) ==
-		    0) {
+	// Reverse flow closing
+	if (p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
+		if (should_notify_closing(rev_flow))
+			send_flow_event(ctx, p_info, true);
+		rev_flow->has_closed = true;
+	}
+
+	// Delete flowstate entry if neither flow is open anymore
+	if (!is_flowstate_active(fw_flow) && !is_flowstate_active(rev_flow)) {
+		if (bpf_map_delete_elem(&flow_state,
+					get_dualflow_key_from_packet(p_info)) ==
+		    0)
 			debug_increment_autodel(PPING_MAP_FLOWSTATE);
-			if (has_opened)
-				send_flow_event(ctx, p_info, true);
-		}
 	}
 }
 
@@ -705,7 +835,7 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 				   struct parsing_context *pctx,
 				   struct packet_info *p_info, bool new_flow)
 {
-	if (!f_state || !p_info->pid_valid)
+	if (!is_flowstate_active(f_state) || !p_info->pid_valid)
 		return;
 
 	if (config.localfilt && !pctx->is_egress &&
@@ -748,7 +878,7 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	struct rtt_event re = { 0 };
 	__u64 *p_ts;
 
-	if (!f_state || !p_info->reply_pid_valid)
+	if (!is_flowstate_active(f_state) || !p_info->reply_pid_valid)
 		return;
 
 	if (f_state->outstanding_timestamps == 0)
@@ -790,19 +920,65 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 static void pping(void *ctx, struct parsing_context *pctx)
 {
 	struct packet_info p_info = { 0 };
-	struct flow_state *flow, *rev_flow;
-	bool new_flow;
+	struct dual_flow_state *df_state;
+	struct flow_state *fw_flow, *rev_flow;
+	bool new_flow = false;
 
 	if (parse_packet_identifier(pctx, &p_info) < 0)
 		return;
 
-	flow = update_flow(ctx, &p_info, &new_flow);
-	pping_timestamp_packet(flow, ctx, pctx, &p_info, new_flow);
+	df_state = lookup_or_create_dualflow_state(ctx, &p_info, &new_flow);
+	if (!df_state)
+		return;
 
-	rev_flow = update_rev_flow(ctx, &p_info);
+	fw_flow = get_flowstate_from_packet(df_state, &p_info);
+	update_forward_flowstate(&p_info, fw_flow, &new_flow);
+	pping_timestamp_packet(fw_flow, ctx, pctx, &p_info, new_flow);
+
+	rev_flow = get_reverse_flowstate_from_packet(df_state, &p_info);
+	update_reverse_flowstate(ctx, &p_info, rev_flow);
 	pping_match_packet(rev_flow, ctx, pctx, &p_info);
 
-	delete_closed_flows(ctx, &p_info, flow, rev_flow);
+	close_and_delete_flows(ctx, &p_info, fw_flow, rev_flow);
+}
+
+static bool is_flow_old(struct network_tuple *flow, struct flow_state *f_state,
+			__u64 time)
+{
+	__u64 age;
+	__u64 ts;
+
+	if (!f_state || !is_flowstate_active(f_state))
+		return false;
+
+	ts = f_state->last_timestamp; // To avoid concurrency issue between check and age calculation
+	if (ts > time)
+		return false;
+	age = time - ts;
+
+	return (!f_state->has_opened && age > UNOPENED_FLOW_LIFETIME) ||
+	       ((flow->proto == IPPROTO_ICMP ||
+		 flow->proto == IPPROTO_ICMPV6) &&
+		age > ICMP_FLOW_LIFETIME) ||
+	       age > FLOW_LIFETIME;
+}
+
+static void send_flow_timeout_message(void *ctx, struct network_tuple *flow,
+				      __u64 time)
+{
+	struct flow_event fe = {
+		.event_type = EVENT_TYPE_FLOW,
+		.flow_event_type = FLOW_EVENT_CLOSING,
+		.reason = EVENT_REASON_FLOW_TIMEOUT,
+		.source = EVENT_SOURCE_GC,
+		.timestamp = time,
+		.reserved = 0,
+	};
+
+	// To be consistent with Kathie's pping we report flow "backwards"
+	reverse_flow(&fe.flow, flow);
+
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &fe, sizeof(fe));
 }
 
 // Programs
@@ -865,6 +1041,8 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 {
 	struct packet_id local_pid;
 	struct flow_state *f_state;
+	struct dual_flow_state *df_state;
+	struct network_tuple df_key;
 	struct packet_id *pid = ctx->key;
 	__u64 *timestamp = ctx->value;
 	__u64 now = bpf_ktime_get_ns();
@@ -879,14 +1057,16 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 	if (now <= *timestamp)
 		return 0;
 
-	/* Seems like the key for map lookup operations must be
-	   on the stack, so copy pid to local_pid. */
-	__builtin_memcpy(&local_pid, pid, sizeof(local_pid));
-	f_state = bpf_map_lookup_elem(&flow_state, &local_pid.flow);
+	make_dualflow_key(&df_key, &pid->flow);
+	df_state = bpf_map_lookup_elem(&flow_state, &df_key);
+	f_state = get_flowstate_from_dualflow(df_state, &pid->flow);
 	rtt = f_state ? f_state->srtt : 0;
 
 	if ((rtt && now - *timestamp > rtt * TIMESTAMP_RTT_LIFETIME) ||
 	    now - *timestamp > TIMESTAMP_LIFETIME) {
+		/* Seems like the key for map lookup operations must be
+		   on the stack, so copy pid to local_pid. */
+		__builtin_memcpy(&local_pid, pid, sizeof(local_pid));
 		if (bpf_map_delete_elem(&packet_ts, &local_pid) == 0) {
 			debug_increment_timeoutdel(PPING_MAP_PACKETTS);
 
@@ -902,49 +1082,39 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 SEC("iter/bpf_map_elem")
 int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 {
-	struct network_tuple local_flow;
-	struct network_tuple *flow = ctx->key;
-	struct flow_state *f_state = ctx->value;
-	struct flow_event fe;
+	struct network_tuple flow1, flow2;
+	struct flow_state *f_state1, *f_state2;
+	struct dual_flow_state *df_state;
 	__u64 now = bpf_ktime_get_ns();
-	bool has_opened;
-	__u64 age;
+	bool notify1, notify2, timeout1, timeout2;
 
 	debug_update_mapclean_stats(ctx, &events, !ctx->key || !ctx->value,
 				    ctx->meta->seq_num, now,
 				    PPING_MAP_FLOWSTATE);
 
-	if (!flow || !f_state)
-		return 0;
-	if (now < f_state->last_timestamp)
+	if (!ctx->key || !ctx->value)
 		return 0;
 
-	// Check if flow is too old for unopned/ICMP/other flow type
-	age = now - f_state->last_timestamp;
-	has_opened = f_state->has_opened;
+	flow1 = *(struct network_tuple *)ctx->key;
+	reverse_flow(&flow2, &flow1);
 
-	if ((!has_opened && age > UNOPENED_FLOW_LIFETIME) ||
-	    ((flow->proto == IPPROTO_ICMP || flow->proto == IPPROTO_ICMPV6) &&
-	     age > ICMP_FLOW_LIFETIME) ||
-	    age > FLOW_LIFETIME) {
-		__builtin_memcpy(&local_flow, flow, sizeof(local_flow));
-		has_opened = f_state->has_opened;
+	df_state = ctx->value;
+	f_state1 = get_flowstate_from_dualflow(df_state, &flow1);
+	f_state2 = get_flowstate_from_dualflow(df_state, &flow2);
 
-		if (bpf_map_delete_elem(&flow_state, &local_flow) == 0) {
-			debug_increment_timeoutdel(PPING_MAP_FLOWSTATE);
+	timeout1 = is_flow_old(&flow1, f_state1, now);
+	timeout2 = is_flow_old(&flow2, f_state2, now);
 
-			if (has_opened) {
-				reverse_flow(&fe.flow, &local_flow);
-				fe.event_type = EVENT_TYPE_FLOW;
-				fe.timestamp = now;
-				fe.flow_event_type = FLOW_EVENT_CLOSING;
-				fe.reason = EVENT_REASON_FLOW_TIMEOUT;
-				fe.source = EVENT_SOURCE_GC;
-				fe.reserved = 0;
-				bpf_perf_event_output(ctx, &events,
-						      BPF_F_CURRENT_CPU, &fe,
-						      sizeof(fe));
-			}
+	if ((!is_flowstate_active(f_state1) || timeout1) &&
+	    (!is_flowstate_active(f_state2) || timeout2)) {
+		// Entry should be deleted
+		notify1 = should_notify_closing(f_state1) && timeout1;
+		notify2 = should_notify_closing(f_state2) && timeout2;
+		if (bpf_map_delete_elem(&flow_state, &flow1) == 0) {
+			if (notify1)
+				send_flow_timeout_message(ctx, &flow1, now);
+			if (notify2)
+				send_flow_timeout_message(ctx, &flow2, now);
 		}
 	}
 
