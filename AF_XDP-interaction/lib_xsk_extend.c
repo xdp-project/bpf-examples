@@ -171,10 +171,11 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 			   const char *xdp_hints_name,
 			   struct xsk_btf_info **xbi)
 {
-	struct xsk_btf_member btf_id;
+	struct xsk_btf_member btf_id_member;
 	const struct btf_member *m;
 	const struct btf_type *t;
 	unsigned short vlen;
+	__u32 member_end;
 	int i, id, err = 0;
 
 	if (!xbi)
@@ -212,18 +213,23 @@ int xsk_btf__init_xdp_hint(struct btf *btf_obj,
 	(*xbi)->btf_type_id = id;
 
 	/* Validate 'btf_id' member MUST exist */
-	err = __xsk_btf_field_entry((*xbi), "btf_id", &btf_id);
+	err = __xsk_btf_field_entry((*xbi), "btf_id", &btf_id_member);
 	if (err)
 		goto error_entry;
 
-	/* TODO: Validate 'btf_id' is last member */
+	/* Validate 'btf_id' is last member */
+	member_end = btf_id_member.offset + btf_id_member.size;
+	if (t->size != member_end) {
+		/* Situation can happen if compiler adds struct padding */
+		err = -EOVERFLOW;
+		goto error_entry;
+	}
 
 	return 0;
 
 error_entry:
 	__xsk_btf_free_hash(*xbi);
 	free(*xbi);
-
 error_btf:
 	return err;
 }
