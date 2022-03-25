@@ -36,7 +36,7 @@ def plot_stats_table(df, cols=None, axes=None, fmt="{:.3f}", only_all=False,
                                  else func(df[col].values))
                       for func in (np.nanmin, np.nanmedian, np.nanmean, np.nanmax, _std_1)])
 
-    axes.table(cells, rowLabels=rowlabels, colLabels=collabels, **kwargs)
+    axes.table(cellText=cells, rowLabels=rowlabels, colLabels=collabels, **kwargs)
     return axes
 
 

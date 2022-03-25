@@ -83,6 +83,7 @@ def plot_cpu_load(per_cpu_dfs, title=None):
 
     # Hack fix for it to render correctly on older matplotlib
     # https://stackoverflow.com/a/59341086
+    # Update: This hack no longer seems to work...
     fig.canvas.draw()
     fig.canvas.draw()
 
