@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import argparse
+import sys
 
 import util
 import common_plotting as complot
@@ -51,6 +52,12 @@ def load_ss_tcp_data(filename, filter_timerange=None, norm_timestamps=True,
     time_ref = (min(data["timestamp"][0] for data in flow_data.values())
                 if filter_timerange is None else filter_timerange[0])
 
+    n_dup = max(_nr_duplicated(data["timestamp"]) for
+                data in flow_data.values())
+    if n_dup > 0:
+        print("Warning: {} duplicated timestamps in {}".format(
+            n_dup, filename), file=sys.stderr)
+
     for flow, data in flow_data.items():
         df = _dict_to_df(data, filter_timerange, norm_timestamps, time_ref)
         if len(df) > 0:
@@ -69,8 +76,12 @@ def load_ss_tcp_data(filename, filter_timerange=None, norm_timestamps=True,
     return flow_dfs
 
 
+def _nr_duplicated(vals):
+    return len(vals) - len(pd.unique(vals))
+
+
 def _dict_to_df(ss_dict, filter_timerange, norm_timestamps, time_ref=None):
-    df = pd.DataFrame(ss_dict)
+    df = pd.DataFrame(ss_dict).drop_duplicates(subset="timestamp")
 
     interval_lengths = np.empty(len(df), dtype=float)
     interval_lengths[0] = np.inf
