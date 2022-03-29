@@ -162,11 +162,11 @@ def plot_pergroup_histogram(group_dfs, col, axes=None, groups=None,
         if group == "all":
             axes.hist(df[col].values/norm, bins=bins, histtype=histtype,
                       density=density, color="k", label="average ({})".format(
-                          len(df[col].values)), **kwargs)
+                          len(df[col].values)), alpha=alpha, **kwargs)
         else:
             axes.hist(df[col].values, bins=bins, histtype=histtype,
                       density=density, label="{} ({})".format(
-                          group, len(df[col].values)), **kwargs)
+                          group, len(df[col].values)), alpha=alpha, **kwargs)
 
     axes.set_ylabel("Frequency")
     axes.grid(grid)
