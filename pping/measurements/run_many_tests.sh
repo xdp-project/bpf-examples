@@ -9,6 +9,7 @@ export IFACE
 export IP_TARGET
 export OMIT
 export INTERTEST_INTERVAL
+export MPLBACKEND=agg
 
 # $1 = path to save results in
 # $2 = number of times to repeat the tests

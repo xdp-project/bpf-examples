@@ -21,6 +21,8 @@ KPPING_FLAGS=${KPPING_FLAGS:-"--sumInt 1"}
 EPPING_FLAGS=${EPPING_FLAGS:-"-r 0 -I xdp -f"}
 INTERTEST_INTERVAL=${INTERTEST_INTERVAL:-10} #sec
 
+export MPLBACKEND=agg
+
 # $1 = path to save results in
 # $2 = number of flows
 
