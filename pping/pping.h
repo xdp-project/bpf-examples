@@ -50,6 +50,13 @@ enum __attribute__((__packed__)) pping_map {
 	PPING_MAP_PACKETTS
 };
 
+enum __attribute__((__packed__)) connection_state {
+        CONNECTION_STATE_EMPTY,
+        CONNECTION_STATE_WAITOPEN,
+        CONNECTION_STATE_OPEN,
+        CONNECTION_STATE_CLOSED
+};
+
 struct bpf_config {
 	__u64 rate_limit;
 	fixpoint64 rtt_rate;
@@ -96,11 +103,9 @@ struct flow_state {
 	__u64 rec_bytes;
 	__u32 last_id;
 	__u32 outstanding_timestamps;
-	bool has_opened;
+	enum connection_state conn_state;
 	enum flow_event_reason opening_reason;
-	bool is_empty;
-	bool has_closed;
-	__u32 reserved;
+	__u8 reserved[6];
 };
 
 /*

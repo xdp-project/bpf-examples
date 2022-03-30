@@ -645,9 +645,8 @@ static void send_map_full_event(void *ctx, struct packet_info *p_info,
 static void init_flowstate(struct flow_state *f_state,
 			   struct packet_info *p_info)
 {
-	f_state->is_empty = false;
+	f_state->conn_state = CONNECTION_STATE_WAITOPEN;
 	f_state->last_timestamp = p_info->time;
-	f_state->has_opened = false;
 	f_state->opening_reason = p_info->event_type == FLOW_EVENT_OPENING ?
 					  p_info->event_reason :
 						EVENT_REASON_FIRST_OBS_PCKT;
@@ -655,7 +654,7 @@ static void init_flowstate(struct flow_state *f_state,
 
 static void init_empty_flowstate(struct flow_state *f_state)
 {
-	f_state->is_empty = true;
+	f_state->conn_state = CONNECTION_STATE_EMPTY;
 }
 
 /*
@@ -716,14 +715,16 @@ lookup_or_create_dualflow_state(void *ctx, struct packet_info *p_info,
 
 static bool is_flowstate_active(struct flow_state *f_state)
 {
-	return !f_state->is_empty && !f_state->has_closed;
+	return f_state->conn_state != CONNECTION_STATE_EMPTY &&
+	       f_state->conn_state != CONNECTION_STATE_CLOSED;
 }
 
 static void update_forward_flowstate(struct packet_info *p_info,
 				     struct flow_state *f_state, bool *new_flow)
 {
 	// "Create" flowstate if it's empty
-	if (f_state->is_empty && p_info->pid_valid) {
+	if (f_state->conn_state == CONNECTION_STATE_EMPTY &&
+	    p_info->pid_valid) {
 		init_flowstate(f_state, p_info);
 		if (new_flow)
 			*new_flow = true;
@@ -742,9 +743,9 @@ static void update_reverse_flowstate(void *ctx, struct packet_info *p_info,
 		return;
 
 	// First time we see reply for flow?
-	if (!f_state->has_opened &&
+	if (f_state->conn_state == CONNECTION_STATE_WAITOPEN &&
 	    p_info->event_type != FLOW_EVENT_CLOSING_BOTH) {
-		f_state->has_opened = true;
+		f_state->conn_state = CONNECTION_STATE_OPEN;
 		send_flow_open_event(ctx, p_info, f_state);
 	}
 
@@ -754,7 +755,7 @@ static void update_reverse_flowstate(void *ctx, struct packet_info *p_info,
 
 static bool should_notify_closing(struct flow_state *f_state)
 {
-	return f_state->has_opened && !f_state->has_closed;
+	return f_state->conn_state == CONNECTION_STATE_OPEN;
 }
 
 static void close_and_delete_flows(void *ctx, struct packet_info *p_info,
@@ -766,14 +767,14 @@ static void close_and_delete_flows(void *ctx, struct packet_info *p_info,
 	    p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
 		if (should_notify_closing(fw_flow))
 			send_flow_event(ctx, p_info, false);
-		fw_flow->has_closed = true;
+		fw_flow->conn_state = CONNECTION_STATE_CLOSED;
 	}
 
 	// Reverse flow closing
 	if (p_info->event_type == FLOW_EVENT_CLOSING_BOTH) {
 		if (should_notify_closing(rev_flow))
 			send_flow_event(ctx, p_info, true);
-		rev_flow->has_closed = true;
+		rev_flow->conn_state = CONNECTION_STATE_CLOSED;
 	}
 
 	// Delete flowstate entry if neither flow is open anymore
@@ -956,7 +957,8 @@ static bool is_flow_old(struct network_tuple *flow, struct flow_state *f_state,
 		return false;
 	age = time - ts;
 
-	return (!f_state->has_opened && age > UNOPENED_FLOW_LIFETIME) ||
+	return (f_state->conn_state == CONNECTION_STATE_WAITOPEN &&
+		age > UNOPENED_FLOW_LIFETIME) ||
 	       ((flow->proto == IPPROTO_ICMP ||
 		 flow->proto == IPPROTO_ICMPV6) &&
 		age > ICMP_FLOW_LIFETIME) ||
