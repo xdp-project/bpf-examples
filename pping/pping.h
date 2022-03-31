@@ -9,7 +9,7 @@
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
 #define MS_PER_S 1000UL
-#define S_PER_DAY (24*3600UL)
+#define S_PER_DAY (24 * 3600UL)
 
 typedef __u64 fixpoint64;
 #define FIXPOINT_SHIFT 16
@@ -30,6 +30,7 @@ enum __attribute__((__packed__)) flow_event_type {
 };
 
 enum __attribute__((__packed__)) flow_event_reason {
+	EVENT_REASON_NONE,
 	EVENT_REASON_SYN,
 	EVENT_REASON_SYN_ACK,
 	EVENT_REASON_FIRST_OBS_PCKT,
@@ -47,6 +48,13 @@ enum __attribute__((__packed__)) flow_event_source {
 enum __attribute__((__packed__)) pping_map {
 	PPING_MAP_FLOWSTATE = 0,
 	PPING_MAP_PACKETTS
+};
+
+enum __attribute__((__packed__)) connection_state {
+        CONNECTION_STATE_EMPTY,
+        CONNECTION_STATE_WAITOPEN,
+        CONNECTION_STATE_OPEN,
+        CONNECTION_STATE_CLOSED
 };
 
 struct bpf_config {
@@ -95,9 +103,20 @@ struct flow_state {
 	__u64 rec_bytes;
 	__u32 last_id;
 	__u32 outstanding_timestamps;
-	bool has_opened;
+	enum connection_state conn_state;
 	enum flow_event_reason opening_reason;
 	__u8 reserved[6];
+};
+
+/*
+ * Stores flowstate for both direction (src -> dst and dst -> src) of a flow
+ *
+ * Uses two named members instead of array of size 2 to avoid hassels with
+ * convincing verifier that member access is not out of bounds
+ */
+struct dual_flow_state {
+	struct flow_state dir1;
+	struct flow_state dir2;
 };
 
 struct packet_id {
