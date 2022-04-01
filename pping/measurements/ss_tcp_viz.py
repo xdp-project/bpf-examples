@@ -185,7 +185,8 @@ def parse_tcp_entry(line):
 
     parts = parts[estab_idx + 4:]
 
-    info["bytes_sent"] = parse_bytes_sent(parts)
+    info["bytes_retrans"] = parse_bytes_retrans(parts)
+    info["bytes_sent"] = parse_bytes_sent(parts) - info["bytes_retrans"]
     info["delivery_rate"] = parse_delivery_rate(parts)
     rtt, rttvar = parse_rtt(parts)
     info["rtt"] = rtt
@@ -215,6 +216,10 @@ def bps_str_to_numeric(bps_str):
         if bps_str.endswith(prefix + "bps"):
             return float(bps_str[:-3 - len(prefix)]) * factor
     raise ValueError("{} does not appear to be a valid bps string".format(bps_str))
+
+
+def parse_bytes_retrans(words):
+    return int(find_tcp_value("bytes_retrans:", words, "0"))
 
 
 def parse_bytes_sent(words):
