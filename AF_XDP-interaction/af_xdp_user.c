@@ -143,15 +143,8 @@ struct xsk_btf_info *setup_btf_info(struct btf *btf,
 
 	err = xsk_btf__init_xdp_hint(btf, struct_name, &xbi);
 	if (err) {
-		fprintf(stderr, "WARN(%d): Cannot BTF find struct:%s\n",
+		fprintf(stderr, "WARN(%d): Cannot BTF locate valid struct:%s\n",
 			err, struct_name);
-		return NULL;
-	}
-
-	if (!xsk_btf__has_field("btf_id", xbi)) {
-		fprintf(stderr, "ERR: %s doesn't contain member btf_id\n",
-			struct_name);
-		xsk_btf__free_xdp_hint(xbi);
 		return NULL;
 	}
 
