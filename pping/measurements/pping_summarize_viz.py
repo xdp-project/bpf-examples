@@ -189,7 +189,7 @@ def main():
         all_data["pping"] = report_data
 
     if len(all_data) > 0:
-        merged_data = prodat.merge_all_data(all_data)
+        merged_data = prodat.merge_all_data(all_data, how="outer")
         merged_data.to_csv(os.path.join(args.input, "data.csv.xz"))
 
 

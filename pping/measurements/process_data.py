@@ -391,7 +391,7 @@ def flatten_per_flow_dict(per_flow_dict,
     return util.pergroup_dict_to_df(flat_flow_dict, "n_flows")
 
 
-def merge_all_data(data):
+def merge_all_data(data, **kwargs):
     join_cols = ["n_flows", "pping_setup", "run", "timestamp"]
     flat_data = dict()
 
@@ -416,7 +416,8 @@ def merge_all_data(data):
     if len(flat_data) < 1:
         raise ValueError("Cannot merge empty data")
 
-    return util.join_dataframes([df for df in flat_data.values()], on=join_cols)
+    return util.join_dataframes([df for df in flat_data.values()], on=join_cols,
+                                **kwargs)
 
 
 def main():
