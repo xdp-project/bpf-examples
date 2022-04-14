@@ -22,8 +22,12 @@
 #include "pping.h"
 #include "pping_debug_cleanup.h"
 
+#ifndef AF_INET
 #define AF_INET 2
+#endif
+#ifndef AF_INET6
 #define AF_INET6 10
+#endif
 #define MAX_TCP_OPTIONS 10
 
 // Mask for IPv6 flowlabel + traffic class -  used in fib lookup
