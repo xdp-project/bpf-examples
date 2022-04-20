@@ -5,7 +5,7 @@ LIB_DIR = .
 LIB_INSTALL := $(LIB_DIR)/install
 include defines.mk
 
-SUBDIRS=
+SUBDIRS=util
 
 all: $(OBJECT_LIBBPF) $(OBJECT_LIBXDP)
 	@set -e; \
