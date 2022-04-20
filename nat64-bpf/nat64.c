@@ -20,6 +20,8 @@
 #include <libmnl/libmnl.h>
 #include <linux/rtnetlink.h>
 
+#include "logging.h"
+
 #include "nat64.h"
 #include "nat64_kern.skel.h"
 
@@ -34,6 +36,7 @@ static const struct option long_options[] = {
 	{ "v6-prefix",        required_argument, NULL, '6' }, // v6 prefix to use for nat64
 	{ "v4-prefix",        required_argument, NULL, '4' }, // v4 prefix to use for nat64
 	{ "timeout",          required_argument, NULL, 't' }, // Address mapping timeout interval in s
+	{ "verbose",          required_argument, NULL, 'v' }, // verbose logging
 	{ 0, 0, NULL, 0 }
 };
 
@@ -85,7 +88,7 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 	config->c.v6_prefix.s6_addr[2] = 0xff;
 	config->c.v6_prefix.s6_addr[3] = 0x9b;
 
-	while ((opt = getopt_long(argc, argv, "i:6:4:t:a:hu", long_options,
+	while ((opt = getopt_long(argc, argv, "i:6:4:t:a:huv", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -160,6 +163,9 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 			break;
 		case 'u':
 			config->unload = true;
+			break;
+		case 'v':
+			increase_log_level();
 			break;
 		default:
 			fprintf(stderr, "Unknown option %s\n", argv[optind]);
@@ -361,6 +367,8 @@ int main(int argc, char *argv[])
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS);
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_egress);
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, attach_ingress);
+
+	init_lib_logging();
 
 	err = parse_arguments(argc, argv, &cfg);
 	if (err)
