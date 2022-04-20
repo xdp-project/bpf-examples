@@ -11,6 +11,8 @@ CONFIG=".${CONFIG}.tmp"
 TMPDIR=$(mktemp -d config.XXXXXX)
 trap 'status=$?; rm -rf $TMPDIR; rm -f $CONFIG; exit $status' EXIT HUP INT QUIT TERM
 
+SUBMODULE_LIBBPF=0
+
 check_toolchain()
 {
     local clang_version
@@ -123,12 +125,10 @@ EOF
     fi
 
     echo submodule
+    SUBMODULE_LIBBPF=1
     echo "SYSTEM_LIBBPF:=n" >> $CONFIG
-    echo 'CFLAGS += -I$(LIB_DIR)/libbpf-install/usr/include' >>$CONFIG
-    echo 'BPF_CFLAGS += -I$(LIB_DIR)/libbpf-install/usr/include' >>$CONFIG
-    echo 'LDFLAGS += -L$(LIB_DIR)/libbpf/src' >>$CONFIG
     echo 'LDLIBS += -l:libbpf.a' >>$CONFIG
-    echo 'OBJECT_LIBBPF = $(LIB_DIR)/libbpf/src/libbpf.a' >>$CONFIG
+    echo 'OBJECT_LIBBPF = $(LIB_DIR)/install/lib/libbpf.a' >>$CONFIG
     if ! [ -d "lib/libbpf/src" ] && [ -f ".gitmodules" ] && [ -e ".git" ]; then
         git submodule init && git submodule update
     fi
@@ -173,6 +173,39 @@ EOF
     fi
 }
 
+check_libxdp()
+{
+    if [ "${FORCE_SUBMODULE_LIBXDP:-0}" -ne "1" ] && ${PKG_CONFIG} libxdp --exists; then
+
+        LIBXDP_CFLAGS=$(${PKG_CONFIG} libxdp --cflags)
+        LIBXDP_LDLIBS=$(${PKG_CONFIG} libxdp --libs)
+        echo "SYSTEM_LIBXDP:=y" >>$CONFIG
+        echo 'CFLAGS += ' $LIBXDP_CFLAGS >> $CONFIG
+        echo 'LDLIBS += ' $LIBXDP_LDLIBS >>$CONFIG
+        echo 'OBJECT_LIBXDP = ' >>$CONFIG
+        echo system
+
+        return 0
+    fi
+
+    echo submodule
+    echo "SYSTEM_LIBXDP:=n" >> $CONFIG
+    if [ "$SUBMODULE_LIBBPF" -eq "1" ]; then
+        echo "Configuring libxdp to use our libbpf submodule"
+        (export LIBBPF_DIR="$(readlink -m lib/libbpf)" LIBBPF_INCLUDE_DIR="$(readlink -m lib/install/include)";
+         cd lib/xdp-tools; ./configure)
+    else
+        echo "Configuring libxdp without our libbpf"
+        (cd lib/xdp-tools; ./configure)
+    fi
+    echo 'LDFLAGS += -L$(LIB_DIR)/install/lib' >>$CONFIG
+    echo 'LDLIBS += -l:libxdp.a' >>$CONFIG
+    echo 'OBJECT_LIBXDP = $(LIB_DIR)/install/lib/libxdp.a' >>$CONFIG
+    if ! [ -d "lib/xdp-tools/lib" ] && [ -f ".gitmodules" ] && [ -e ".git" ]; then
+        git submodule init && git submodule update
+    fi
+}
+
 quiet_config()
 {
     cat <<EOF
@@ -211,6 +244,8 @@ check_toolchain
 
 echo -n "libbpf support: "
 check_libbpf
+echo -n "libxdp support: "
+check_libxdp
 
 check_bpf_use_errno
 
