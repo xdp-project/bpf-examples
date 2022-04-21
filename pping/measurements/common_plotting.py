@@ -177,6 +177,6 @@ def plot_pergroup_histogram(group_dfs, col, axes=None, groups=None,
         default_kwargs = {"loc": "top"}
         if stat_kwargs is not None:
             default_kwargs.update(stat_kwargs)
-        plot_stats_table(group_dfs, col, axes=axes, **default_kwargs)
+        plot_stats_table(group_df_to_single_df(group_dfs, col), axes=axes, **default_kwargs)
 
     return axes
