@@ -98,7 +98,7 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 		xdp_hints_rx_time.btf_type_id = xsk_btf__btf_type_id(xbi);
 		xdp_hints_rx_time.xbi = xbi;
 	}
-	// xsk_btf__free_xdp_hint(xbi);
+	/* Remember to cleanup later: xsk_btf__free_xdp_hint(xbi); */
 
 	xbi = setup_btf_info(btf, "xdp_hints_mark");
 	if (xbi) {
@@ -111,9 +111,7 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	return 0;
 }
 
-
-
-int main(int argc, char **argv)
+int test01_normal()
 {
 	struct bpf_object *bpf_obj;
 	int err = 0;
@@ -132,6 +130,18 @@ int main(int argc, char **argv)
 	xsk_btf__free_xdp_hint(xdp_hints_rx_time.xbi);
 	xsk_btf__free_xdp_hint(xdp_hints_mark.xbi);
 	bpf_object__close(bpf_obj);
+
+	return EXIT_OK;
+}
+
+int main(int argc, char **argv)
+{
+	struct bpf_object *bpf_obj;
+	int err;
+
+	err = test01_normal();
+	if (err != EXIT_OK)
+		return err;
 
 	bpf_obj = load_bpf_object("btf_unit_test_bpf.o");
 	if (!bpf_obj)
