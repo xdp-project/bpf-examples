@@ -124,6 +124,7 @@ int test01_normal()
 	if (err) {
 		if (verbose)
 			printf("ERR(%d): Failed loading BTF info", err);
+		bpf_object__close(bpf_obj);
 		return EXIT_FAIL_BTF;
 	}
 	/* Teardown structs and memory again */
