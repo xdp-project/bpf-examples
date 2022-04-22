@@ -23,12 +23,12 @@ static int verbose = 1;
 #define EXIT_FAIL_BPF       4
 #define EXIT_FAIL_BTF       5
 
-struct bpf_object *load_bpf_object() {
+struct bpf_object *load_bpf_object(const char *filename) {
 	struct bpf_object *obj;
 	char buf[100];
 	int err;
 
-	obj = bpf_object__open_file("af_xdp_kern.o", NULL);
+	obj = bpf_object__open_file(filename, NULL);
 	err = libbpf_get_error(obj);
 	if (err) {
 		libbpf_strerror(err, buf, sizeof(buf));
@@ -110,12 +110,14 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	return 0;
 }
 
+
+
 int main(int argc, char **argv)
 {
 	struct bpf_object *bpf_obj;
 	int err = 0;
 
-	bpf_obj = load_bpf_object();
+	bpf_obj = load_bpf_object("af_xdp_kern.o");
 	if (!bpf_obj)
 		return EXIT_FAIL_BPF;
 
