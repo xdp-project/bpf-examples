@@ -144,20 +144,12 @@ int test01_normal()
 	return EXIT_OK;
 }
 
-int test02_should_fail()
+int helper_expect_invalid_btf_id(struct btf *btf,
+				 const char *xdp_hint_name)
 {
-	struct bpf_object *bpf_obj;
 	struct xsk_btf_info *xbi;
-	struct btf *btf;
-	int errval = 0;
 	int ret = EXIT_OK;
-	const char *xdp_hint_name = "xdp_hints_fail001";
-
-	bpf_obj = load_bpf_object("btf_unit_test_bpf.o");
-	if (!bpf_obj)
-		return EXIT_FAIL_BPF;
-
-	btf = bpf_object__btf(bpf_obj);
+	int errval = 0;
 
 	xbi = setup_btf_info(btf, xdp_hint_name, &errval);
 	if (xbi) {
@@ -178,6 +170,32 @@ int test02_should_fail()
 		       "detect btf_id not last member in struct %s\n",
 		       xdp_hint_name);
 	}
+
+out:
+	return ret;
+}
+
+int test02_should_fail()
+{
+	const char *xdp_hint01 = "xdp_hints_fail001";
+	const char *xdp_hint02 = "xdp_hints_fail002";
+	struct bpf_object *bpf_obj;
+	int ret = EXIT_OK;
+	struct btf *btf;
+
+	bpf_obj = load_bpf_object("btf_unit_test_bpf.o");
+	if (!bpf_obj)
+		return EXIT_FAIL_BPF;
+
+	btf = bpf_object__btf(bpf_obj);
+
+	ret = helper_expect_invalid_btf_id(btf, xdp_hint01);
+	if (ret)
+		goto out;
+
+	ret = helper_expect_invalid_btf_id(btf, xdp_hint02);
+	if (ret)
+		goto out;
 
 out:
 	bpf_object__close(bpf_obj);
