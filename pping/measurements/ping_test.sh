@@ -103,5 +103,8 @@ for (( i = 1; i <= $n_runs; i++)); do
     if [[ -n $NETEM_MACHINE && -n $NETEM_IFACE ]]; then
 	teardown_netem $NETEM_MACHINE $NETEM_IFACE
     fi
+
+    echo "Plotting results in ${save_path}..."
+    ./pping_ping_accuracy_viz.py -i $save_path
 done
 
