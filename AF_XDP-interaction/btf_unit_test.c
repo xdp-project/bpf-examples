@@ -128,5 +128,10 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_BTF;
 	}
 
+	bpf_obj = load_bpf_object("btf_unit_test_bpf.o");
+	if (!bpf_obj)
+		return EXIT_FAIL_BPF;
+
+
 	return EXIT_OK;
 }
