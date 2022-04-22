@@ -98,6 +98,7 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 		xdp_hints_rx_time.btf_type_id = xsk_btf__btf_type_id(xbi);
 		xdp_hints_rx_time.xbi = xbi;
 	}
+	// xsk_btf__free_xdp_hint(xbi);
 
 	xbi = setup_btf_info(btf, "xdp_hints_mark");
 	if (xbi) {
@@ -127,10 +128,15 @@ int main(int argc, char **argv)
 			printf("ERR(%d): Failed loading BTF info", err);
 		return EXIT_FAIL_BTF;
 	}
+	/* Teardown structs and memory again */
+	xsk_btf__free_xdp_hint(xdp_hints_rx_time.xbi);
+	xsk_btf__free_xdp_hint(xdp_hints_mark.xbi);
+	bpf_object__close(bpf_obj);
 
 	bpf_obj = load_bpf_object("btf_unit_test_bpf.o");
 	if (!bpf_obj)
 		return EXIT_FAIL_BPF;
+	bpf_object__close(bpf_obj);
 
 
 	return EXIT_OK;
