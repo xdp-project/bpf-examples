@@ -62,21 +62,30 @@ struct xdp_hints_mark {
 } xdp_hints_mark = { 0 };
 
 struct xsk_btf_info *setup_btf_info(struct btf *btf,
-				    const char *struct_name)
+				    const char *struct_name,
+				    int *errval)
 {
 	struct xsk_btf_info *xbi = NULL;
 	int err;
 
 	err = xsk_btf__init_xdp_hint(btf, struct_name, &xbi);
 	if (err) {
-		fprintf(stderr, "WARN(%d): Cannot BTF locate valid struct:%s\n",
-			err, struct_name);
+		if (errval) {
+			/* Expect caller to handle err detection */
+			*errval = err;
+		} else {
+			fprintf(stderr,
+				"WARN(%d): Cannot BTF locate valid struct:%s\n",
+				err, struct_name);
+		}
 		return NULL;
 	}
 
-	if (verbose)
-		printf("Setup BTF based XDP hints for struct: %s\n",
-		       struct_name);
+	if (verbose) {
+		int btf_id = xsk_btf__btf_type_id(xbi);
+		printf("Setup BTF based XDP hints for (btf_id:%d) struct: %s\n",
+		       btf_id, struct_name);
+	}
 
 	return xbi;
 }
@@ -86,7 +95,7 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	struct btf *btf = bpf_object__btf(bpf_obj);
 	struct xsk_btf_info *xbi;
 
-	xbi = setup_btf_info(btf, "xdp_hints_rx_time");
+	xbi = setup_btf_info(btf, "xdp_hints_rx_time", NULL);
 	if (xbi) {
 		/* Lookup info on required member "rx_ktime" */
 		if (!xsk_btf__field_member("rx_ktime", xbi,
@@ -100,7 +109,7 @@ int init_btf_info_via_bpf_object(struct bpf_object *bpf_obj)
 	}
 	/* Remember to cleanup later: xsk_btf__free_xdp_hint(xbi); */
 
-	xbi = setup_btf_info(btf, "xdp_hints_mark");
+	xbi = setup_btf_info(btf, "xdp_hints_mark", NULL);
 	if (xbi) {
 		if (!xsk_btf__field_member("mark", xbi, &xdp_hints_mark.mark))
 			return -EBADSLT;
@@ -135,20 +144,57 @@ int test01_normal()
 	return EXIT_OK;
 }
 
-int main(int argc, char **argv)
+int test02_should_fail()
 {
 	struct bpf_object *bpf_obj;
-	int err;
-
-	err = test01_normal();
-	if (err != EXIT_OK)
-		return err;
+	struct xsk_btf_info *xbi;
+	struct btf *btf;
+	int errval = 0;
+	int ret = EXIT_OK;
+	const char *xdp_hint_name = "xdp_hints_fail001";
 
 	bpf_obj = load_bpf_object("btf_unit_test_bpf.o");
 	if (!bpf_obj)
 		return EXIT_FAIL_BPF;
-	bpf_object__close(bpf_obj);
 
+	btf = bpf_object__btf(bpf_obj);
+
+	xbi = setup_btf_info(btf, xdp_hint_name, &errval);
+	if (xbi) {
+		/* Unexpected success - as hints layout should be invalid */
+		printf(" - Unexpected success in test that should fail\n");
+		xsk_btf__free_xdp_hint(xbi);
+		ret = EXIT_FAIL_BPF;
+		goto out;
+	}
+	if (errval != -EOVERFLOW) {
+		/* Expecting failure with EOVERFLOW as btf_id not last member */
+		printf("Unexpect FAIL - with errno:%d\n", errval);
+		ret = EXIT_FAIL_BTF;
+		goto out;
+	}
+	if (verbose) {
+		printf("SUCCESS - "
+		       "detect btf_id not last member in struct %s\n",
+		       xdp_hint_name);
+	}
+
+out:
+	bpf_object__close(bpf_obj);
+	return ret;
+}
+
+int main(int argc, char **argv)
+{
+	int err;
+
+	err = test01_normal();
+	if (err)
+		return err;
+
+	err = test02_should_fail();
+	if (err)
+		return err;
 
 	return EXIT_OK;
 }
