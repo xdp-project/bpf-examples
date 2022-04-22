@@ -3,6 +3,7 @@
 USER_TARGETS   := af_xdp_user
 USER_TARGETS   += btf_unit_test
 BPF_TARGETS    := af_xdp_kern
+BPF_TARGETS    += btf_unit_test_bpf
 
 # Define C-code objects USER_TARGETS needs
 USER_TARGETS_OBJS := common_params.o common_user_bpf_xdp.o
