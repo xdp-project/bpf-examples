@@ -196,12 +196,18 @@ check_libxdp()
                 LIBBPF_INCLUDE_DIR="$(readlink -m lib/install/include)" \
                 LIBBPF_UNBUILT=1;
          cd lib/xdp-tools; ./configure)
+
+        # libxdp.a has to come before libbpf.a so the former can pick up symbols
+        # from the latter
+        sed -i 's/-l:libbpf.a/-l:libxdp.a -l:libbpf.a/' $CONFIG
     else
         echo "Configuring libxdp without our libbpf"
         (cd lib/xdp-tools; ./configure)
+
+        echo 'LDLIBS += -l:libxdp.a' >>$CONFIG
     fi
+
     echo 'LDFLAGS += -L$(LIB_DIR)/install/lib' >>$CONFIG
-    echo 'LDLIBS += -l:libxdp.a' >>$CONFIG
     echo 'OBJECT_LIBXDP = $(LIB_DIR)/install/lib/libxdp.a' >>$CONFIG
     if ! [ -d "lib/xdp-tools/lib" ] && [ -f ".gitmodules" ] && [ -e ".git" ]; then
         git submodule init && git submodule update
