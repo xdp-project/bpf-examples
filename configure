@@ -192,7 +192,9 @@ check_libxdp()
     echo "SYSTEM_LIBXDP:=n" >> $CONFIG
     if [ "$SUBMODULE_LIBBPF" -eq "1" ]; then
         echo "Configuring libxdp to use our libbpf submodule"
-        (export LIBBPF_DIR="$(readlink -m lib/libbpf)" LIBBPF_INCLUDE_DIR="$(readlink -m lib/install/include)";
+        (export LIBBPF_DIR="$(readlink -m lib/libbpf)" \
+                LIBBPF_INCLUDE_DIR="$(readlink -m lib/install/include)" \
+                LIBBPF_UNBUILT=1;
          cd lib/xdp-tools; ./configure)
     else
         echo "Configuring libxdp without our libbpf"
