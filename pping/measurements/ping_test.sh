@@ -7,13 +7,16 @@
 # exactly one report per packet
 
 MACHINE=${MACHINE:-"testbed-lenovo"}
-NETEM_MACHINE=${NETEM_MACHINE:-"testbed-40g-02"}
 TARGET=${TARGET:-"10.70.2.2"}
 IFACE=${IFACE:-"ens3f1"}
-NETEM_IFACE=${NETEM_IFACE:-"enp1s0f1np1"}
+
+PING="~/iputils-install/bin/ping"
 PING_FLAGS=${PING_FLAGS:-"-Dn -i 0.01 -c 1000"}
 EPPING_FLAGS=${EPPING_FLAGS:-"-Cf -r 0 -F ppviz"}
-NETEM_ARGS="delay 100ms 10ms 95%"
+
+NETEM_MACHINE=${NETEM_MACHINE:-"testbed-40g-02"}
+NETEM_IFACE=${NETEM_IFACE:-"enp1s0f1np1"}
+NETEM_ARGS="delay 100ms 10ms 99"
 
 export MPLBACKEND=agg
 
@@ -62,7 +65,7 @@ run_ping() {
     local ping_flags=${4:-$PING_FLAGS}
 
     echo "${machine}: Pinging $target with args ${ping_flags}..."
-    ssh $machine "mkdir -p $save_path; sudo ping $target $ping_flags > ${save_path}/ping.out 2> ${save_path}/ping.err"
+    ssh $machine "mkdir -p $save_path; sudo $PING $target $ping_flags > ${save_path}/ping.out 2> ${save_path}/ping.err"
 }
 
 copy_back_results() {
@@ -91,7 +94,7 @@ for (( i = 1; i <= $n_runs; i++)); do
 	save_path=$base_path
     fi
 
-    if [[ -n $NETEM_MACHINE && -n $NETEM_IFACE ]]; then
+    if [[ -n $NETEM_MACHINE && -n $NETEM_IFACE && -n $NETEM_ARGS ]]; then
 	setup_netem $NETEM_MACHINE $NETEM_IFACE
     fi
 
@@ -100,7 +103,7 @@ for (( i = 1; i <= $n_runs; i++)); do
     stop_epping $MACHINE
     copy_back_results $MACHINE $save_path "compress"
 
-    if [[ -n $NETEM_MACHINE && -n $NETEM_IFACE ]]; then
+    if [[ -n $NETEM_MACHINE && -n $NETEM_IFACE && -n $NETEM_ARGS ]]; then
 	teardown_netem $NETEM_MACHINE $NETEM_IFACE
     fi
 
