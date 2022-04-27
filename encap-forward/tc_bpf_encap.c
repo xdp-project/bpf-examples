@@ -12,7 +12,9 @@
 #define ENCAP_TYPE BPF_F_ADJ_ROOM_ENCAP_L3_IPV4
 #endif
 
+#ifndef AF_INET
 #define AF_INET 2
+#endif
 
 SEC("classifier") int tc_encap(struct __sk_buff *skb)
 {
