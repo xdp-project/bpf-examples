@@ -67,59 +67,6 @@ static bool __xsk_equal_fn(const void *k1, const void *k2, void *ctx)
 	return k1 == k2;
 }
 
-int xsk_btf__init_xdp_hint(struct btf *btf_obj,
-			   const char *xdp_hints_name,
-			   struct xsk_btf_info **xbi)
-{
-	const struct btf_member *m;
-	const struct btf_type *t;
-	unsigned short vlen;
-	int i, id, ret = 0;
-
-	if (!xbi)
-		return -EINVAL;
-
-	/* Require XDP-hints are defined as a struct */
-	id = btf__find_by_name_kind(btf_obj, xdp_hints_name, BTF_KIND_STRUCT);
-	if (id < 0) {
-		ret = id;
-		goto error_btf;
-	}
-
-	t = btf__type_by_id(btf_obj, id);
-
-	*xbi = malloc(sizeof(**xbi));
-	if (!*xbi) {
-		ret = -ENOMEM;
-		goto error_btf;
-	}
-
-	hashmap__init(&(*xbi)->map, __xsk_hash_fn, __xsk_equal_fn, NULL);
-
-	/* Validate no BTF field is a bitfield */
-	m = btf_members(t);
-	vlen = BTF_INFO_VLEN(t->info);
-	for (i = 0; i < vlen; i++, m++) {
-		if (BTF_MEMBER_BITFIELD_SIZE(m->offset)) {
-			ret = -ENOTSUP;
-			goto error_entry;
-		}
-	}
-
-	(*xbi)->btf = btf_obj;
-	(*xbi)->type = t;
-	(*xbi)->btf_type_id = id;
-
-	return ret;
-
-error_entry:
-	__xsk_btf_free_hash(*xbi);
-	free(*xbi);
-
-error_btf:
-	return ret;
-}
-
 static int __xsk_btf_field_entry(struct xsk_btf_info *xbi, const char *field,
 			  struct xsk_btf_member *entry)
 {
@@ -218,4 +165,71 @@ int xsk_btf__read_field(void **dest, size_t size, const char *field,
 
 	xsk_btf__read(dest, size, entry, xbi,addr);
 	return 0;
+}
+
+int xsk_btf__init_xdp_hint(struct btf *btf_obj,
+			   const char *xdp_hints_name,
+			   struct xsk_btf_info **xbi)
+{
+	struct xsk_btf_member btf_id_member;
+	const struct btf_member *m;
+	const struct btf_type *t;
+	unsigned short vlen;
+	__u32 member_end;
+	int i, id, err = 0;
+
+	if (!xbi)
+		return -EINVAL;
+
+	/* Require XDP-hints are defined as a struct */
+	id = btf__find_by_name_kind(btf_obj, xdp_hints_name, BTF_KIND_STRUCT);
+	if (id < 0) {
+		err = id;
+		goto error_btf;
+	}
+
+	t = btf__type_by_id(btf_obj, id);
+
+	*xbi = malloc(sizeof(**xbi));
+	if (!*xbi) {
+		err = -ENOMEM;
+		goto error_btf;
+	}
+
+	hashmap__init(&(*xbi)->map, __xsk_hash_fn, __xsk_equal_fn, NULL);
+
+	/* Validate no BTF field is a bitfield */
+	m = btf_members(t);
+	vlen = BTF_INFO_VLEN(t->info);
+	for (i = 0; i < vlen; i++, m++) {
+		if (BTF_MEMBER_BITFIELD_SIZE(m->offset)) {
+			err = -ENOTSUP;
+			goto error_entry;
+		}
+	}
+
+	(*xbi)->btf = btf_obj;
+	(*xbi)->type = t;
+	(*xbi)->btf_type_id = id;
+
+	/* Validate 'btf_id' member MUST exist */
+	err = __xsk_btf_field_entry((*xbi), "btf_id", &btf_id_member);
+	if (err)
+		goto error_entry;
+
+	/* Validate 'btf_id' is last member */
+	member_end = btf_id_member.offset + btf_id_member.size;
+	if (t->size != member_end) {
+		/* Situation can happen if compiler adds struct padding */
+		err = -EOVERFLOW;
+		goto error_entry;
+	}
+
+	return 0;
+
+error_entry:
+	__xsk_btf_free_hash(*xbi);
+	free(*xbi);
+error_btf:
+	return err;
 }
