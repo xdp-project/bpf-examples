@@ -82,7 +82,7 @@ def plot_summarized_tcp_info(tcp_data):
 
 
 def plot_summarized_reports(stream_data):
-    if "filtered_rtt_events" in stream_data["PPing"]:
+    if all("filtered_rtt_events" in df for df in stream_data.values()):
         fig, axes = plt.subplots(2, 2, figsize=(16, 9), constrained_layout=True)
 
         axes[0, 1].plot([], [])

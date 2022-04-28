@@ -68,7 +68,7 @@ def df_to_pergroup_dict(df, groupby_col, **kwargs):
             group, data in df.groupby(groupby_col, **kwargs)}
 
 
-def join_dataframes(dfs, on, how="inner", multi_index=True, **kwargs):
+def join_dataframes(dfs, on, how="outer", multi_index=True, **kwargs):
     merged_df = None
     for df in dfs:
         df = df.set_index(on)

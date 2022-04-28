@@ -17,8 +17,10 @@ fi
 echo "Plotting comparsion graphs..."
 ./pping_compare_viz.py -i $1 -o ${1}/pping_comparison.png -I $IFACE -O $OMIT $IP_ARG
 
-echo "Plotting eBPF pping map cleaning and lost events..."
-./pping_err_viz.py -i ${1}/e_pping/*M2/pping.err* -o ${1}/epping_mapcleaning.png -T "Map cleaning and lost events"
+if [[ -f "${1}/e_pping/M2/pping.err.xz" ]]; then
+    echo "Plotting eBPF pping map cleaning and lost events..."
+    ./pping_err_viz.py -i ${1}/e_pping/M2/pping.err* -o ${1}/epping_mapcleaning.png -T "Map cleaning and lost events"
+fi
 
 
 for pping in no_pping k_pping e_pping; do

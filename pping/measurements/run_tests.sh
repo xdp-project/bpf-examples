@@ -17,8 +17,13 @@ IFACE=${IFACE:-"ens3f1"}
 PORT_START=${PORT_START:-8000}
 CPU_CORES=${CPU_CORES:-8}
 IPERF3_FLAGS=${IPERF3_FLAGS:-"-Z -t 180"}
+
 KPPING_FLAGS=${KPPING_FLAGS:-"--sumInt 1"}
 EPPING_FLAGS=${EPPING_FLAGS:-"-r 0 -I xdp -f"}
+
+RUN_BASELINE=${RUN_BASELINE:-true}
+RUN_KPPING=${RUN_KPPING:-true}
+RUN_EPPING=${RUN_EPPING:-true}
 INTERTEST_INTERVAL=${INTERTEST_INTERVAL:-10} #sec
 
 export MPLBACKEND=agg
@@ -181,32 +186,43 @@ copy_back_results() {
     mv ${1}/M1/test_interval.log -t $1
 }
 
+if [[ "$RUN_BASELINE" != true && "$RUN_KPPING" != true && "$RUN_EPPING" != true ]]; then
+    echo "Error - no test to run (at least one of RUN_BASELINE, RUN_KPPING or RUN_EPPING should be set to true)"
+    exit
+fi
+
 if (( $2 > 128 * $CPU_CORES )); then
     echo "Error - cannot create $2 concurrent flows with just $CPU_CORES instances of iperf3"
     exit 1
 fi
 
-echo "Running test with no pping..."
-SPATH="${1}/no_pping"
-run_test $SPATH $2
-copy_back_results $SPATH
+if [[ "$RUN_BASELINE" == true ]]; then
+    echo "Running test with no pping..."
+    SPATH="${1}/no_pping"
+    run_test $SPATH $2
+    copy_back_results $SPATH
 
-sleep $INTERTEST_INTERVAL
+    sleep $INTERTEST_INTERVAL
+fi
 
-echo -e "\n\nRunning test with Kathie's pping..."
-SPATH="${1}/k_pping"
-start_kpping $SPATH
-run_test $SPATH $2
-stop_kpping
-copy_back_results $SPATH
+if [[ "$RUN_KPPING" == true ]]; then
+    echo -e "\n\nRunning test with Kathie's pping..."
+    SPATH="${1}/k_pping"
+    start_kpping $SPATH
+    run_test $SPATH $2
+    stop_kpping
+    copy_back_results $SPATH
 
-sleep $INTERTEST_INTERVAL
+    sleep $INTERTEST_INTERVAL
+fi
 
-echo -e "\n\nRunning test with my eBPF pping..."
-SPATH="${1}/e_pping"
-start_epping $SPATH
-run_test $SPATH $2
-stop_epping
-copy_back_results $SPATH
+if [[ "$RUN_EPPING" == true ]]; then
+    echo -e "\n\nRunning test with my eBPF pping..."
+    SPATH="${1}/e_pping"
+    start_epping $SPATH
+    run_test $SPATH $2
+    stop_epping
+    copy_back_results $SPATH
+fi
 
 IFACE=$IFACE ./plot_results.sh $1 $IP_TARGET

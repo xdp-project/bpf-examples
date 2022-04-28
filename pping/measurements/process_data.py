@@ -157,6 +157,9 @@ def count_epping_messages(root_folder, src_ip=None, omit=0):
     """
 
     sub_path = pathlib.Path(root_folder, "e_pping")
+    if not os.path.exists(sub_path):
+        return None
+
     test_interval = get_test_interval(sub_path, omit)
     date = str(get_test_interval(sub_path)[0])[:10]
     file = get_pping_file(sub_path)
@@ -180,6 +183,9 @@ def count_kpping_messages(root_folder, src_ip=None, omit=0):
     """
 
     sub_path = pathlib.Path(root_folder, "k_pping")
+    if not os.path.exists(sub_path):
+        return None
+
     test_interval = get_test_interval(sub_path, omit)
     date = str(get_test_interval(sub_path)[0])[:10]
     file = get_pping_file(sub_path)
@@ -200,6 +206,8 @@ def load_cpu_data(root_folder, omit=0):
     load_dict = dict()
     for label, folder in label_folder_map.items():
         subfolder = os.path.join(root_folder, folder)
+        if not os.path.exists(subfolder):
+            continue
         test_interval = get_test_interval(subfolder, omit)
         sarfile = get_sarfile(subfolder)
         if sarfile is None:
@@ -217,6 +225,8 @@ def load_network_data(root_folder, interface="ens192", omit=0):
     net_dict = dict()
     for label, folder in label_folder_map.items():
         subfolder = os.path.join(root_folder, folder)
+        if not os.path.exists(subfolder):
+            continue
         test_interval = get_test_interval(subfolder, omit)
         sarfile = get_sarfile(subfolder)
         if sarfile is None:
@@ -234,6 +244,8 @@ def load_tcp_data(root_folder, omit=0, dst=None, include_individual_flows=False)
     tcp_dict = dict()
     for label, folder in label_folder_map.items():
         subfolder = os.path.join(root_folder, folder)
+        if not os.path.exists(subfolder):
+            continue
         test_interval = get_test_interval(subfolder, omit=omit)
         tcpfile = get_ss_tcp_file(subfolder)
         if tcpfile is None:
@@ -360,25 +372,6 @@ def flatten_per_pping_dict(per_pping_dict):
     return util.pergroup_dict_to_df(per_pping_dict, "pping_setup")
 
 
-def flatten_per_pping_reports_dict(per_pping_dict):
-    per_pping_dict = per_pping_dict.copy()
-    ref_df = per_pping_dict.get("PPing", per_pping_dict.get("ePPing")).copy()
-
-    if ref_df is not None:
-        if "ePPing" in per_pping_dict:
-            per_pping_dict["ePPing"] = per_pping_dict["ePPing"][ref_df.columns]
-
-        ref_df["rtt_events"] = 0
-        if "filtered_rtt_events" in ref_df.columns:
-            ref_df["filtered_rtt_events"] = 0
-        if "all_events" in ref_df.columns:
-            ref_df["all_events"] = 0
-
-        per_pping_dict["baseline"] = ref_df
-
-    return util.pergroup_dict_to_df(per_pping_dict, "pping_setup")
-
-
 def flatten_per_flow_dict(per_flow_dict,
                           flatten_inner_func=flatten_per_pping_dict):
     flat_flow_dict = dict()
@@ -402,10 +395,7 @@ def merge_all_data(data, **kwargs):
             continue
 
         if not isinstance(data[data_type], pd.DataFrame):
-            flat_func = (flatten_per_pping_reports_dict if data_type == "pping"
-                         else flatten_per_pping_dict)
-            df = flatten_per_flow_dict(data[data_type],
-                                       flatten_inner_func=flat_func)
+            df = flatten_per_flow_dict(data[data_type])
         else:
             df = data[data_type]
 
