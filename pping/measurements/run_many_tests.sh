@@ -11,11 +11,16 @@ export OMIT
 export INTERTEST_INTERVAL
 export MPLBACKEND=agg
 
+ADD_DATETIME_SUBPATH=${ADD_DATETIME_SUBPATH:-true}
+
 # $1 = path to save results in
 # $2 = number of times to repeat the tests
 
-currtime=$(date +%Y-%m-%dT%H%M%S)
-basepath=${1}/${currtime}
+basepath=$1
+if [[ "$ADD_DATETIME_SUBPATH" == true ]]; then
+   currtime=$(date +%Y-%m-%dT%H%M%S)
+   basepath=${basepath}/${currtime}
+fi
 
 for (( i = 1; i <= $2; i++ )); do
     echo -e "\n\nStarting run $i \n\n"
