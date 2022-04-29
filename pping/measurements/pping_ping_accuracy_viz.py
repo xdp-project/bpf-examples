@@ -13,6 +13,8 @@ import os
 import util
 import common_plotting as complot
 
+unit_conversion = {"s": 1.0, "ms": 1e3, "us": 1e6, "ns": 1e9}
+
 
 def parse_epping_rtts(filename):
     data = list()
@@ -127,19 +129,31 @@ def get_file_with_unknown_suffix(folder, filename):
     return files[0] if len(files) > 0 else None
 
 
-def plot_rtt_dist(data, axes=None):
+def plot_rtt_dist(data, axes=None, unit="s", print_stats=True, stat_kwargs=None,
+                  **kwargs):
     if axes is None:
         fig, axes = plt.subplots(figsize=(8, 5))
 
-    complot.plot_pergroup_histogram(data, col="rtt", axes=axes,
-                                    print_stats=True,
-                                    stat_kwargs={"fmt": "{:.4e}"})
-    axes.set_xlabel("RTT (s)")
+    data_conv = dict()
+    for key, df in data.items():
+        df = df.copy()
+        df["rtt"] = df["rtt"] * unit_conversion[unit]
+        data_conv[key] = df
+
+    table_kwargs = {"fmt": "{:.4e}"}
+    if stat_kwargs is not None:
+        table_kwargs.update(stat_kwargs)
+
+    complot.plot_pergroup_histogram(data_conv, col="rtt", axes=axes,
+                                    print_stats=print_stats,
+                                    stat_kwargs=table_kwargs, **kwargs)
+    axes.set_xlabel("RTT ({})".format(unit))
 
     return axes
 
 
-def plot_rtt_diff(data, axes=None):
+def plot_rtt_diff(data, axes=None, group_on_prec=False, unit="s",
+                  print_stats=True, stat_kwargs=None, **kwargs):
     if "ping" not in data and "ePPing" not in data:
         raise ValueError("Need both ping and ePPing data to cal")
 
@@ -148,49 +162,86 @@ def plot_rtt_diff(data, axes=None):
 
     diff = data["ping"][["rtt", "rtt_prec"]].copy()
     diff["rtt"] = diff["rtt"] - data["ePPing"]["rtt"]
+    diff["rtt"] = diff["rtt"] * unit_conversion[unit]
 
-    diff_levels = {"overall_diff": diff}
-    #if diff["rtt_prec"].nunique() > 1:
-    for prec_level, prec_data in diff.groupby("rtt_prec"):
-        diff_levels["prec_" + str(prec_level)] = prec_data
+    diff_groups = {"Difference": diff}
+    if group_on_prec:
+        for prec_level, prec_data in diff.groupby("rtt_prec"):
+            diff_groups["precision=" + str(prec_level)] = prec_data
 
     if axes is None:
         fig, axes = plt.subplots(figsize=(8, 5))
 
-    complot.plot_pergroup_histogram(diff_levels, col="rtt", axes=axes,
-                                    print_stats=True, stat_kwargs={"fmt": "{:.4e}"})
-    axes.set_xlabel("RTT-difference (s)")
+    table_kwargs = {"fmt": "{:.4e}"}
+    if stat_kwargs is not None:
+        table_kwargs.update(stat_kwargs)
+
+    complot.plot_pergroup_histogram(diff_groups, col="rtt", axes=axes,
+                                    print_stats=print_stats,
+                                    stat_kwargs=table_kwargs, **kwargs)
+    axes.set_xlabel("RTT-difference ({})".format(unit))
 
     return axes
 
 
-def plot_rtt_timeseries(data, normalize_timestamps=True, axes=None):
+def plot_rtt_timeseries(data, normalize_timestamps=True, axes=None,
+                        timestamp_type="time", max_length=100, unit="s",
+                        print_stats=True, stat_kwargs=None,
+                        print_correlation=True, alpha=0.5, **kwargs):
     data_to_use = dict()
-    for key, val in data.items():
-        if np.issubdtype(val["timestamp"].dtype, np.datetime64):
-            data_to_use[key] = val.copy()
+    if timestamp_type == "time":
+        data_to_use = {key: df.copy() for key, df in data.items()
+                       if np.issubdtype(df["timestamp"].dtype, np.datetime64)}
+        if normalize_timestamps:
+            time_ref = min(df["timestamp"].min() for df in data_to_use.values())
+            for df in data_to_use.values():
+                df["timestamp"] = util.normalize_timestamps(df["timestamp"],
+                                                            time_ref)
+    elif timestamp_type == "order":
+        lens = [len(df) for df in data.values()]
+        if not all(l == min(lens) for l in lens):
+            print("Warning: Different size on ping data, plotting on order may be misleading",
+                  file=sys.stderr)
+        for key, df in data.items():
+            df = df.copy()
+            df["timestamp"] = np.arange(len(df))
+            data_to_use[key] = df
+    else:
+        raise ValueError("timestamp type must be 'time' or 'order'")
+
+    for key, df in data_to_use.items():
+        df["rtt"] = df["rtt"] * unit_conversion[unit]
+        if max_length is not None:
+            data_to_use[key] = df.iloc[:max_length]
 
     if axes is None:
         _, axes = plt.subplots(figsize=(8, 5))
 
     if len(data_to_use) < 0:
-        axes.text(0.5, 0.5, "No time data", va="center", ha="center", fontsize=20,
-                  color="red", transform=axes.transAxes)
+        axes.text(0.5, 0.5, "No data", va="center", ha="center",
+                  fontsize=20, color="red", transform=axes.transAxes)
         return axes
 
-    if normalize_timestamps:
-        t_min = min([d["timestamp"].min() for d in data_to_use.values()])
-        for d in data_to_use.values():
-            d["timestamp"] = (d["timestamp"] - t_min) / np.timedelta64(1, "s")
+    table_kwargs = {"fmt": "{:.4e}"}
+    if stat_kwargs is not None:
+        table_kwargs.update(stat_kwargs)
 
-    complot.plot_pergroup_timeseries(data_to_use, "rtt", print_stats=True,
-                                     stat_kwargs={"fmt": "{:.4e}"}, alpha=0.5)
+    complot.plot_pergroup_timeseries(data_to_use, "rtt", print_stats=print_stats,
+                                     stat_kwargs=table_kwargs, alpha=alpha,
+                                     **kwargs)
 
-    rtts = [d["rtt"] for d in data_to_use.values()]
-    if len(rtts) == 2 and len(rtts[0]) == len(rtts[1]) and len(rtts[0] > 1):
-        r = stats.pearsonr(rtts[0], rtts[1])[0]
-        axes.text(0.99, 0.01, "r={:.3f}".format(r), va="bottom", ha="right",
-                  transform=axes.transAxes)
+    axes.set_ylabel("RTT ({})".format(unit))
+    if timestamp_type == "time":
+        axes.set_xlabel("Time (s)" if normalize_timestamps else "Time")
+    else:
+        axes.set_xlabel("Pings")
+
+    if print_correlation:
+        rtts = [d["rtt"] for d in data_to_use.values()]
+        if len(rtts) == 2 and len(rtts[0]) == len(rtts[1]) and len(rtts[0] > 1):
+            r = stats.pearsonr(rtts[0], rtts[1])[0]
+            axes.text(0.99, 0.01, "r={:.3f}".format(r), va="bottom", ha="right",
+                      transform=axes.transAxes)
 
     return axes
 
@@ -211,13 +262,15 @@ def main():
     fig.savefig(os.path.join(args.input, "RTT_distribution.png"),
                 bbox_inches="tight")
 
-    fig = plot_rtt_diff(data).get_figure()
-    fig.savefig(os.path.join(args.input, "RTT_difference.png"),
-                bbox_inches="tight")
-
     fig = plot_rtt_timeseries(data).get_figure()
     fig.savefig(os.path.join(args.input, "RTT_timeseries.png"),
                 bbox_inches="tight")
+    try:
+        fig = plot_rtt_diff(data).get_figure()
+        fig.savefig(os.path.join(args.input, "RTT_difference.png"),
+                    bbox_inches="tight")
+    except ValueError as err:
+        print("Warning: Failed plotting RTT-diff: {}".format(err))
 
     return
 
