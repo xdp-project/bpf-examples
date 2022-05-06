@@ -185,7 +185,7 @@ def plot_rtt_diff(data, axes=None, group_on_prec=False, unit="s",
 
 
 def plot_rtt_timeseries(data, normalize_timestamps=True, axes=None,
-                        timestamp_type="time", max_length=100, unit="s",
+                        timestamp_type="order", max_length=200, unit="s",
                         print_stats=True, stat_kwargs=None,
                         print_correlation=True, alpha=0.5, **kwargs):
     data_to_use = dict()
