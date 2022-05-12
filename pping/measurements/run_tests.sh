@@ -24,6 +24,9 @@ EPPING_FLAGS=${EPPING_FLAGS:-"-r 0 -I xdp -f"}
 RUN_BASELINE=${RUN_BASELINE:-true}
 RUN_KPPING=${RUN_KPPING:-true}
 RUN_EPPING=${RUN_EPPING:-true}
+
+END_WITH_DELAYED_PING=${END_WITH_DELAYED_PING:-false}
+
 INTERTEST_INTERVAL=${INTERTEST_INTERVAL:-10} #sec
 
 export MPLBACKEND=agg
@@ -119,6 +122,10 @@ run_iperf3_clients() {
     CMD=${CMD%' & '}
     CMD+="; echo "\""End: \$(TZ=UTC date -Iseconds)"\"" >> ${1}/test_interval.log"
 
+    if [[ "$END_WITH_DELAYED_PING" == true ]]; then
+	CMD+="; sleep 1; sudo nping --tcp-connect -c 1 $IP_TARGET > /dev/null"
+    fi
+
     ssh $M1 "$CMD"
 }
 
@@ -166,6 +173,8 @@ run_test() {
     start_system_monitoring $1
 
     run_iperf3_clients $1 $2
+
+    sleep 1
 
     stop_system_monitoring
     stop_iperf3_servers
