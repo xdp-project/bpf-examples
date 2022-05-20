@@ -1,0 +1,23 @@
+* Packet loop filter
+
+This example shows how to filter looping packets, for example when two bond
+interfaces are attached to a switch that loops packets back through the other
+bond interface. It works by attaching ingress and egress TC filters to one or
+more interfaces, and keeping track of the source VLAN+MAC on every packet going
+out any of the included interfaces. If a packet comes back in with a source
+MAC+VLAN that was already seen on egress, that packet is simply dropped (subject
+to a 10-second expiry time).
+
+To load, simply execute the userspace binary with all interface names to load
+the filter to; all interfaces loaded this way will share the same map, so the
+filter will work across all of them. For instance, if a bond interface is using
+underlying veth0 and veth1, execute =./pkt-loop-filter veth0 veth1= to enable
+the filter on packets looping through the two.
+
+To unload, add the =--unload= parameter to the userspace utility. Note that the
+same set of interfaces should be supplied on load and unload; the tool doesn't
+check for this so if it's not, the unload will only be partial.
+
+The BPF programs will record which interface a given source MAC+VLAN was last
+seen on, as well as the number of packets dropped for that MAC+VLAN. These
+statistics are kept in the BPF map and can be dumped using =bpftool=.
