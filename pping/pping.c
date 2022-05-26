@@ -19,6 +19,7 @@ static const char *__doc__ =
 #include <sys/resource.h> // For setting rlmit
 #include <time.h>
 #include <pthread.h>
+#include <xdp/libxdp.h>
 
 #include "json_writer.h"
 #include "pping.h" //common structs for user-space and BPF parts
@@ -74,8 +75,8 @@ struct pping_config {
 	char *packet_map;
 	char *flow_map;
 	char *event_map;
-	int xdp_flags;
 	int ifindex;
+	struct xdp_program *xdp_prog;
 	int ingress_prog_id;
 	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
@@ -258,7 +259,6 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 'f':
 			config->force = true;
-			config->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
 			break;
 		case 'T':
 			config->bpf_config.track_tcp = true;
@@ -339,51 +339,35 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
  * On failure, will return a negative error code.
  */
 static int xdp_attach(struct bpf_object *obj, const char *prog_name,
-		      int ifindex, __u32 xdp_flags)
+		      int ifindex, struct xdp_program **xdp_prog)
 {
-	struct bpf_program *prog;
-	int prog_fd, err;
-	__u32 prog_id;
+	struct xdp_program *prog;
+	int err;
+	DECLARE_LIBXDP_OPTS(xdp_program_opts, opts,
+			    .prog_name = prog_name,
+			    .obj = obj);
 
-	if (prog_name)
-		prog = bpf_object__find_program_by_name(obj, prog_name);
-	else
-		prog = bpf_object__next_program(obj, NULL);
+	prog = xdp_program__create(&opts);
+	if (!prog)
+		return -errno;
 
-	prog_fd = bpf_program__fd(prog);
-	if (prog_fd < 0)
-		return prog_fd;
-
-	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
-	if (err)
-		return err;
-
-	err = bpf_get_link_xdp_id(ifindex, &prog_id, xdp_flags);
+	err = xdp_program__attach(prog, ifindex, XDP_MODE_UNSPEC, 0);
 	if (err) {
-		bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+		xdp_program__close(prog);
 		return err;
 	}
 
-	return prog_id;
+	*xdp_prog = prog;
+	return 0;
 }
 
-static int xdp_detach(int ifindex, __u32 xdp_flags, __u32 expected_prog_id)
+static int xdp_detach(struct xdp_program *prog, int ifindex)
 {
-	__u32 curr_prog_id;
 	int err;
 
-	err = bpf_get_link_xdp_id(ifindex, &curr_prog_id, xdp_flags);
-	if (err)
-		return err;
-
-	if (!curr_prog_id) {
-		return 0; // No current prog on interface
-	}
-
-	if (expected_prog_id && curr_prog_id != expected_prog_id)
-		return -ENOENT;
-
-	return bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+	err = xdp_program__detach(prog, ifindex, XDP_MODE_UNSPEC, 0);
+	xdp_program__close(prog);
+	return err;
 }
 
 /*
@@ -871,26 +855,6 @@ static int set_programs_to_load(struct bpf_object *obj,
 	return bpf_program__set_autoload(prog, false);
 }
 
-/*
- * Print out some hints for what might have caused an error while attempting
- * to attach an XDP program. Based on xdp_link_attach() in
- * xdp-tutorial/common/common_user_bpf_xdp.c
- */
-static void print_xdp_error_hints(FILE *stream, int err)
-{
-	err = err > 0 ? err : -err;
-	switch (err) {
-	case EBUSY:
-	case EEXIST:
-		fprintf(stream, "Hint: XDP already loaded on device"
-				" use --force to swap/replace\n");
-		break;
-	case EOPNOTSUPP:
-		fprintf(stream, "Hint: Native-XDP not supported\n");
-		break;
-	}
-}
-
 static int load_attach_bpfprogs(struct bpf_object **obj,
 				struct pping_config *config)
 {
@@ -914,10 +878,28 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	}
 
 	set_programs_to_load(*obj, config);
-	err = bpf_object__load(*obj);
-	if (err) {
-		fprintf(stderr, "Failed loading bpf programs in %s: %s\n",
-			config->object_path, get_libbpf_strerror(err));
+
+	// Attach ingress prog
+	if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0) {
+		/* xdp_attach() loads 'obj' through libxdp */
+		err = xdp_attach(*obj, config->ingress_prog, config->ifindex,
+				 &config->xdp_prog);
+	} else {
+		err = bpf_object__load(*obj);
+		if (err) {
+			fprintf(stderr, "Failed loading bpf programs in %s: %s\n",
+				config->object_path, get_libbpf_strerror(err));
+			return err;
+		}
+		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
+				config->ingress_prog,
+				&config->tc_ingress_opts, NULL);
+		config->ingress_prog_id = err;
+	}
+	if (err < 0) {
+		fprintf(stderr,
+			"Failed attaching ingress BPF program on interface %s: %s\n",
+			config->ifname, get_libbpf_strerror(err));
 		return err;
 	}
 
@@ -931,37 +913,24 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 			"Failed attaching egress BPF program on interface %s: %s\n",
 			config->ifname,
 			get_libbpf_strerror(config->egress_prog_id));
-		return config->egress_prog_id;
+		err = config->egress_prog_id;
+		goto egress_err;
 	}
 
-	// Attach ingress prog
-	if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0)
-		config->ingress_prog_id =
-			xdp_attach(*obj, config->ingress_prog, config->ifindex,
-				   config->xdp_flags);
-	else
-		config->ingress_prog_id =
-			tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
-				  config->ingress_prog,
-				  &config->tc_ingress_opts, NULL);
-	if (config->ingress_prog_id < 0) {
-		fprintf(stderr,
-			"Failed attaching ingress BPF program on interface %s: %s\n",
-			config->ifname, get_libbpf_strerror(err));
-		err = config->ingress_prog_id;
-		if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0)
-			print_xdp_error_hints(stderr, err);
-		goto ingress_err;
-	}
 
 	return 0;
 
-ingress_err:
-	detach_err =
-		tc_detach(config->ifindex, BPF_TC_EGRESS,
-			  &config->tc_egress_opts, config->created_tc_hook);
+egress_err:
+	if (config->xdp_prog) {
+		detach_err = xdp_detach(config->xdp_prog, config->ifindex);
+		config->xdp_prog = NULL;
+	} else {
+		detach_err =
+			tc_detach(config->ifindex, BPF_TC_INGRESS,
+				  &config->tc_ingress_opts, config->created_tc_hook);
+	}
 	if (detach_err)
-		fprintf(stderr, "Failed detaching tc program from %s: %s\n",
+		fprintf(stderr, "Failed detaching ingress program from %s: %s\n",
 			config->ifname, get_libbpf_strerror(detach_err));
 	return err;
 }
@@ -1042,7 +1011,6 @@ int main(int argc, char *argv[])
 		.packet_map = "packet_ts",
 		.flow_map = "flow_state",
 		.event_map = "events",
-		.xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST,
 		.tc_ingress_opts = tc_ingress_opts,
 		.tc_egress_opts = tc_egress_opts,
 		.output_format = PPING_OUTPUT_STANDARD,
@@ -1154,9 +1122,8 @@ cleanup_perf_buffer:
 	perf_buffer__free(pb);
 
 cleanup_attached_progs:
-	if (strcmp(config.ingress_prog, "pping_xdp_ingress") == 0)
-		detach_err = xdp_detach(config.ifindex, config.xdp_flags,
-					config.ingress_prog_id);
+	if (config.xdp_prog)
+		detach_err = xdp_detach(config.xdp_prog, config.ifindex);
 	else
 		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
 				       &config.tc_ingress_opts, false);
