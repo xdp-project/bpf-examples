@@ -74,8 +74,6 @@ struct parsing_context {
 	void *data_end;        // End of safe acessible area
 	struct hdr_cursor nh;  // Position to parse next
 	__u32 pkt_len;         // Full packet length (headers+data)
-	__u32 ingress_ifindex; // Interface packet arrived on
-	bool is_egress;        // Is packet on egress or ingress?
 };
 
 /*
@@ -103,6 +101,8 @@ struct packet_info {
 	__u32 payload;               // Size of packet data (excluding headers)
 	struct packet_id pid;        // flow + identifier to timestamp (ex. TSval)
 	struct packet_id reply_pid;  // rev. flow + identifier to match against (ex. TSecr)
+	__u32 ingress_ifindex;       // Interface packet arrived on (if is_ingress, otherwise not valid)
+	bool is_ingress;             // Packet on egress or ingress?
 	bool pid_flow_is_dfkey;      // Used to determine which member of dualflow state to use for forward direction
 	bool pid_valid;              // identifier can be used to timestamp packet
 	bool reply_pid_valid;        // reply_identifier can be used to match packet
@@ -798,14 +798,13 @@ static void close_and_delete_flows(void *ctx, struct packet_info *p_info,
  * samples/bpf/xdp_fwd_kern.c/xdp_fwd_flags() and
  * tools/testing/selftests/bpf/progs/test_tc_neigh_fib.c
  */
-static bool is_local_address(struct packet_info *p_info, void *ctx,
-			     struct parsing_context *pctx)
+static bool is_local_address(struct packet_info *p_info, void *ctx)
 {
 	int ret;
 	struct bpf_fib_lookup lookup;
 	__builtin_memset(&lookup, 0, sizeof(lookup));
 
-	lookup.ifindex = pctx->ingress_ifindex;
+	lookup.ifindex = p_info->ingress_ifindex;
 	lookup.family = p_info->pid.flow.ipv;
 
 	if (lookup.family == AF_INET) {
@@ -837,14 +836,13 @@ static bool is_local_address(struct packet_info *p_info, void *ctx,
  * Attempt to create a timestamp-entry for packet p_info for flow in f_state
  */
 static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
-				   struct parsing_context *pctx,
 				   struct packet_info *p_info, bool new_flow)
 {
 	if (!is_flowstate_active(f_state) || !p_info->pid_valid)
 		return;
 
-	if (config.localfilt && !pctx->is_egress &&
-	    is_local_address(p_info, ctx, pctx))
+	if (config.localfilt && p_info->is_ingress &&
+	    is_local_address(p_info, ctx))
 		return;
 
 	// Check if identfier is new
@@ -877,7 +875,6 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
  * Attempt to match packet in p_info with a timestamp from flow in f_state
  */
 static void pping_match_packet(struct flow_state *f_state, void *ctx,
-			       struct parsing_context *pctx,
 			       struct packet_info *p_info)
 {
 	struct rtt_event re = { 0 };
@@ -914,7 +911,7 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	re.rec_pkts = f_state->rec_pkts;
 	re.rec_bytes = f_state->rec_bytes;
 	re.flow = p_info->pid.flow;
-	re.match_on_egress = pctx->is_egress;
+	re.match_on_egress = !p_info->is_ingress;
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
 }
 
@@ -922,7 +919,8 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
  * Will parse the ingress/egress packet in pctx and attempt to create a
  * timestamp for it and match it against the reverse flow.
  */
-static void pping(void *ctx, struct parsing_context *pctx)
+static void pping(void *ctx, struct parsing_context *pctx, bool is_ingress,
+		  __u32 ingress_ifindex)
 {
 	struct packet_info p_info = { 0 };
 	struct dual_flow_state *df_state;
@@ -932,17 +930,20 @@ static void pping(void *ctx, struct parsing_context *pctx)
 	if (parse_packet_identifier(pctx, &p_info) < 0)
 		return;
 
+	p_info.is_ingress = is_ingress;
+	p_info.ingress_ifindex = is_ingress ? ingress_ifindex : 0;
+
 	df_state = lookup_or_create_dualflow_state(ctx, &p_info, &new_flow);
 	if (!df_state)
 		return;
 
 	fw_flow = get_flowstate_from_packet(df_state, &p_info);
 	update_forward_flowstate(&p_info, fw_flow, &new_flow);
-	pping_timestamp_packet(fw_flow, ctx, pctx, &p_info, new_flow);
+	pping_timestamp_packet(fw_flow, ctx, &p_info, new_flow);
 
 	rev_flow = get_reverse_flowstate_from_packet(df_state, &p_info);
 	update_reverse_flowstate(ctx, &p_info, rev_flow);
-	pping_match_packet(rev_flow, ctx, pctx, &p_info);
+	pping_match_packet(rev_flow, ctx, &p_info);
 
 	close_and_delete_flows(ctx, &p_info, fw_flow, rev_flow);
 }
@@ -998,10 +999,9 @@ int pping_tc_egress(struct __sk_buff *skb)
 		.data_end = (void *)(long)skb->data_end,
 		.pkt_len = skb->len,
 		.nh = { .pos = pctx.data },
-		.is_egress = true,
 	};
 
-	pping(skb, &pctx);
+	pping(skb, &pctx, false, 0);
 
 	return TC_ACT_UNSPEC;
 }
@@ -1015,11 +1015,9 @@ int pping_tc_ingress(struct __sk_buff *skb)
 		.data_end = (void *)(long)skb->data_end,
 		.pkt_len = skb->len,
 		.nh = { .pos = pctx.data },
-		.ingress_ifindex = skb->ingress_ifindex,
-		.is_egress = false,
 	};
 
-	pping(skb, &pctx);
+	pping(skb, &pctx, true, skb->ingress_ifindex);
 
 	return TC_ACT_UNSPEC;
 }
@@ -1033,11 +1031,9 @@ int pping_xdp_ingress(struct xdp_md *ctx)
 		.data_end = (void *)(long)ctx->data_end,
 		.pkt_len = pctx.data_end - pctx.data,
 		.nh = { .pos = pctx.data },
-		.ingress_ifindex = ctx->ingress_ifindex,
-		.is_egress = false,
 	};
 
-	pping(ctx, &pctx);
+	pping(ctx, &pctx, true, ctx->ingress_ifindex);
 
 	return XDP_PASS;
 }
