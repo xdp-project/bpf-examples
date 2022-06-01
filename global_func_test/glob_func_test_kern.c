@@ -23,6 +23,11 @@ struct packet_data {
 	__u16 icmp_seq;
 };
 
+struct int_operators {
+	int a;
+	int b;
+};
+
 char _license[] SEC("license") = "GPL";
 
 
@@ -79,6 +84,19 @@ int parse_packet(struct xdp_md *ctx, struct packet_data *pd)
 	return 0;
 }
 
+/*
+ * Simple dummy function that is always global (regardless of USE_GLOBAL_FUNC),
+ * that demonstrates that global functions work perfectly fine with pointers to
+ * structs on the stack (PTR_TO_STACK).
+ */
+__attribute__((noinline))
+int add_operators(struct int_operators *ab)
+{
+	if (!ab)
+		return 0;
+	return ab->a + ab->b;
+}
+
 // Ingress path using XDP
 SEC("xdp")
 int xdp_glob_func_test(struct xdp_md *ctx)
@@ -97,8 +115,16 @@ int xdp_glob_func_test(struct xdp_md *ctx)
 	err = parse_packet(ctx, &pd);
 #endif
 
-	if (!err)
-		bpf_printk("ICMP seq = %u", pd.icmp_seq);
+	if (err)
+		goto out;
 
+	bpf_printk("ICMP seq = %u", pd.icmp_seq);
+
+	struct int_operators ab = { .a = pd.icmp_seq % 2,
+				    .b = pd.icmp_seq % 3 + 1 };
+
+	bpf_printk("%d + %d = %d", ab.a, ab.b, add_operators(&ab));
+
+out:
 	return XDP_PASS;
 }
