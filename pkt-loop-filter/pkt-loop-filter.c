@@ -11,15 +11,15 @@
 
 #include <bpf/libbpf.h>
 
+#include "pkt-loop-filter.kern.skel.h"
+
 #define MAX_IFINDEXES 10
 
 int main(int argc, char *argv[])
 {
 	int err = 0, i, num_ifindexes = 0, _err, ingress_fd, egress_fd;
-	const char *filename = "pkt-loop-filter.kern.o";
+	struct pkt_loop_filter_kern *skel = NULL;
 	struct bpf_link *trace_link = NULL;
-	struct bpf_program *trace_prog;
-	struct bpf_object *obj = NULL;
 	int ifindex[MAX_IFINDEXES];
 	bool unload = false;
 	char pin_path[100];
@@ -60,36 +60,29 @@ int main(int argc, char *argv[])
 	if (unload)
 		goto unload;
 
-	obj = bpf_object__open(filename);
-	err = libbpf_get_error(obj);
+	skel = pkt_loop_filter_kern__open();
+	err = libbpf_get_error(skel);
 	if (err) {
-		fprintf(stderr, "Couldn't open file: %s\n", filename);
+		fprintf(stderr, "Couldn't open BPF skeleton: %s\n", strerror(errno));
 		return err;
 	}
 
-	err = bpf_object__load(obj);
+	err = pkt_loop_filter_kern__load(skel);
 	if (err) {
 		fprintf(stderr, "Failed to load object\n");
 		goto out;
 	}
 
-	egress_fd = bpf_program__fd(bpf_object__find_program_by_name(obj, "record_egress_pkt"));
+	egress_fd = bpf_program__fd(skel->progs.record_egress_pkt);
 	if (egress_fd < 0) {
 		fprintf(stderr, "Couldn't find program 'record_egress_pkt'\n");
 		err = -ENOENT;
 		goto out;
 	}
 
-	ingress_fd = bpf_program__fd(bpf_object__find_program_by_name(obj, "filter_ingress_pkt"));
+	ingress_fd = bpf_program__fd(skel->progs.filter_ingress_pkt);
 	if (ingress_fd < 0) {
 		fprintf(stderr, "Couldn't find program 'filter_ingress_pkt'\n");
-		err = -ENOENT;
-		goto out;
-	}
-
-	trace_prog = bpf_object__find_program_by_name(obj, "handle_device_notify");
-	if (!trace_prog) {
-		fprintf(stderr, "Couldn't find program 'handle_device_notify'\n");
 		err = -ENOENT;
 		goto out;
 	}
@@ -130,13 +123,12 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	trace_link = bpf_program__attach(trace_prog);
+	trace_link = bpf_program__attach(skel->progs.handle_device_notify);
 	if (!trace_link) {
 		fprintf(stderr, "Couldn't attach tracing prog: %s\n", strerror(errno));
 		err = -EFAULT;
 		goto unload;
 	}
-
 
 	err = bpf_link__pin(trace_link, pin_path);
 	if (err) {
@@ -146,7 +138,7 @@ int main(int argc, char *argv[])
 
 out:
 	bpf_link__destroy(trace_link);
-	bpf_object__close(obj);
+	pkt_loop_filter_kern__destroy(skel);
 	return err;
 
 unload:

@@ -2,6 +2,7 @@
 
 USER_TARGETS    += pkt-loop-filter
 BPF_TARGETS    += pkt-loop-filter.kern
+BPF_SKEL_OBJ := pkt-loop-filter.kern.o
 EXTRA_DEPS := pkt-loop-filter.h
 
 LIB_DIR = ../lib
