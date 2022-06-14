@@ -1,6 +1,8 @@
 #ifndef __PKT_LOOP_FILTER_H__
 #define __PKT_LOOP_FILTER_H__
 
+#define MAX_IFINDEXES 10
+
 #define NS_PER_SEC 1000000000ULL
 #define STATE_LIFETIME (10 * NS_PER_SEC)
 

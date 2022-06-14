@@ -11,9 +11,8 @@
 
 #include <bpf/libbpf.h>
 
+#include "pkt-loop-filter.h"
 #include "pkt-loop-filter.kern.skel.h"
-
-#define MAX_IFINDEXES 10
 
 int main(int argc, char *argv[])
 {
@@ -66,6 +65,12 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Couldn't open BPF skeleton: %s\n", strerror(errno));
 		return err;
 	}
+
+	/* Propagate active ifindexes to the BPF program global variables so the
+	 * BPF program can use it to filter multicast traffic
+	 */
+	for (i = 0; i < num_ifindexes; i++)
+		skel->bss->active_ifindexes[i] = ifindex[i];
 
 	err = pkt_loop_filter_kern__load(skel);
 	if (err) {

@@ -30,6 +30,9 @@ struct netdev_notifier_info {
 /* cookie for init ns; hoping this is stable */
 #define INIT_NS 1
 
+#define PKT_TYPE_UNICAST 1
+#define PKT_TYPE_MULTICAST 2
+
 /* We use an LRU map to avoid having to do cleanup: We just rely on the LRU
  * mechanism to evict old entries as the map fills up.
  */
@@ -40,8 +43,31 @@ struct {
 	__uint(max_entries, 16384);
 } iface_state SEC(".maps");
 
+int active_ifindexes[MAX_IFINDEXES] = {};
+unsigned int current_ifindex = 0;
+
+static int ethaddr_equal(__u8 *a, __u8 *b)
+{
+	int i;
+
+	for (i = 0; i < ETH_ALEN; i++)
+		if (a[i] != b[i])
+			return 0;
+	return 1;
+}
+
+static int get_current_ifindex(void)
+{
+	/* bounds check to placate the verifier */
+	if (current_ifindex > MAX_IFINDEXES)
+		return 0;
+
+	return active_ifindexes[current_ifindex];
+}
+
 static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 {
+	static __u8 mcast_addr[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
 	struct hdr_cursor nh = { .pos = data };
@@ -56,7 +82,7 @@ static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 	__builtin_memcpy(key->src_mac, eth->h_source, ETH_ALEN);
 	key->src_vlan = skb->vlan_tci;
 
-	return 0;
+	return ethaddr_equal(eth->h_dest, mcast_addr) ? PKT_TYPE_MULTICAST : PKT_TYPE_UNICAST;
 }
 
 SEC("tc")
@@ -64,10 +90,10 @@ int record_egress_pkt(struct __sk_buff *skb)
 {
 	struct pkt_loop_data value = { .ifindex = skb->ifindex }, *v;
 	struct pkt_loop_key key;
-	int err;
+	int pkt_type;
 
-	err = parse_pkt(skb, &key);
-	if (err)
+	pkt_type = parse_pkt(skb, &key);
+	if (pkt_type < 0)
 		goto out;
 
 	v = bpf_map_lookup_elem(&iface_state, &key);
@@ -88,10 +114,10 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 {
 	struct pkt_loop_data *value;
 	struct pkt_loop_key key;
-	int err;
+	int pkt_type;
 
-	err = parse_pkt(skb, &key);
-	if (err)
+	pkt_type = parse_pkt(skb, &key);
+	if (pkt_type < 0)
 		goto out;
 
 	value = bpf_map_lookup_elem(&iface_state, &key);
@@ -99,6 +125,11 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 		value->drops++;
 		return TC_ACT_SHOT;
 	}
+
+	/* Only allow multicast pkts on the currently active interface */
+	if (pkt_type == PKT_TYPE_MULTICAST &&
+	    skb->ifindex != get_current_ifindex())
+		return TC_ACT_SHOT;
 
 out:
 	return TC_ACT_OK;
@@ -110,8 +141,15 @@ int BPF_KPROBE(handle_device_notify, unsigned long val, struct netdev_notifier_i
 	int ifindex = BPF_CORE_READ(info, dev, ifindex);
 	__u64 cookie = BPF_CORE_READ(info, dev, nd_net.net, net_cookie);
 
-	if (val == NETDEV_GOING_DOWN && ifindex && cookie == INIT_NS)
-		bpf_printk("Device %d going down cookie %llu\n", ifindex, cookie);
+	if (val == NETDEV_GOING_DOWN && cookie == INIT_NS &&
+	    ifindex == get_current_ifindex()) {
+		/* Active interface going down, switch to next one; we currently
+		 * don't check for ifup and switch back
+		 */
+		current_ifindex++;
+		if (current_ifindex > MAX_IFINDEXES || !active_ifindexes[current_ifindex])
+			current_ifindex = 0;
+	}
 
 	return 0;
 }
