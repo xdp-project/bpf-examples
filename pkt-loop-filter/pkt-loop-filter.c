@@ -17,9 +17,12 @@ int main(int argc, char *argv[])
 {
 	int err = 0, i, num_ifindexes = 0, _err, ingress_fd, egress_fd;
 	const char *filename = "pkt-loop-filter.kern.o";
+	struct bpf_link *trace_link = NULL;
+	struct bpf_program *trace_prog;
+	struct bpf_object *obj = NULL;
 	int ifindex[MAX_IFINDEXES];
-	struct bpf_object *obj;
 	bool unload = false;
+	char pin_path[100];
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS);
 
 	if (argc < 2) {
@@ -51,6 +54,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	snprintf(pin_path, sizeof(pin_path), "/sys/fs/bpf/pkt-loop-filter-%d", ifindex[0]);
+	pin_path[sizeof(pin_path) - 1] = '\0';
+
 	if (unload)
 		goto unload;
 
@@ -77,6 +83,13 @@ int main(int argc, char *argv[])
 	ingress_fd = bpf_program__fd(bpf_object__find_program_by_name(obj, "filter_ingress_pkt"));
 	if (ingress_fd < 0) {
 		fprintf(stderr, "Couldn't find program 'filter_ingress_pkt'\n");
+		err = -ENOENT;
+		goto out;
+	}
+
+	trace_prog = bpf_object__find_program_by_name(obj, "handle_device_notify");
+	if (!trace_prog) {
+		fprintf(stderr, "Couldn't find program 'handle_device_notify'\n");
 		err = -ENOENT;
 		goto out;
 	}
@@ -117,8 +130,22 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	trace_link = bpf_program__attach(trace_prog);
+	if (!trace_link) {
+		fprintf(stderr, "Couldn't attach tracing prog: %s\n", strerror(errno));
+		err = -EFAULT;
+		goto unload;
+	}
+
+
+	err = bpf_link__pin(trace_link, pin_path);
+	if (err) {
+		fprintf(stderr, "Couldn't pin bpf_link: %s\n", strerror(errno));
+		goto unload;
+	}
 
 out:
+	bpf_link__destroy(trace_link);
 	bpf_object__close(obj);
 	return err;
 
@@ -136,5 +163,6 @@ unload:
 		}
 
 	}
-	return err;
+	unlink(pin_path);
+	goto out;
 }
