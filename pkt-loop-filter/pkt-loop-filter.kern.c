@@ -40,7 +40,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, struct pkt_loop_key);
 	__type(value, struct pkt_loop_data);
-	__uint(max_entries, 16384);
+	__uint(max_entries, 1); /* set from userspace before load */
 } iface_state SEC(".maps");
 
 int active_ifindexes[MAX_IFINDEXES] = {};

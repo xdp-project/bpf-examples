@@ -66,6 +66,12 @@ int main(int argc, char *argv[])
 		return err;
 	}
 
+	err = bpf_map__set_max_entries(skel->maps.iface_state, 1024);
+	if (err) {
+		fprintf(stderr, "Failed to set map size\n");
+		goto out;
+	}
+
 	/* Propagate active ifindexes to the BPF program global variables so the
 	 * BPF program can use it to filter multicast traffic
 	 */
