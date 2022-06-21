@@ -88,20 +88,16 @@ struct parsing_context {
  * in the packet_ts map.
  */
 struct packet_info {
-	union {
-		struct iphdr *iph;
-		struct ipv6hdr *ip6h;
-	};
-	union {
-		struct icmphdr *icmph;
-		struct icmp6hdr *icmp6h;
-		struct tcphdr *tcph;
-	};
 	__u64 time;                  // Arrival time of packet
 	__u32 payload;               // Size of packet data (excluding headers)
 	struct packet_id pid;        // flow + identifier to timestamp (ex. TSval)
 	struct packet_id reply_pid;  // rev. flow + identifier to match against (ex. TSecr)
 	__u32 ingress_ifindex;       // Interface packet arrived on (if is_ingress, otherwise not valid)
+	union {                      // The IP-level "type of service" (DSCP for IPv4, traffic class + flow label for IPv6)
+		__u8 ipv4_tos;
+		__be32 ipv6_tos;
+	} ip_tos;
+	__u16 ip_len;                // The IPv4 total length or IPv6 payload length
 	bool is_ingress;             // Packet on egress or ingress?
 	bool pid_flow_is_dfkey;      // Used to determine which member of dualflow state to use for forward direction
 	bool pid_valid;              // identifier can be used to timestamp packet
@@ -160,6 +156,11 @@ static void map_ipv4_to_ipv6(struct in6_addr *ipv6, __be32 ipv4)
 	__builtin_memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
 	__builtin_memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
 	ipv6->in6_u.u6_addr32[3] = ipv4;
+}
+
+static __be32 ipv4_from_ipv6(struct in6_addr *ipv6)
+{
+	return ipv6->in6_u.u6_addr32[3];
 }
 
 /*
@@ -473,6 +474,15 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	int proto, err;
 	struct ethhdr *eth;
 	struct protocol_info proto_info;
+	union {
+		struct iphdr *iph;
+		struct ipv6hdr *ip6h;
+	} iph_ptr;
+	union {
+		struct tcphdr *tcph;
+		struct icmphdr *icmph;
+		struct icmp6hdr *icmp6h;
+	} transporth_ptr;
 
 	p_info->time = bpf_ktime_get_ns();
 	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
@@ -481,31 +491,31 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	if (proto == bpf_htons(ETH_P_IP)) {
 		p_info->pid.flow.ipv = AF_INET;
 		p_info->pid.flow.proto =
-			parse_iphdr(&pctx->nh, pctx->data_end, &p_info->iph);
+			parse_iphdr(&pctx->nh, pctx->data_end, &iph_ptr.iph);
 	} else if (proto == bpf_htons(ETH_P_IPV6)) {
 		p_info->pid.flow.ipv = AF_INET6;
 		p_info->pid.flow.proto =
-			parse_ip6hdr(&pctx->nh, pctx->data_end, &p_info->ip6h);
+			parse_ip6hdr(&pctx->nh, pctx->data_end, &iph_ptr.ip6h);
 	} else {
 		return -1;
 	}
 
 	// Parse identifer from suitable protocol
 	if (config.track_tcp && p_info->pid.flow.proto == IPPROTO_TCP)
-		err = parse_tcp_identifier(pctx, &p_info->tcph,
+		err = parse_tcp_identifier(pctx, &transporth_ptr.tcph,
 					   &p_info->pid.flow.saddr.port,
 					   &p_info->pid.flow.daddr.port,
 					   &proto_info);
 	else if (config.track_icmp &&
 		 p_info->pid.flow.proto == IPPROTO_ICMPV6 &&
 		 p_info->pid.flow.ipv == AF_INET6)
-		err = parse_icmp6_identifier(pctx, &p_info->icmp6h,
+		err = parse_icmp6_identifier(pctx, &transporth_ptr.icmp6h,
 					     &p_info->pid.flow.saddr.port,
 					     &p_info->pid.flow.daddr.port,
 					     &proto_info);
 	else if (config.track_icmp && p_info->pid.flow.proto == IPPROTO_ICMP &&
 		 p_info->pid.flow.ipv == AF_INET)
-		err = parse_icmp_identifier(pctx, &p_info->icmph,
+		err = parse_icmp_identifier(pctx, &transporth_ptr.icmph,
 					    &p_info->pid.flow.saddr.port,
 					    &p_info->pid.flow.daddr.port,
 					    &proto_info);
@@ -524,12 +534,17 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 
 	if (p_info->pid.flow.ipv == AF_INET) {
 		map_ipv4_to_ipv6(&p_info->pid.flow.saddr.ip,
-				 p_info->iph->saddr);
+				 iph_ptr.iph->saddr);
 		map_ipv4_to_ipv6(&p_info->pid.flow.daddr.ip,
-				 p_info->iph->daddr);
+				 iph_ptr.iph->daddr);
+		p_info->ip_len = bpf_ntohs(iph_ptr.iph->tot_len);
+		p_info->ip_tos.ipv4_tos = iph_ptr.iph->tos;
 	} else { // IPv6
-		p_info->pid.flow.saddr.ip = p_info->ip6h->saddr;
-		p_info->pid.flow.daddr.ip = p_info->ip6h->daddr;
+		p_info->pid.flow.saddr.ip = iph_ptr.ip6h->saddr;
+		p_info->pid.flow.daddr.ip = iph_ptr.ip6h->daddr;
+		p_info->ip_len = bpf_ntohs(iph_ptr.ip6h->payload_len);
+		p_info->ip_tos.ipv6_tos =
+			*(__be32 *)iph_ptr.ip6h & IPV6_FLOWINFO_MASK;
 	}
 
 	p_info->pid_flow_is_dfkey = is_dualflow_key(&p_info->pid.flow);
@@ -806,19 +821,18 @@ static bool is_local_address(struct packet_info *p_info, void *ctx)
 
 	lookup.ifindex = p_info->ingress_ifindex;
 	lookup.family = p_info->pid.flow.ipv;
+	lookup.tot_len = p_info->ip_len;
 
 	if (lookup.family == AF_INET) {
-		lookup.tos = p_info->iph->tos;
-		lookup.tot_len = bpf_ntohs(p_info->iph->tot_len);
-		lookup.ipv4_src = p_info->iph->saddr;
-		lookup.ipv4_dst = p_info->iph->daddr;
+		lookup.tos = p_info->ip_tos.ipv4_tos;
+		lookup.ipv4_src = ipv4_from_ipv6(&p_info->pid.flow.saddr.ip);
+		lookup.ipv4_dst = ipv4_from_ipv6(&p_info->pid.flow.daddr.ip);
 	} else if (lookup.family == AF_INET6) {
 		struct in6_addr *src = (struct in6_addr *)lookup.ipv6_src;
 		struct in6_addr *dst = (struct in6_addr *)lookup.ipv6_dst;
 
-		lookup.flowinfo = *(__be32 *)p_info->ip6h & IPV6_FLOWINFO_MASK;
-		lookup.tot_len = bpf_ntohs(p_info->ip6h->payload_len);
-		*src = p_info->pid.flow.saddr.ip; //verifier did not like ip6h->saddr
+		lookup.flowinfo = p_info->ip_tos.ipv6_tos;
+		*src = p_info->pid.flow.saddr.ip;
 		*dst = p_info->pid.flow.daddr.ip;
 	}
 
