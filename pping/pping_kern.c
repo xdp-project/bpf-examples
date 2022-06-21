@@ -1177,6 +1177,7 @@ int flowmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 		notify1 = should_notify_closing(f_state1) && timeout1;
 		notify2 = should_notify_closing(f_state2) && timeout2;
 		if (bpf_map_delete_elem(&flow_state, &flow1) == 0) {
+			debug_increment_timeoutdel(PPING_MAP_FLOWSTATE);
 			if (notify1)
 				send_flow_timeout_message(ctx, &flow1, now);
 			if (notify2)
