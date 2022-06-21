@@ -556,6 +556,45 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 }
 
 /*
+ * Global versions of parse_packet_identifer that should allow for
+ * function-by-function verification, and reduce the overall complexity.
+ * Need separate versions for tc and XDP so that verifier understands that the
+ * first argument is PTR_TO_CTX, and therefore their data and data_end pointers
+ * are valid packet pointers.
+ */
+__noinline int parse_packet_identifer_tc(struct __sk_buff *ctx,
+					 struct packet_info *p_info)
+{
+	if (!p_info)
+		return -1;
+
+	struct parsing_context pctx = {
+		.data = (void *)(long)ctx->data,
+		.data_end = (void *)(long)ctx->data_end,
+		.nh = { .pos = pctx.data },
+		.pkt_len = ctx->len,
+	};
+
+	return parse_packet_identifier(&pctx, p_info);
+}
+
+__noinline int parse_packet_identifer_xdp(struct xdp_md *ctx,
+					  struct packet_info *p_info)
+{
+	if (!p_info)
+		return -1;
+
+	struct parsing_context pctx = {
+		.data = (void *)(long)ctx->data,
+		.data_end = (void *)(long)ctx->data_end,
+		.nh = { .pos = pctx.data },
+		.pkt_len = pctx.data_end - pctx.data,
+	};
+
+	return parse_packet_identifier(&pctx, p_info);
+}
+
+/*
  * Calculate a smoothed rtt similar to how TCP stack does it in
  * net/ipv4/tcp_input.c/tcp_rtt_estimator().
  *
@@ -930,36 +969,68 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 }
 
 /*
- * Will parse the ingress/egress packet in pctx and attempt to create a
- * timestamp for it and match it against the reverse flow.
+ * Contains the actual pping logic that is applied after a packet has been
+ * parsed and deemed to contain some valid identifier.
+
+ * Looks up and updates flowstate (in both directions), tries to save a
+ * timestamp of the packet, tries to match packet against previous timestamps,
+ * calculates RTTs and pushes messages to userspace as appropriate.
  */
-static void pping(void *ctx, struct parsing_context *pctx, bool is_ingress,
-		  __u32 ingress_ifindex)
+static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
 {
-	struct packet_info p_info = { 0 };
 	struct dual_flow_state *df_state;
 	struct flow_state *fw_flow, *rev_flow;
 	bool new_flow = false;
 
-	if (parse_packet_identifier(pctx, &p_info) < 0)
-		return;
-
-	p_info.is_ingress = is_ingress;
-	p_info.ingress_ifindex = is_ingress ? ingress_ifindex : 0;
-
-	df_state = lookup_or_create_dualflow_state(ctx, &p_info, &new_flow);
+	df_state = lookup_or_create_dualflow_state(ctx, p_info, &new_flow);
 	if (!df_state)
 		return;
 
-	fw_flow = get_flowstate_from_packet(df_state, &p_info);
-	update_forward_flowstate(&p_info, fw_flow, &new_flow);
-	pping_timestamp_packet(fw_flow, ctx, &p_info, new_flow);
+	fw_flow = get_flowstate_from_packet(df_state, p_info);
+	update_forward_flowstate(p_info, fw_flow, &new_flow);
+	pping_timestamp_packet(fw_flow, ctx, p_info, new_flow);
 
-	rev_flow = get_reverse_flowstate_from_packet(df_state, &p_info);
-	update_reverse_flowstate(ctx, &p_info, rev_flow);
-	pping_match_packet(rev_flow, ctx, &p_info);
+	rev_flow = get_reverse_flowstate_from_packet(df_state, p_info);
+	update_reverse_flowstate(ctx, p_info, rev_flow);
+	pping_match_packet(rev_flow, ctx, p_info);
 
-	close_and_delete_flows(ctx, &p_info, fw_flow, rev_flow);
+	close_and_delete_flows(ctx, p_info, fw_flow, rev_flow);
+}
+
+/*
+ * Main function which contains all the pping logic (parse packet, attempt to
+ * create timestamp for it, try match against previous timestamps, update
+ * flowstate etc.).
+ *
+ * Has a separate tc and xdp version so that verifier sees the global
+ * functions for parsing packets in the right context, but most of the
+ * work is done in common functions (parse_packet_identifier and
+ * pping_parsed_packet)
+ */
+static void pping_tc(struct __sk_buff *ctx, bool is_ingress)
+{
+	struct packet_info p_info = { 0 };
+
+	if (parse_packet_identifer_tc(ctx, &p_info) < 0)
+		return;
+
+	p_info.is_ingress = is_ingress;
+	p_info.ingress_ifindex = is_ingress ? ctx->ingress_ifindex : 0;
+
+	pping_parsed_packet(ctx, &p_info);
+}
+
+static void pping_xdp(struct xdp_md *ctx)
+{
+	struct packet_info p_info = { 0 };
+
+	if (parse_packet_identifer_xdp(ctx, &p_info) < 0)
+		return;
+
+	p_info.is_ingress = true;
+	p_info.ingress_ifindex = ctx->rx_queue_index;
+
+	pping_parsed_packet(ctx, &p_info);
 }
 
 static bool is_flow_old(struct network_tuple *flow, struct flow_state *f_state,
@@ -1008,14 +1079,7 @@ static void send_flow_timeout_message(void *ctx, struct network_tuple *flow,
 SEC("tc")
 int pping_tc_egress(struct __sk_buff *skb)
 {
-	struct parsing_context pctx = {
-		.data = (void *)(long)skb->data,
-		.data_end = (void *)(long)skb->data_end,
-		.pkt_len = skb->len,
-		.nh = { .pos = pctx.data },
-	};
-
-	pping(skb, &pctx, false, 0);
+	pping_tc(skb, false);
 
 	return TC_ACT_UNSPEC;
 }
@@ -1024,14 +1088,7 @@ int pping_tc_egress(struct __sk_buff *skb)
 SEC("tc")
 int pping_tc_ingress(struct __sk_buff *skb)
 {
-	struct parsing_context pctx = {
-		.data = (void *)(long)skb->data,
-		.data_end = (void *)(long)skb->data_end,
-		.pkt_len = skb->len,
-		.nh = { .pos = pctx.data },
-	};
-
-	pping(skb, &pctx, true, skb->ingress_ifindex);
+	pping_tc(skb, true);
 
 	return TC_ACT_UNSPEC;
 }
@@ -1040,14 +1097,7 @@ int pping_tc_ingress(struct __sk_buff *skb)
 SEC("xdp")
 int pping_xdp_ingress(struct xdp_md *ctx)
 {
-	struct parsing_context pctx = {
-		.data = (void *)(long)ctx->data,
-		.data_end = (void *)(long)ctx->data_end,
-		.pkt_len = pctx.data_end - pctx.data,
-		.nh = { .pos = pctx.data },
-	};
-
-	pping(ctx, &pctx, true, ctx->ingress_ifindex);
+	pping_xdp(ctx);
 
 	return XDP_PASS;
 }
