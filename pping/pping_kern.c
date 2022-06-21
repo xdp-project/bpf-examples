@@ -74,8 +74,6 @@ struct parsing_context {
 	void *data_end;        // End of safe acessible area
 	struct hdr_cursor nh;  // Position to parse next
 	__u32 pkt_len;         // Full packet length (headers+data)
-	__u32 ingress_ifindex; // Interface packet arrived on
-	bool is_egress;        // Is packet on egress or ingress?
 };
 
 /*
@@ -90,19 +88,17 @@ struct parsing_context {
  * in the packet_ts map.
  */
 struct packet_info {
-	union {
-		struct iphdr *iph;
-		struct ipv6hdr *ip6h;
-	};
-	union {
-		struct icmphdr *icmph;
-		struct icmp6hdr *icmp6h;
-		struct tcphdr *tcph;
-	};
 	__u64 time;                  // Arrival time of packet
 	__u32 payload;               // Size of packet data (excluding headers)
 	struct packet_id pid;        // flow + identifier to timestamp (ex. TSval)
 	struct packet_id reply_pid;  // rev. flow + identifier to match against (ex. TSecr)
+	__u32 ingress_ifindex;       // Interface packet arrived on (if is_ingress, otherwise not valid)
+	union {                      // The IP-level "type of service" (DSCP for IPv4, traffic class + flow label for IPv6)
+		__u8 ipv4_tos;
+		__be32 ipv6_tos;
+	} ip_tos;
+	__u16 ip_len;                // The IPv4 total length or IPv6 payload length
+	bool is_ingress;             // Packet on egress or ingress?
 	bool pid_flow_is_dfkey;      // Used to determine which member of dualflow state to use for forward direction
 	bool pid_valid;              // identifier can be used to timestamp packet
 	bool reply_pid_valid;        // reply_identifier can be used to match packet
@@ -160,6 +156,11 @@ static void map_ipv4_to_ipv6(struct in6_addr *ipv6, __be32 ipv4)
 	__builtin_memset(&ipv6->in6_u.u6_addr8[0], 0x00, 10);
 	__builtin_memset(&ipv6->in6_u.u6_addr8[10], 0xff, 2);
 	ipv6->in6_u.u6_addr32[3] = ipv4;
+}
+
+static __be32 ipv4_from_ipv6(struct in6_addr *ipv6)
+{
+	return ipv6->in6_u.u6_addr32[3];
 }
 
 /*
@@ -473,6 +474,15 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	int proto, err;
 	struct ethhdr *eth;
 	struct protocol_info proto_info;
+	union {
+		struct iphdr *iph;
+		struct ipv6hdr *ip6h;
+	} iph_ptr;
+	union {
+		struct tcphdr *tcph;
+		struct icmphdr *icmph;
+		struct icmp6hdr *icmp6h;
+	} transporth_ptr;
 
 	p_info->time = bpf_ktime_get_ns();
 	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
@@ -481,31 +491,31 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	if (proto == bpf_htons(ETH_P_IP)) {
 		p_info->pid.flow.ipv = AF_INET;
 		p_info->pid.flow.proto =
-			parse_iphdr(&pctx->nh, pctx->data_end, &p_info->iph);
+			parse_iphdr(&pctx->nh, pctx->data_end, &iph_ptr.iph);
 	} else if (proto == bpf_htons(ETH_P_IPV6)) {
 		p_info->pid.flow.ipv = AF_INET6;
 		p_info->pid.flow.proto =
-			parse_ip6hdr(&pctx->nh, pctx->data_end, &p_info->ip6h);
+			parse_ip6hdr(&pctx->nh, pctx->data_end, &iph_ptr.ip6h);
 	} else {
 		return -1;
 	}
 
 	// Parse identifer from suitable protocol
 	if (config.track_tcp && p_info->pid.flow.proto == IPPROTO_TCP)
-		err = parse_tcp_identifier(pctx, &p_info->tcph,
+		err = parse_tcp_identifier(pctx, &transporth_ptr.tcph,
 					   &p_info->pid.flow.saddr.port,
 					   &p_info->pid.flow.daddr.port,
 					   &proto_info);
 	else if (config.track_icmp &&
 		 p_info->pid.flow.proto == IPPROTO_ICMPV6 &&
 		 p_info->pid.flow.ipv == AF_INET6)
-		err = parse_icmp6_identifier(pctx, &p_info->icmp6h,
+		err = parse_icmp6_identifier(pctx, &transporth_ptr.icmp6h,
 					     &p_info->pid.flow.saddr.port,
 					     &p_info->pid.flow.daddr.port,
 					     &proto_info);
 	else if (config.track_icmp && p_info->pid.flow.proto == IPPROTO_ICMP &&
 		 p_info->pid.flow.ipv == AF_INET)
-		err = parse_icmp_identifier(pctx, &p_info->icmph,
+		err = parse_icmp_identifier(pctx, &transporth_ptr.icmph,
 					    &p_info->pid.flow.saddr.port,
 					    &p_info->pid.flow.daddr.port,
 					    &proto_info);
@@ -524,12 +534,17 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 
 	if (p_info->pid.flow.ipv == AF_INET) {
 		map_ipv4_to_ipv6(&p_info->pid.flow.saddr.ip,
-				 p_info->iph->saddr);
+				 iph_ptr.iph->saddr);
 		map_ipv4_to_ipv6(&p_info->pid.flow.daddr.ip,
-				 p_info->iph->daddr);
+				 iph_ptr.iph->daddr);
+		p_info->ip_len = bpf_ntohs(iph_ptr.iph->tot_len);
+		p_info->ip_tos.ipv4_tos = iph_ptr.iph->tos;
 	} else { // IPv6
-		p_info->pid.flow.saddr.ip = p_info->ip6h->saddr;
-		p_info->pid.flow.daddr.ip = p_info->ip6h->daddr;
+		p_info->pid.flow.saddr.ip = iph_ptr.ip6h->saddr;
+		p_info->pid.flow.daddr.ip = iph_ptr.ip6h->daddr;
+		p_info->ip_len = bpf_ntohs(iph_ptr.ip6h->payload_len);
+		p_info->ip_tos.ipv6_tos =
+			*(__be32 *)iph_ptr.ip6h & IPV6_FLOWINFO_MASK;
 	}
 
 	p_info->pid_flow_is_dfkey = is_dualflow_key(&p_info->pid.flow);
@@ -538,6 +553,45 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	p_info->payload = remaining_pkt_payload(pctx);
 
 	return 0;
+}
+
+/*
+ * Global versions of parse_packet_identifer that should allow for
+ * function-by-function verification, and reduce the overall complexity.
+ * Need separate versions for tc and XDP so that verifier understands that the
+ * first argument is PTR_TO_CTX, and therefore their data and data_end pointers
+ * are valid packet pointers.
+ */
+__noinline int parse_packet_identifer_tc(struct __sk_buff *ctx,
+					 struct packet_info *p_info)
+{
+	if (!p_info)
+		return -1;
+
+	struct parsing_context pctx = {
+		.data = (void *)(long)ctx->data,
+		.data_end = (void *)(long)ctx->data_end,
+		.nh = { .pos = pctx.data },
+		.pkt_len = ctx->len,
+	};
+
+	return parse_packet_identifier(&pctx, p_info);
+}
+
+__noinline int parse_packet_identifer_xdp(struct xdp_md *ctx,
+					  struct packet_info *p_info)
+{
+	if (!p_info)
+		return -1;
+
+	struct parsing_context pctx = {
+		.data = (void *)(long)ctx->data,
+		.data_end = (void *)(long)ctx->data_end,
+		.nh = { .pos = pctx.data },
+		.pkt_len = pctx.data_end - pctx.data,
+	};
+
+	return parse_packet_identifier(&pctx, p_info);
 }
 
 /*
@@ -798,28 +852,26 @@ static void close_and_delete_flows(void *ctx, struct packet_info *p_info,
  * samples/bpf/xdp_fwd_kern.c/xdp_fwd_flags() and
  * tools/testing/selftests/bpf/progs/test_tc_neigh_fib.c
  */
-static bool is_local_address(struct packet_info *p_info, void *ctx,
-			     struct parsing_context *pctx)
+static bool is_local_address(struct packet_info *p_info, void *ctx)
 {
 	int ret;
 	struct bpf_fib_lookup lookup;
 	__builtin_memset(&lookup, 0, sizeof(lookup));
 
-	lookup.ifindex = pctx->ingress_ifindex;
+	lookup.ifindex = p_info->ingress_ifindex;
 	lookup.family = p_info->pid.flow.ipv;
+	lookup.tot_len = p_info->ip_len;
 
 	if (lookup.family == AF_INET) {
-		lookup.tos = p_info->iph->tos;
-		lookup.tot_len = bpf_ntohs(p_info->iph->tot_len);
-		lookup.ipv4_src = p_info->iph->saddr;
-		lookup.ipv4_dst = p_info->iph->daddr;
+		lookup.tos = p_info->ip_tos.ipv4_tos;
+		lookup.ipv4_src = ipv4_from_ipv6(&p_info->pid.flow.saddr.ip);
+		lookup.ipv4_dst = ipv4_from_ipv6(&p_info->pid.flow.daddr.ip);
 	} else if (lookup.family == AF_INET6) {
 		struct in6_addr *src = (struct in6_addr *)lookup.ipv6_src;
 		struct in6_addr *dst = (struct in6_addr *)lookup.ipv6_dst;
 
-		lookup.flowinfo = *(__be32 *)p_info->ip6h & IPV6_FLOWINFO_MASK;
-		lookup.tot_len = bpf_ntohs(p_info->ip6h->payload_len);
-		*src = p_info->pid.flow.saddr.ip; //verifier did not like ip6h->saddr
+		lookup.flowinfo = p_info->ip_tos.ipv6_tos;
+		*src = p_info->pid.flow.saddr.ip;
 		*dst = p_info->pid.flow.daddr.ip;
 	}
 
@@ -837,14 +889,13 @@ static bool is_local_address(struct packet_info *p_info, void *ctx,
  * Attempt to create a timestamp-entry for packet p_info for flow in f_state
  */
 static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
-				   struct parsing_context *pctx,
 				   struct packet_info *p_info, bool new_flow)
 {
 	if (!is_flowstate_active(f_state) || !p_info->pid_valid)
 		return;
 
-	if (config.localfilt && !pctx->is_egress &&
-	    is_local_address(p_info, ctx, pctx))
+	if (config.localfilt && p_info->is_ingress &&
+	    is_local_address(p_info, ctx))
 		return;
 
 	// Check if identfier is new
@@ -877,7 +928,6 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
  * Attempt to match packet in p_info with a timestamp from flow in f_state
  */
 static void pping_match_packet(struct flow_state *f_state, void *ctx,
-			       struct parsing_context *pctx,
 			       struct packet_info *p_info)
 {
 	struct rtt_event re = { 0 };
@@ -914,37 +964,73 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	re.rec_pkts = f_state->rec_pkts;
 	re.rec_bytes = f_state->rec_bytes;
 	re.flow = p_info->pid.flow;
-	re.match_on_egress = pctx->is_egress;
+	re.match_on_egress = !p_info->is_ingress;
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
 }
 
 /*
- * Will parse the ingress/egress packet in pctx and attempt to create a
- * timestamp for it and match it against the reverse flow.
+ * Contains the actual pping logic that is applied after a packet has been
+ * parsed and deemed to contain some valid identifier.
+
+ * Looks up and updates flowstate (in both directions), tries to save a
+ * timestamp of the packet, tries to match packet against previous timestamps,
+ * calculates RTTs and pushes messages to userspace as appropriate.
  */
-static void pping(void *ctx, struct parsing_context *pctx)
+static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
 {
-	struct packet_info p_info = { 0 };
 	struct dual_flow_state *df_state;
 	struct flow_state *fw_flow, *rev_flow;
 	bool new_flow = false;
 
-	if (parse_packet_identifier(pctx, &p_info) < 0)
-		return;
-
-	df_state = lookup_or_create_dualflow_state(ctx, &p_info, &new_flow);
+	df_state = lookup_or_create_dualflow_state(ctx, p_info, &new_flow);
 	if (!df_state)
 		return;
 
-	fw_flow = get_flowstate_from_packet(df_state, &p_info);
-	update_forward_flowstate(&p_info, fw_flow, &new_flow);
-	pping_timestamp_packet(fw_flow, ctx, pctx, &p_info, new_flow);
+	fw_flow = get_flowstate_from_packet(df_state, p_info);
+	update_forward_flowstate(p_info, fw_flow, &new_flow);
+	pping_timestamp_packet(fw_flow, ctx, p_info, new_flow);
 
-	rev_flow = get_reverse_flowstate_from_packet(df_state, &p_info);
-	update_reverse_flowstate(ctx, &p_info, rev_flow);
-	pping_match_packet(rev_flow, ctx, pctx, &p_info);
+	rev_flow = get_reverse_flowstate_from_packet(df_state, p_info);
+	update_reverse_flowstate(ctx, p_info, rev_flow);
+	pping_match_packet(rev_flow, ctx, p_info);
 
-	close_and_delete_flows(ctx, &p_info, fw_flow, rev_flow);
+	close_and_delete_flows(ctx, p_info, fw_flow, rev_flow);
+}
+
+/*
+ * Main function which contains all the pping logic (parse packet, attempt to
+ * create timestamp for it, try match against previous timestamps, update
+ * flowstate etc.).
+ *
+ * Has a separate tc and xdp version so that verifier sees the global
+ * functions for parsing packets in the right context, but most of the
+ * work is done in common functions (parse_packet_identifier and
+ * pping_parsed_packet)
+ */
+static void pping_tc(struct __sk_buff *ctx, bool is_ingress)
+{
+	struct packet_info p_info = { 0 };
+
+	if (parse_packet_identifer_tc(ctx, &p_info) < 0)
+		return;
+
+	p_info.is_ingress = is_ingress;
+	p_info.ingress_ifindex = is_ingress ? ctx->ingress_ifindex : 0;
+
+	pping_parsed_packet(ctx, &p_info);
+}
+
+static void pping_xdp(struct xdp_md *ctx)
+{
+	struct packet_info p_info = { 0 };
+
+	if (parse_packet_identifer_xdp(ctx, &p_info) < 0)
+		return;
+
+	p_info.is_ingress = true;
+	p_info.ingress_ifindex = ctx->rx_queue_index;
+
+	pping_parsed_packet(ctx, &p_info);
 }
 
 static bool is_flow_old(struct network_tuple *flow, struct flow_state *f_state,
@@ -993,15 +1079,7 @@ static void send_flow_timeout_message(void *ctx, struct network_tuple *flow,
 SEC("tc")
 int pping_tc_egress(struct __sk_buff *skb)
 {
-	struct parsing_context pctx = {
-		.data = (void *)(long)skb->data,
-		.data_end = (void *)(long)skb->data_end,
-		.pkt_len = skb->len,
-		.nh = { .pos = pctx.data },
-		.is_egress = true,
-	};
-
-	pping(skb, &pctx);
+	pping_tc(skb, false);
 
 	return TC_ACT_UNSPEC;
 }
@@ -1010,16 +1088,7 @@ int pping_tc_egress(struct __sk_buff *skb)
 SEC("tc")
 int pping_tc_ingress(struct __sk_buff *skb)
 {
-	struct parsing_context pctx = {
-		.data = (void *)(long)skb->data,
-		.data_end = (void *)(long)skb->data_end,
-		.pkt_len = skb->len,
-		.nh = { .pos = pctx.data },
-		.ingress_ifindex = skb->ingress_ifindex,
-		.is_egress = false,
-	};
-
-	pping(skb, &pctx);
+	pping_tc(skb, true);
 
 	return TC_ACT_UNSPEC;
 }
@@ -1028,16 +1097,7 @@ int pping_tc_ingress(struct __sk_buff *skb)
 SEC("xdp")
 int pping_xdp_ingress(struct xdp_md *ctx)
 {
-	struct parsing_context pctx = {
-		.data = (void *)(long)ctx->data,
-		.data_end = (void *)(long)ctx->data_end,
-		.pkt_len = pctx.data_end - pctx.data,
-		.nh = { .pos = pctx.data },
-		.ingress_ifindex = ctx->ingress_ifindex,
-		.is_egress = false,
-	};
-
-	pping(ctx, &pctx);
+	pping_xdp(ctx);
 
 	return XDP_PASS;
 }
