@@ -46,6 +46,11 @@ struct {
 
 int active_ifindexes[MAX_IFINDEXES] = {};
 unsigned int current_ifindex = 0;
+/* This being const means that the verifier will do dead code elimination to
+ * remove any code that depends on it being true entirely, incurring no runtime
+ * overhead if debug mode is disabled.
+ **/
+volatile const int debug_output = 0;
 
 static int get_current_ifindex(void)
 {
@@ -112,7 +117,7 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 {
 	struct pkt_loop_data *value;
 	struct pkt_loop_key key;
-	int pkt_type;
+	int pkt_type, ifindex;
 
 	pkt_type = parse_pkt(skb, &key);
 	if (pkt_type < 0)
@@ -121,13 +126,26 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 	value = bpf_map_lookup_elem(&iface_state, &key);
 	if (value && value->expiry_time > bpf_ktime_get_coarse_ns()) {
 		value->drops++;
+		if (debug_output)
+			/* bpf_trace_printk doesn't know how to format MAC
+			 * addresses, and we don't have enough arguments to do
+			 * it ourselves; so just pass the whole key as a u64 and
+			 * hex-print that
+			 */
+			bpf_printk("Dropping packet with SMAC/vlan %llx - not found in hash table\n",
+				   *(__u64 *)&key);
 		return TC_ACT_SHOT;
 	}
 
+
 	/* Only allow multicast pkts on the currently active interface */
-	if (pkt_type == PKT_TYPE_MULTICAST &&
-	    skb->ifindex != get_current_ifindex())
+	ifindex = get_current_ifindex();
+	if (pkt_type == PKT_TYPE_MULTICAST && skb->ifindex != ifindex) {
+		if (debug_output)
+			bpf_printk("Dropping multicast packet - ifindex %d != active %d\n",
+				   skb->ifindex, ifindex);
 		return TC_ACT_SHOT;
+	}
 
 out:
 	return TC_ACT_OK;
@@ -141,6 +159,9 @@ int BPF_KPROBE(handle_device_notify, unsigned long val, struct netdev_notifier_i
 
 	if (val == NETDEV_GOING_DOWN && cookie == INIT_NS &&
 	    ifindex == get_current_ifindex()) {
+		if (debug_output)
+			bpf_printk("Ifindex %d going down\n", ifindex);
+
 		/* Active interface going down, switch to next one; we currently
 		 * don't check for ifup and switch back
 		 */

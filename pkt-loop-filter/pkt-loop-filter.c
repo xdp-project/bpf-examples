@@ -19,13 +19,13 @@ int main(int argc, char *argv[])
 	int err = 0, i, num_ifindexes = 0, _err, ingress_fd, egress_fd;
 	struct pkt_loop_filter_kern *skel = NULL;
 	struct bpf_link *trace_link = NULL;
+	bool unload = false, debug = false;
 	int ifindex[MAX_IFINDEXES];
-	bool unload = false;
 	char pin_path[100];
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS);
 
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <ifname> [..ifname] [--unload]\n", argv[0]);
+		fprintf(stderr, "Usage: %s <ifname> [..ifname] [--unload] [--debug]\n", argv[0]);
 		return 1;
 	}
 
@@ -37,6 +37,11 @@ int main(int argc, char *argv[])
 
 		if (!strcmp(ifname, "--unload")) {
 			unload = true;
+			continue;
+		}
+
+		if (!strcmp(ifname, "--debug")) {
+			debug = true;
 			continue;
 		}
 
@@ -77,6 +82,9 @@ int main(int argc, char *argv[])
 	 */
 	for (i = 0; i < num_ifindexes; i++)
 		skel->bss->active_ifindexes[i] = ifindex[i];
+
+	/* enable debug flag if set on command line */
+	skel->rodata->debug_output = debug;
 
 	err = pkt_loop_filter_kern__load(skel);
 	if (err) {
