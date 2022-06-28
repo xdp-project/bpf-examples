@@ -50,7 +50,7 @@ unsigned int current_ifindex = 0;
 static int get_current_ifindex(void)
 {
 	/* bounds check to placate the verifier */
-	if (current_ifindex > MAX_IFINDEXES)
+	if (current_ifindex >= MAX_IFINDEXES)
 		return 0;
 
 	return active_ifindexes[current_ifindex];
@@ -145,7 +145,7 @@ int BPF_KPROBE(handle_device_notify, unsigned long val, struct netdev_notifier_i
 		 * don't check for ifup and switch back
 		 */
 		current_ifindex++;
-		if (current_ifindex > MAX_IFINDEXES || !active_ifindexes[current_ifindex])
+		if (current_ifindex >= MAX_IFINDEXES || !active_ifindexes[current_ifindex])
 			current_ifindex = 0;
 	}
 
