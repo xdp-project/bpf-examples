@@ -9,27 +9,9 @@
 #include <linux/pkt_cls.h>
 
 #include "pkt-loop-filter.h"
-
-/* local partial kernel struct definitions with just the members we need */
-struct net {
-	__u64 net_cookie;
-} __attribute__((preserve_access_index));
-
-struct net_device {
-	int ifindex;
-	struct {
-		struct net *net;
-	} nd_net;
-} __attribute__((preserve_access_index));
-
-struct netdev_notifier_info {
-	struct net_device *dev;
-} __attribute__((preserve_access_index));
+#include "bpf-defs.h"
 
 #define NETDEV_GOING_DOWN 10
-
-/* cookie for init ns; hoping this is stable */
-#define INIT_NS 1
 
 #define PKT_TYPE_UNICAST 1
 #define PKT_TYPE_MULTICAST 2
