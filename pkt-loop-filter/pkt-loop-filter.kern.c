@@ -33,6 +33,7 @@ struct netdev_notifier_info {
 
 #define PKT_TYPE_UNICAST 1
 #define PKT_TYPE_MULTICAST 2
+#define PKT_TYPE_IGMP 3
 
 /* We use an LRU map to avoid having to do cleanup: We just rely on the LRU
  * mechanism to evict old entries as the map fills up.
@@ -74,8 +75,8 @@ static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
 	struct hdr_cursor nh = { .pos = data };
+	int eth_type, ip_type;
 	struct ethhdr *eth;
-	int eth_type;
 
 	/* Parse Ethernet and IP/IPv6 headers */
 	eth_type = parse_ethhdr(&nh, data_end, &eth);
@@ -85,7 +86,33 @@ static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 	__builtin_memcpy(key->src_mac, eth->h_source, ETH_ALEN);
 	key->src_vlan = skb->vlan_tci;
 
-	return is_multicast_ether_addr(eth->h_dest) ? PKT_TYPE_MULTICAST : PKT_TYPE_UNICAST;
+	if (is_multicast_ether_addr(eth->h_dest))
+		return PKT_TYPE_MULTICAST;
+
+	if (eth_type == bpf_htons(ETH_P_IP)) {
+		struct iphdr *iph;
+
+		ip_type = parse_iphdr(&nh, data_end, &iph);
+		if (ip_type == IPPROTO_IGMP)
+			return PKT_TYPE_IGMP;
+
+	} else if (eth_type == bpf_htons(ETH_P_IPV6)) {
+		struct icmp6hdr *icmp6;
+		struct ipv6hdr *ip6h;
+		int icmp6_type;
+
+		ip_type = parse_ip6hdr(&nh, data_end, &ip6h);
+		if (ip_type != IPPROTO_ICMPV6)
+			goto out;
+
+		icmp6_type = parse_icmp6hdr(&nh, data_end, &icmp6);
+		if (icmp6_type == ICMPV6_MGM_QUERY || icmp6_type == ICMPV6_MGM_REPORT ||
+		    icmp6_type == ICMPV6_MGM_REDUCTION || icmp6_type == ICMPV6_MLD2_REPORT ||
+		    icmp6_type == ICMPV6_MRDISC_ADV)
+			return PKT_TYPE_IGMP;
+	}
+out:
+	return PKT_TYPE_UNICAST;
 }
 
 SEC("tc")
@@ -138,12 +165,13 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 	}
 
 
-	/* Only allow multicast pkts on the currently active interface */
+	/* Only allow multicast and IGMP pkts on the currently active interface */
 	ifindex = get_current_ifindex();
-	if (pkt_type == PKT_TYPE_MULTICAST && skb->ifindex != ifindex) {
+	if ((pkt_type == PKT_TYPE_MULTICAST || pkt_type == PKT_TYPE_IGMP) &&
+	    skb->ifindex != ifindex) {
 		if (debug_output)
-			bpf_printk("Dropping multicast packet - ifindex %d != active %d\n",
-				   skb->ifindex, ifindex);
+			bpf_printk("Dropping packet type %d - ifindex %d != active %d\n",
+				   pkt_type, skb->ifindex, ifindex);
 		return TC_ACT_SHOT;
 	}
 
