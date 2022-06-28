@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <stdbool.h>
 #include <linux/bpf.h>
 #include <asm/ptrace.h>
 #include <bpf/bpf_helpers.h>
@@ -46,16 +47,6 @@ struct {
 int active_ifindexes[MAX_IFINDEXES] = {};
 unsigned int current_ifindex = 0;
 
-static int ethaddr_equal(__u8 *a, __u8 *b)
-{
-	int i;
-
-	for (i = 0; i < ETH_ALEN; i++)
-		if (a[i] != b[i])
-			return 0;
-	return 1;
-}
-
 static int get_current_ifindex(void)
 {
 	/* bounds check to placate the verifier */
@@ -65,9 +56,16 @@ static int get_current_ifindex(void)
 	return active_ifindexes[current_ifindex];
 }
 
+/* copy of kernel's version - if the LSB of the first octet is 1 then it is
+ * a multicast address
+ */
+static bool is_multicast_ether_addr(const __u8 *addr)
+{
+	return 0x01 & addr[0];
+}
+
 static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 {
-	static __u8 mcast_addr[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 	void *data_end = (void *)(unsigned long long)skb->data_end;
 	void *data = (void *)(unsigned long long)skb->data;
 	struct hdr_cursor nh = { .pos = data };
@@ -82,7 +80,7 @@ static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 	__builtin_memcpy(key->src_mac, eth->h_source, ETH_ALEN);
 	key->src_vlan = skb->vlan_tci;
 
-	return ethaddr_equal(eth->h_dest, mcast_addr) ? PKT_TYPE_MULTICAST : PKT_TYPE_UNICAST;
+	return is_multicast_ether_addr(eth->h_dest) ? PKT_TYPE_MULTICAST : PKT_TYPE_UNICAST;
 }
 
 SEC("tc")
