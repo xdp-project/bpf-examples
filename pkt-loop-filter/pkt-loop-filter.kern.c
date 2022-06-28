@@ -27,22 +27,14 @@ struct {
 	__uint(max_entries, 1); /* set from userspace before load */
 } iface_state SEC(".maps");
 
-int active_ifindexes[MAX_IFINDEXES] = {};
-unsigned int current_ifindex = 0;
+int bond_ifindex = 0;
+int active_ifindex = 0;
 /* This being const means that the verifier will do dead code elimination to
  * remove any code that depends on it being true entirely, incurring no runtime
  * overhead if debug mode is disabled.
  **/
 volatile const int debug_output = 0;
-
-static int get_current_ifindex(void)
-{
-	/* bounds check to placate the verifier */
-	if (current_ifindex >= MAX_IFINDEXES)
-		return 0;
-
-	return active_ifindexes[current_ifindex];
-}
+volatile const int netns_cookie = INIT_NS;
 
 /* copy of kernel's version - if the LSB of the first octet is 1 then it is
  * a multicast address
@@ -124,9 +116,9 @@ out:
 SEC("tc")
 int filter_ingress_pkt(struct __sk_buff *skb)
 {
+	int pkt_type, ifindex = active_ifindex;
 	struct pkt_loop_data *value;
 	struct pkt_loop_key key;
-	int pkt_type, ifindex;
 
 	pkt_type = parse_pkt(skb, &key);
 	if (pkt_type < 0)
@@ -148,7 +140,6 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 
 
 	/* Only allow multicast and IGMP pkts on the currently active interface */
-	ifindex = get_current_ifindex();
 	if ((pkt_type == PKT_TYPE_MULTICAST || pkt_type == PKT_TYPE_IGMP) &&
 	    skb->ifindex != ifindex) {
 		if (debug_output)
@@ -161,24 +152,25 @@ out:
 	return TC_ACT_OK;
 }
 
-SEC("kprobe/call_netdevice_notifiers_info")
-int BPF_KPROBE(handle_device_notify, unsigned long val, struct netdev_notifier_info *info)
+SEC("kprobe/bond_change_active_slave")
+int BPF_KPROBE(handle_change_slave, struct bonding *bond, struct slave *new_active)
 {
-	int ifindex = BPF_CORE_READ(info, dev, ifindex);
-	__u64 cookie = BPF_CORE_READ(info, dev, nd_net.net, net_cookie);
+        struct net_device *dev = BPF_PROBE_READ(bond, dev);
+	int ifindex = BPF_CORE_READ(dev, ifindex);
+	__u64 cookie = BPF_CORE_READ(dev, nd_net.net, net_cookie);
 
-	if (val == NETDEV_GOING_DOWN && cookie == INIT_NS &&
-	    ifindex == get_current_ifindex()) {
-		if (debug_output)
-			bpf_printk("Ifindex %d going down\n", ifindex);
+        if (cookie == netns_cookie && ifindex == bond_ifindex && new_active) {
+                struct net_device *new_dev;
+		int ifindex;
 
-		/* Active interface going down, switch to next one; we currently
-		 * don't check for ifup and switch back
-		 */
-		current_ifindex++;
-		if (current_ifindex >= MAX_IFINDEXES || !active_ifindexes[current_ifindex])
-			current_ifindex = 0;
-	}
+		new_dev = BPF_PROBE_READ(new_active, dev);
+		ifindex = BPF_CORE_READ(new_dev, ifindex);
+		if (ifindex) {
+			active_ifindex = ifindex;
+			if (debug_output)
+				bpf_printk("Active ifindex changed, new value: %d\n", ifindex);
+		}
+        }
 
 	return 0;
 }

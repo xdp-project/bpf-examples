@@ -11,29 +11,78 @@
 
 #include <bpf/libbpf.h>
 
+#include "bond-active.h"
 #include "pkt-loop-filter.h"
 #include "pkt-loop-filter.kern.skel.h"
+
+int get_bond_interfaces(int bond_ifindex, int *ifindexes, int *num_ifindexes)
+{
+	char sysfsname[100], buf[100], bond_ifname[IF_NAMESIZE];
+	char *ifname, *tok;
+	int fd, err;
+	size_t len;
+
+	if (!if_indextoname(bond_ifindex, bond_ifname))
+		return -errno;
+
+        snprintf(sysfsname, sizeof(sysfsname), "/sys/class/net/%s/bonding/slaves", bond_ifname);
+        sysfsname[sizeof(sysfsname)-1] = '\0';
+
+	fd = open(sysfsname, O_RDONLY);
+	if (fd < 0)
+		return fd;
+
+	len = read(fd, buf, sizeof(buf));
+	close(fd);
+	if (len < 0)
+		return len;
+	buf[len] = '\0';
+
+	tok = buf;
+	while ((ifname = strtok(tok, " \n"))) {
+		int ifindex;
+
+		ifindex = if_nametoindex(ifname);
+		if (!ifindex) {
+			err = -errno;
+			fprintf(stderr, "Couldn't get ifindex for iface '%s': %s\n",
+				ifname, strerror(-err));
+			return err;
+		}
+
+		ifindexes[*num_ifindexes] = ifindex;
+		*num_ifindexes += 1;
+		if (*num_ifindexes >= MAX_IFINDEXES) {
+			fprintf(stderr, "Too many ifindexes in bond\n");
+			return -E2BIG;
+		}
+		tok = NULL;
+	}
+	return 0;
+}
+
+int usage(const char *progname)
+{
+	fprintf(stderr, "Usage: %s <ifname> [--unload] [--debug]\n", progname);
+	return 1;
+}
 
 int main(int argc, char *argv[])
 {
 	int err = 0, i, num_ifindexes = 0, _err, ingress_fd, egress_fd;
+	int bond_ifindex = 0, active_ifindex, ifindexes[MAX_IFINDEXES];
+	char pin_path[100], bond_ifname[IF_NAMESIZE];
 	struct pkt_loop_filter_kern *skel = NULL;
 	struct bpf_link *trace_link = NULL;
 	bool unload = false, debug = false;
-	int ifindex[MAX_IFINDEXES];
-	char pin_path[100];
+	__u64 netns_cookie;
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS);
 
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <ifname> [..ifname] [--unload] [--debug]\n", argv[0]);
-		return 1;
-	}
+	if (argc < 2)
+		return usage(argv[0]);
 
-	for (i = 0; i < MAX_IFINDEXES; i++) {
+	for (i = 0; i < argc - 1; i++) {
 		char *ifname = argv[i+1];
-
-		if (i + 1 >= argc)
-			break;
 
 		if (!strcmp(ifname, "--unload")) {
 			unload = true;
@@ -45,24 +94,53 @@ int main(int argc, char *argv[])
 			continue;
 		}
 
-		ifindex[num_ifindexes] = if_nametoindex(ifname);
-		if (!ifindex[num_ifindexes]) {
+		if (bond_ifindex)
+			return usage(argv[0]);
+
+		bond_ifindex = if_nametoindex(ifname);
+		if (!bond_ifindex) {
 			fprintf(stderr, "Couldn't find interface '%s'\n", ifname);
 			return 1;
 		}
-		num_ifindexes++;
 	}
 
-	if (!num_ifindexes) {
-		fprintf(stderr, "Need at least one interface name\n");
+	if (!bond_ifindex) {
+		fprintf(stderr, "Missing interface name\n");
 		return 1;
 	}
+	if (!if_indextoname(bond_ifindex, bond_ifname)) {
+		err = -errno;
+		perror("if_indextoname");
+		return err;
+	}
 
-	snprintf(pin_path, sizeof(pin_path), "/sys/fs/bpf/pkt-loop-filter-%d", ifindex[0]);
+	snprintf(pin_path, sizeof(pin_path), "/sys/fs/bpf/pkt-loop-filter-%d",
+		 bond_ifindex);
 	pin_path[sizeof(pin_path) - 1] = '\0';
+
+	err = get_bond_interfaces(bond_ifindex, ifindexes, &num_ifindexes);
+	if (err) {
+		fprintf(stderr, "Unable to get bond interfaces: %s\n",
+			strerror(-err));
+		return err;
+	}
 
 	if (unload)
 		goto unload;
+
+	active_ifindex = get_bond_active_ifindex(bond_ifindex);
+	if (active_ifindex < 0) {
+		fprintf(stderr, "Unable to get active index for bond %s: %s\n",
+			bond_ifname, strerror(-active_ifindex));
+		return active_ifindex;
+	}
+
+	err = get_netns_cookie(&netns_cookie);
+	if (err)
+		return err;
+
+	printf("%s: Found %d ifaces, active idx %d\n",
+	       bond_ifname, num_ifindexes, active_ifindex);
 
 	skel = pkt_loop_filter_kern__open();
 	err = libbpf_get_error(skel);
@@ -80,11 +158,12 @@ int main(int argc, char *argv[])
 	/* Propagate active ifindexes to the BPF program global variables so the
 	 * BPF program can use it to filter multicast traffic
 	 */
-	for (i = 0; i < num_ifindexes; i++)
-		skel->bss->active_ifindexes[i] = ifindex[i];
+	skel->bss->active_ifindex = active_ifindex;
+	skel->bss->bond_ifindex = bond_ifindex;
 
 	/* enable debug flag if set on command line */
 	skel->rodata->debug_output = debug;
+	skel->rodata->netns_cookie = netns_cookie;
 
 	err = pkt_loop_filter_kern__load(skel);
 	if (err) {
@@ -113,13 +192,13 @@ int main(int argc, char *argv[])
 				    .prog_fd = ingress_fd);
 		char ifname[IF_NAMESIZE];
 
-		if (!if_indextoname(ifindex[i], ifname)) {
+		if (!if_indextoname(ifindexes[i], ifname)) {
 			err = -errno;
-			perror("if_indextoname");
+			fprintf(stderr, "Couldn't get ifname for ifindex %d: %s\n", ifindexes[i], strerror(-err));
 			goto out;
 		}
 
-		hook.ifindex = ifindex[i];
+		hook.ifindex = ifindexes[i];
 		hook.attach_point = BPF_TC_EGRESS | BPF_TC_INGRESS;
 		err = bpf_tc_hook_create(&hook);
 		if (err && err != -EEXIST) {
@@ -142,7 +221,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	trace_link = bpf_program__attach(skel->progs.handle_device_notify);
+	trace_link = bpf_program__attach(skel->progs.handle_change_slave);
 	if (!trace_link) {
 		fprintf(stderr, "Couldn't attach tracing prog: %s\n", strerror(errno));
 		err = -EFAULT;
@@ -164,12 +243,12 @@ unload:
 	for (i = 0; i < num_ifindexes; i++) {
 		char ifname[IF_NAMESIZE];
 
-		hook.ifindex = ifindex[i];
+		hook.ifindex = ifindexes[i];
 		hook.attach_point = BPF_TC_EGRESS | BPF_TC_INGRESS;
 		_err = bpf_tc_hook_destroy(&hook);
 		if (_err) {
 			fprintf(stderr, "Couldn't remove clsact qdisc on %s\n",
-				if_indextoname(ifindex[i], ifname));
+				if_indextoname(ifindexes[i], ifname));
 			err = _err;
 		}
 
