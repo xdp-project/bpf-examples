@@ -12,6 +12,12 @@
 
 #include "get-bond-active.kern.skel.h"
 
+#ifndef SO_NETNS_COOKIE
+#define SO_NETNS_COOKIE		71
+#endif
+
+#define INIT_NS 1
+
 int get_netns_cookie(__u64 *cookie)
 {
         unsigned int sockopt_sz = sizeof(__u64);
@@ -24,9 +30,13 @@ int get_netns_cookie(__u64 *cookie)
 
         err = getsockopt(fd, SOL_SOCKET, SO_NETNS_COOKIE, &value, &sockopt_sz);
         if (err) {
-                err = -errno;
-                fprintf(stderr, "Couldn't getsockopt(): %s\n", strerror(-err));
-                goto out;
+                if (errno != ENOPROTOOPT) {
+                        err = -errno;
+                        fprintf(stderr, "Couldn't getsockopt(): %s\n", strerror(-err));
+                        goto out;
+                }
+                fprintf(stderr, "SO_NETNS_COOKIE sockopt not supported; things won't work outside init NS\n");
+                value = INIT_NS;
         }
 
         *cookie = value;
