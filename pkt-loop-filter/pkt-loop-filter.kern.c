@@ -107,7 +107,7 @@ int record_egress_pkt(struct __sk_buff *skb)
 		if (!v)
 			goto out;
 	}
-	v->expiry_time = bpf_ktime_get_coarse_ns() + STATE_LIFETIME;
+	v->expiry_time = bpf_ktime_get_boot_ns() + STATE_LIFETIME;
 	v->ifindex = skb->ifindex;
 out:
 	return TC_ACT_OK;
@@ -125,7 +125,7 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 		goto out;
 
 	value = bpf_map_lookup_elem(&iface_state, &key);
-	if (value && value->expiry_time > bpf_ktime_get_coarse_ns()) {
+	if (value && value->expiry_time > bpf_ktime_get_boot_ns()) {
 		value->drops++;
 		if (debug_output)
 			/* bpf_trace_printk doesn't know how to format MAC
