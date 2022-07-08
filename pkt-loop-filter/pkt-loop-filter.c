@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <net/if.h>
 #include <linux/if_arp.h>
+#include <signal.h>
+#include <sys/signalfd.h>
 
 #include <bpf/libbpf.h>
 
@@ -59,6 +61,37 @@ int get_bond_interfaces(int bond_ifindex, int *ifindexes, int *num_ifindexes)
 		tok = NULL;
 	}
 	return 0;
+}
+
+int wait_for_interrupt(void)
+{
+	struct signalfd_siginfo fdsi;
+	sigset_t mask;
+	int fd, err;
+	ssize_t s;
+
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGTERM);
+
+	err = sigprocmask(SIG_BLOCK, &mask, NULL);
+	if (err)
+		return -errno;
+
+	fd = signalfd(-1, &mask, 0);
+	if (fd < 0)
+		return -errno;
+
+	fprintf(stderr, "Waiting for signal (press CTRL-C to exit).\n");
+
+	s = read(fd, &fdsi, sizeof(fdsi));
+	if (s != sizeof(fdsi))
+		err = -errno;
+	else
+		err = 0;
+
+	close(fd);
+	return err;
 }
 
 int usage(const char *progname)
@@ -230,8 +263,17 @@ int main(int argc, char *argv[])
 
 	err = bpf_link__pin(trace_link, pin_path);
 	if (err) {
-		fprintf(stderr, "Couldn't pin bpf_link: %s\n", strerror(errno));
-		goto unload;
+		if (errno != EINVAL) {
+			fprintf(stderr, "Couldn't pin bpf_link: %s\n", strerror(errno));
+			goto unload;
+		}
+		fprintf(stderr, "Couldn't pin bpf_link due to missing kernel support. "
+			"Will keep running instead to keep probe alive.\n");
+		err = wait_for_interrupt();
+		if (err) {
+			fprintf(stderr, "Error waiting for interrupt: %s\n", strerror(-err));
+			goto unload;
+		}
 	}
 
 out:
