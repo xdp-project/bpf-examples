@@ -156,8 +156,10 @@ SEC("kprobe/bond_change_active_slave")
 int BPF_KPROBE(handle_change_slave, struct bonding *bond, struct slave *new_active)
 {
         struct net_device *dev = BPF_PROBE_READ(bond, dev);
+	struct net *net = BPF_CORE_READ(dev, nd_net.net);
 	int ifindex = BPF_CORE_READ(dev, ifindex);
-	__u64 cookie = BPF_CORE_READ(dev, nd_net.net, net_cookie);
+	__u64 cookie = read_net_cookie(net);
+
 
         if (cookie == netns_cookie && ifindex == bond_ifindex && new_active) {
                 struct net_device *new_dev;

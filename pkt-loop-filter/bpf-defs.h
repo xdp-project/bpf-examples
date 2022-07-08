@@ -27,6 +27,14 @@ struct net {
 	__u64 net_cookie;
 } __attribute__((preserve_access_index));
 
+typedef struct {
+	__s64 counter;
+} atomic64_t;
+
+struct net___old {
+	atomic64_t net_cookie;
+} __attribute__((preserve_access_index));
+
 struct net_device {
 	int ifindex;
 	struct {
@@ -37,5 +45,18 @@ struct net_device {
 struct netdev_notifier_info {
 	struct net_device *dev;
 } __attribute__((preserve_access_index));
+
+static inline __u64 read_net_cookie(struct net *net)
+{
+	if (bpf_core_field_exists(net->net_cookie)) {
+		return BPF_CORE_READ(net, net_cookie);
+	} else {
+		struct net___old *n_old = (void *)net;
+		atomic64_t cookie_old;
+
+		cookie_old = BPF_CORE_READ(n_old, net_cookie);
+		return cookie_old.counter;
+	}
+}
 
 #endif
