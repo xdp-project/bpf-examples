@@ -270,10 +270,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Couldn't pin bpf_link due to missing kernel support. "
 			"Will keep running instead to keep probe alive.\n");
 		err = wait_for_interrupt();
-		if (err) {
+		if (err)
 			fprintf(stderr, "Error waiting for interrupt: %s\n", strerror(-err));
-			goto unload;
-		}
+		goto unload;
 	}
 
 out:
