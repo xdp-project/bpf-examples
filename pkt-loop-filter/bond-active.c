@@ -37,6 +37,7 @@ int get_netns_cookie(__u64 *cookie)
                 }
                 fprintf(stderr, "SO_NETNS_COOKIE sockopt not supported; things won't work outside init NS\n");
                 value = INIT_NS;
+                err = 0;
         }
 
         *cookie = value;
