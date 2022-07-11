@@ -6,10 +6,12 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <limits.h>
 #include <net/if.h>
 #include <linux/if_arp.h>
 #include <signal.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
 
 #include <bpf/libbpf.h>
 
@@ -82,8 +84,6 @@ int wait_for_interrupt(void)
 	if (fd < 0)
 		return -errno;
 
-	fprintf(stderr, "Waiting for signal (press CTRL-C to exit).\n");
-
 	s = read(fd, &fdsi, sizeof(fdsi));
 	if (s != sizeof(fdsi))
 		err = -errno;
@@ -93,6 +93,97 @@ int wait_for_interrupt(void)
 	close(fd);
 	return err;
 }
+
+int fork_and_wait(struct bpf_link *trace_link, int ifindex)
+{
+	char pid_path[PATH_MAX];
+	struct stat statbuf;
+	int err, fd;
+	pid_t pid;
+	FILE *f;
+
+	snprintf(pid_path, sizeof(pid_path), "/run/pkt-loop-filter-%d.pid",
+		 ifindex);
+	pid_path[sizeof(pid_path) - 1] = '\0';
+
+	err = stat(pid_path, &statbuf);
+	if (!err) {
+		fprintf(stderr, "pidfile %s already exists; forgot to unload?\n", pid_path);
+		return -EEXIST;
+	} else if (errno != ENOENT) {
+		err = -errno;
+		fprintf(stderr, "Error on stat: %s\n", strerror(-err));
+		return err;
+	}
+
+	pid = fork();
+	if (!pid) {
+		err = wait_for_interrupt();
+		bpf_link__destroy(trace_link);
+		exit(err);
+	}
+
+	fprintf(stderr, "Forked pid %d.\n", pid);
+
+	fd = open(pid_path, O_CREAT|O_EXCL|O_WRONLY);
+	if (fd < 0) {
+		err = -errno;
+		fprintf(stderr, "Couldn't open file %s for writing: %s\n",
+			pid_path, strerror(-err));
+		goto err;
+	}
+
+	f = fdopen(fd, "w");
+	if (!f) {
+		err = -errno;
+		fprintf(stderr, "Couldn't open pid file: %s\n", strerror(-err));
+		goto err;
+	}
+
+	err = 0;
+	if (fprintf(f, "%d\n", pid) < 0 || fflush(f)) {
+		err = -errno;
+		fprintf(stderr, "Couldn't write to pid file: %s\n", strerror(-err));
+	}
+
+	fclose(f);
+err:
+	if (err)
+		kill(pid, SIGTERM);
+	return err;
+}
+
+int kill_pid(int ifindex)
+{
+	char pid_path[PATH_MAX];
+	pid_t pid = 0;
+	int err = 0;
+	FILE *f;
+
+	snprintf(pid_path, sizeof(pid_path), "/run/pkt-loop-filter-%d.pid",
+		 ifindex);
+	pid_path[sizeof(pid_path) - 1] = '\0';
+
+	f = fopen(pid_path, "r");
+	if (!f) {
+		err = -errno;
+		goto out;
+	}
+
+	if (fscanf(f, "%d\n", &pid) < 1) {
+		err = -errno;
+		fprintf(stderr, "Couldn't read pid file: %s\n", strerror(-err));
+	}
+	fclose(f);
+
+	if (pid)
+		kill(pid, SIGTERM);
+	unlink(pid_path);
+
+out:
+	return err;
+}
+
 
 int usage(const char *progname)
 {
@@ -269,10 +360,9 @@ int main(int argc, char *argv[])
 		}
 		fprintf(stderr, "Couldn't pin bpf_link due to missing kernel support. "
 			"Will keep running instead to keep probe alive.\n");
-		err = wait_for_interrupt();
+		err = fork_and_wait(trace_link, bond_ifindex);
 		if (err)
 			fprintf(stderr, "Error waiting for interrupt: %s\n", strerror(-err));
-		goto unload;
 	}
 
 out:
@@ -295,5 +385,6 @@ unload:
 
 	}
 	unlink(pin_path);
+	kill_pid(bond_ifindex);
 	goto out;
 }
