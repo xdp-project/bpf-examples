@@ -16,6 +16,7 @@
 #define PKT_TYPE_UNICAST 1
 #define PKT_TYPE_MULTICAST 2
 #define PKT_TYPE_IGMP 3
+#define PKT_TYPE_GRATUITOUS_ARP 4
 
 /* We use an LRU map to avoid having to do cleanup: We just rely on the LRU
  * mechanism to evict old entries as the map fills up.
@@ -44,6 +45,35 @@ static bool is_multicast_ether_addr(const __u8 *addr)
 	return 0x01 & addr[0];
 }
 
+#define ARPHRD_ETHER 	1		/* Ethernet 10Mbps		*/
+
+struct arphdr {
+	__be16		ar_hrd;		/* format of hardware address	*/
+	__be16		ar_pro;		/* format of protocol address	*/
+	unsigned char	ar_hln;		/* length of hardware address	*/
+	unsigned char	ar_pln;		/* length of protocol address	*/
+	__be16		ar_op;		/* ARP opcode (command)		*/
+
+	unsigned char		ar_sha[ETH_ALEN];	/* sender hardware address	*/
+	__be32			ar_sip;		/* sender IP address		*/
+	unsigned char		ar_tha[ETH_ALEN];	/* target hardware address	*/
+	__be32			ar_tip;		/* sender IP address		*/
+} __attribute__((packed));
+
+static bool is_gratuitous_arp(struct hdr_cursor *nh, void *data_end)
+{
+	struct arphdr *ah = nh->pos;
+
+	if (ah + 1 > data_end)
+		return false;
+
+	if (ah->ar_hrd != bpf_htons(ARPHRD_ETHER) || ah->ar_pro != bpf_htons(ETH_P_IP))
+		return false;
+
+	/* A gratuitous ARP has identical target and source IPs */
+	return (ah->ar_sip == ah->ar_tip);
+}
+
 static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 {
 	void *data_end = (void *)(unsigned long long)skb->data_end;
@@ -59,6 +89,9 @@ static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 
 	__builtin_memcpy(key->src_mac, eth->h_source, ETH_ALEN);
 	key->src_vlan = skb->vlan_tci;
+
+	if (eth_type == bpf_htons(ETH_P_ARP) && is_gratuitous_arp(&nh, data_end))
+		return PKT_TYPE_GRATUITOUS_ARP;
 
 	if (is_multicast_ether_addr(eth->h_dest))
 		return PKT_TYPE_MULTICAST;
@@ -123,6 +156,13 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 	pkt_type = parse_pkt(skb, &key);
 	if (pkt_type < 0)
 		goto out;
+
+	if (pkt_type == PKT_TYPE_GRATUITOUS_ARP) {
+		if (debug_output)
+			bpf_printk("Allowing gratuitous ARP from SMAC/vlan %llx\n",
+				   *(__u64 *)&key);
+		goto out;
+	}
 
 	value = bpf_map_lookup_elem(&iface_state, &key);
 	if (value && value->expiry_time > bpf_ktime_get_boot_ns()) {
