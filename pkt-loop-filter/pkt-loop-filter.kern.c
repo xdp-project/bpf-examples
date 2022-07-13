@@ -165,7 +165,8 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 	}
 
 	value = bpf_map_lookup_elem(&iface_state, &key);
-	if (value && value->expiry_time > bpf_ktime_get_boot_ns()) {
+	if (value && value->expiry_time > bpf_ktime_get_boot_ns() &&
+	    value->ifindex != skb->ifindex) {
 		value->drops++;
 		if (debug_output)
 			/* bpf_trace_printk doesn't know how to format MAC
@@ -173,8 +174,8 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 			 * it ourselves; so just pass the whole key as a u64 and
 			 * hex-print that
 			 */
-			bpf_printk("Dropping packet with SMAC/vlan %llx - not found in hash table\n",
-				   *(__u64 *)&key);
+			bpf_printk("Dropping packet with SMAC/vlan %llx - ifindex %d != expected %d\n",
+				   *(__u64 *)&key, skb->ifindex, value->ifindex);
 		return TC_ACT_SHOT;
 	}
 
