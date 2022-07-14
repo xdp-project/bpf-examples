@@ -5,6 +5,7 @@
 
 #define NS_PER_SEC 1000000000ULL
 #define STATE_LIFETIME (10 * NS_PER_SEC)
+#define LOCK_LIFETIME (5 * NS_PER_SEC)
 
 struct pkt_loop_key {
         __u8 src_mac[6];
@@ -13,6 +14,7 @@ struct pkt_loop_key {
 
 struct pkt_loop_data {
         __u64 expiry_time;
+        __u64 lock_time;
         __u32 ifindex;
         __u32 drops;
 

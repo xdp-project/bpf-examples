@@ -126,6 +126,7 @@ SEC("tc")
 int record_egress_pkt(struct __sk_buff *skb)
 {
 	struct pkt_loop_data value = { .ifindex = skb->ifindex }, *v;
+	__u64 now = bpf_ktime_get_boot_ns();
 	struct pkt_loop_key key;
 	int pkt_type;
 
@@ -140,7 +141,9 @@ int record_egress_pkt(struct __sk_buff *skb)
 		if (!v)
 			goto out;
 	}
-	v->expiry_time = bpf_ktime_get_boot_ns() + STATE_LIFETIME;
+	v->expiry_time = now + STATE_LIFETIME;
+	if (pkt_type == PKT_TYPE_GRATUITOUS_ARP)
+		v->lock_time = now + LOCK_LIFETIME;
 	v->ifindex = skb->ifindex;
 out:
 	return TC_ACT_OK;
@@ -150,6 +153,7 @@ SEC("tc")
 int filter_ingress_pkt(struct __sk_buff *skb)
 {
 	int pkt_type, ifindex = active_ifindex;
+	__u64 now = bpf_ktime_get_boot_ns();
 	struct pkt_loop_data *value;
 	struct pkt_loop_key key;
 
@@ -157,16 +161,18 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 	if (pkt_type < 0)
 		goto out;
 
-	if (pkt_type == PKT_TYPE_GRATUITOUS_ARP) {
-		if (debug_output)
-			bpf_printk("Allowing gratuitous ARP from SMAC/vlan %llx\n",
-				   *(__u64 *)&key);
-		goto out;
-	}
-
 	value = bpf_map_lookup_elem(&iface_state, &key);
-	if (value && value->expiry_time > bpf_ktime_get_boot_ns() &&
+	if (value && value->expiry_time > now &&
 	    value->ifindex != skb->ifindex) {
+		if (pkt_type == PKT_TYPE_GRATUITOUS_ARP &&
+		    value->lock_time < now) {
+			if (debug_output)
+				bpf_printk("Received gratuitous ARP for SMAC/vlan %llx, expiring filter\n",
+					   *(__u64 *)&key);
+			value->expiry_time = 0;
+			goto out;
+		}
+
 		value->drops++;
 		if (debug_output)
 			/* bpf_trace_printk doesn't know how to format MAC
