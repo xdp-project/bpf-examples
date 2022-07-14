@@ -90,49 +90,63 @@ static int parse_pkt(struct __sk_buff *skb, struct pkt_loop_key *key)
 	__builtin_memcpy(key->src_mac, eth->h_source, ETH_ALEN);
 	key->src_vlan = skb->vlan_tci;
 
-	if (eth_type == bpf_htons(ETH_P_ARP) && is_gratuitous_arp(&nh, data_end))
-		return PKT_TYPE_GRATUITOUS_ARP;
+	switch(eth_type) {
+	case bpf_htons(ETH_P_IP):
+		{
+			struct iphdr *iph;
 
-	if (is_multicast_ether_addr(eth->h_dest))
-		return PKT_TYPE_MULTICAST;
+			ip_type = parse_iphdr(&nh, data_end, &iph);
+			if (ip_type == IPPROTO_IGMP)
+				return PKT_TYPE_IGMP;
+		}
 
-	if (eth_type == bpf_htons(ETH_P_IP)) {
-		struct iphdr *iph;
+		break;
 
-		ip_type = parse_iphdr(&nh, data_end, &iph);
-		if (ip_type == IPPROTO_IGMP)
-			return PKT_TYPE_IGMP;
+	case bpf_htons(ETH_P_IPV6):
+		{
+			struct icmp6hdr *icmp6;
+			struct ipv6hdr *ip6h;
+			int icmp6_type;
 
-	} else if (eth_type == bpf_htons(ETH_P_IPV6)) {
-		struct icmp6hdr *icmp6;
-		struct ipv6hdr *ip6h;
-		int icmp6_type;
+			ip_type = parse_ip6hdr(&nh, data_end, &ip6h);
+			if (ip_type != IPPROTO_ICMPV6)
+				goto out;
 
-		ip_type = parse_ip6hdr(&nh, data_end, &ip6h);
-		if (ip_type != IPPROTO_ICMPV6)
-			goto out;
+			icmp6_type = parse_icmp6hdr(&nh, data_end, &icmp6);
+			if (icmp6_type == ICMPV6_MGM_REPORT || icmp6_type == ICMPV6_MLD2_REPORT)
+				return PKT_TYPE_IGMP;
+		}
 
-		icmp6_type = parse_icmp6hdr(&nh, data_end, &icmp6);
-		if (icmp6_type == ICMPV6_MGM_QUERY || icmp6_type == ICMPV6_MGM_REPORT ||
-		    icmp6_type == ICMPV6_MGM_REDUCTION || icmp6_type == ICMPV6_MLD2_REPORT ||
-		    icmp6_type == ICMPV6_MRDISC_ADV)
-			return PKT_TYPE_IGMP;
+		break;
+
+	case bpf_htons(ETH_P_ARP):
+		if (is_gratuitous_arp(&nh, data_end))
+			return PKT_TYPE_GRATUITOUS_ARP;
+		break;
 	}
+
 out:
-	return PKT_TYPE_UNICAST;
+	return is_multicast_ether_addr(eth->h_dest) ? PKT_TYPE_MULTICAST : PKT_TYPE_UNICAST;
 }
 
 SEC("tc")
 int record_egress_pkt(struct __sk_buff *skb)
 {
 	struct pkt_loop_data value = { .ifindex = skb->ifindex }, *v;
+	int pkt_type, act_ifindex = active_ifindex;
 	__u64 now = bpf_ktime_get_boot_ns();
 	struct pkt_loop_key key;
-	int pkt_type;
 
 	pkt_type = parse_pkt(skb, &key);
 	if (pkt_type < 0)
 		goto out;
+
+	if (pkt_type == PKT_TYPE_IGMP && skb->ifindex != act_ifindex) {
+		if (debug_output)
+			bpf_printk("Redirecting IGMP from %d to active %d\n",
+				   skb->ifindex, act_ifindex);
+		return bpf_redirect(act_ifindex, 0);
+	}
 
 	v = bpf_map_lookup_elem(&iface_state, &key);
 	if (!v) {
@@ -152,7 +166,7 @@ out:
 SEC("tc")
 int filter_ingress_pkt(struct __sk_buff *skb)
 {
-	int pkt_type, ifindex = active_ifindex;
+	int pkt_type, act_ifindex = active_ifindex;
 	__u64 now = bpf_ktime_get_boot_ns();
 	struct pkt_loop_data *value;
 	struct pkt_loop_key key;
@@ -184,13 +198,11 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-
-	/* Only allow multicast and IGMP pkts on the currently active interface */
-	if ((pkt_type == PKT_TYPE_MULTICAST || pkt_type == PKT_TYPE_IGMP) &&
-	    skb->ifindex != ifindex) {
+	/* Only allow multicast on the currently active interface */
+	if (pkt_type == PKT_TYPE_MULTICAST && skb->ingress_ifindex != act_ifindex) {
 		if (debug_output)
-			bpf_printk("Dropping packet type %d - ifindex %d != active %d\n",
-				   pkt_type, skb->ifindex, ifindex);
+			bpf_printk("Dropping multicast packet - ifindex %d != active %d\n",
+				   skb->ingress_ifindex, act_ifindex);
 		return TC_ACT_SHOT;
 	}
 
