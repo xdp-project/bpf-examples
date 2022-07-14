@@ -162,8 +162,7 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 		goto out;
 
 	value = bpf_map_lookup_elem(&iface_state, &key);
-	if (value && value->expiry_time > now &&
-	    value->ifindex != skb->ifindex) {
+	if (value && value->expiry_time > now) {
 		if (pkt_type == PKT_TYPE_GRATUITOUS_ARP &&
 		    value->lock_time < now) {
 			if (debug_output)
@@ -180,8 +179,8 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 			 * it ourselves; so just pass the whole key as a u64 and
 			 * hex-print that
 			 */
-			bpf_printk("Dropping packet with SMAC/vlan %llx - ifindex %d != expected %d\n",
-				   *(__u64 *)&key, skb->ifindex, value->ifindex);
+			bpf_printk("Dropping packet with SMAC/vlan %llx - found in lookup table\n",
+				   *(__u64 *)&key);
 		return TC_ACT_SHOT;
 	}
 
