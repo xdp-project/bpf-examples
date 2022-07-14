@@ -170,10 +170,21 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 	__u64 now = bpf_ktime_get_boot_ns();
 	struct pkt_loop_data *value;
 	struct pkt_loop_key key;
+	__u64 print_key = 0;
 
 	pkt_type = parse_pkt(skb, &key);
 	if (pkt_type < 0)
 		goto out;
+
+	if (debug_output) {
+		struct pkt_loop_key pkey = key;
+
+		/* Do byte transformation so we can print the whole key as one
+		 * u64 and get it formatted in the right byte order
+		 **/
+		pkey.src_vlan = bpf_htons(pkey.src_vlan);
+		print_key = bpf_be64_to_cpu(*(__u64 *)&pkey);
+	}
 
 	value = bpf_map_lookup_elem(&iface_state, &key);
 	if (value && value->expiry_time > now) {
@@ -181,7 +192,7 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 		    value->lock_time < now) {
 			if (debug_output)
 				bpf_printk("Received gratuitous ARP for SMAC/vlan %llx, expiring filter\n",
-					   *(__u64 *)&key);
+					   print_key);
 			value->expiry_time = 0;
 			goto out;
 		}
@@ -193,8 +204,8 @@ int filter_ingress_pkt(struct __sk_buff *skb)
 			 * it ourselves; so just pass the whole key as a u64 and
 			 * hex-print that
 			 */
-			bpf_printk("Dropping packet with SMAC/vlan %llx - found in lookup table\n",
-				   *(__u64 *)&key);
+			bpf_printk("Dropping packet type %d on ifindex %d with SMAC/vlan %llx - found in lookup table with ifindex %d\n",
+				   pkt_type, skb->ingress_ifindex, print_key, value->ifindex);
 		return TC_ACT_SHOT;
 	}
 
