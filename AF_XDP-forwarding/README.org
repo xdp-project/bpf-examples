@@ -1,0 +1,28 @@
+#+Title: AF_XDP socket multi-threaded forwarding sample application
+
+This sample code could originally be found in the Linux source code
+tree under samples/bpf. It illustrates the packet forwarding between
+multiple AF_XDP sockets in multi-threading environment. All the
+threads and sockets are sharing a common buffer pool, with each socket
+having its own private buffer cache. The sockets are created with the
+xsk_socket__create_shared() function, which allows multiple AF_XDP
+sockets to share the same UMEM object.
+
+Example 1: Single thread handling two sockets. Packets received from
+socket A (on top of interface IFA, queue QA) are forwarded to socket B
+(on top of interface IFB, queue QB) and vice-versa.  The thread is
+affinitized to CPU core C:
+
+#+BEGIN_SRC sh
+./xsk_fwd -i IFA -q QA -i IFB -q QB -c C
+#+END_SRC
+
+Example 2: Two threads, each handling two sockets. Packets from socket
+A are sent to socket B (by thread X), packets from socket B are sent
+to socket A (by thread X); packets from socket C are sent to socket D
+(by thread Y), packets from socket D are sent to socket C (by thread
+Y). The two threads are bound to CPU cores CX and CY:
+
+#+BEGIN_SRC sh
+./xdp_fwd -i IFA -q QA -i IFB -q QB -i IFC -q QC -i IFD -q QD -c CX -c CY
+#+END_SRC
