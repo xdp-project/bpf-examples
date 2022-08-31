@@ -28,8 +28,42 @@ int print_all_levels(enum libbpf_print_level level,
 #define pr_err(fmt, ...) \
 	fprintf(stderr, "%s:%d - " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
 
+int __btf_obj_id_via_fd(int fd)
+{
+	struct bpf_btf_info info;
+	__u32 len = sizeof(info);
+	int err;
+
+	memset(&info, 0, sizeof(info));
+
+	err = bpf_obj_get_info_by_fd(fd, &info, &len); /* Privileged op */
+	if (err) {
+		pr_err("ERR(%d): Can't get BTF object info on FD(%d): %s\n",
+		       errno, fd, strerror(errno));
+		return 0;
+	}
+
+	return info.id;
+}
+
+struct btf *open_vmlinux_btf(void)
+{
+	struct btf* btf_obj;
+	int fd;
+
+	//btf_obj = btf_load_vmlinux_from_kernel();
+	btf_obj = btf__load_vmlinux_btf();
+
+	fd = btf__fd(btf_obj);
+	if (fd < 0)
+		pr_err("WARN: BTF-obj miss FD(%d)\n", fd);
+
+	return btf_obj;
+}
+
 int main(int argc, char **argv)
 {
+	struct btf *vmlinux_btf;
 	int opt, longindex = 0;
         int err = 0;
 
@@ -47,6 +81,8 @@ int main(int argc, char **argv)
 	}
 	argc -= optind;
 	argv += optind;
+
+        vmlinux_btf = open_vmlinux_btf();
 
 	if (err)
 		return EXIT_FAILURE;
