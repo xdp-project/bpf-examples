@@ -177,7 +177,18 @@ int walk_all_ids(void)
 	return err;
 }
 
-int find_btf_id_by_name(const char *btf_name)
+/**
+ * find_btf_id_by_name - walks BTFs by incremental ID to find name match
+ *
+ * @btf_name: Match against this BTF name
+ * @btf_size: Ptr to return BTF kernel raw data_size (for subsequent calls)
+ *
+ * Returns:
+ *  Negative number on errors.
+ *  Positive number is BTF obj ID.
+ *
+ */
+int find_btf_id_by_name(const char *btf_name, int *btf_size)
 {
 	struct bpf_btf_info info;
 	__u32 id = 0, id2;
@@ -221,6 +232,10 @@ int find_btf_id_by_name(const char *btf_name)
 
 		name = u64_to_ptr(info.name);
 		if (strncmp(name, btf_name, 127) == 0) {
+
+			if (btf_size)
+				*btf_size = info.btf_size;
+
 			free(name);
 			return id;
 		}
@@ -243,6 +258,7 @@ int main(int argc, char **argv)
 	struct btf *vmlinux_btf;
 	int opt, longindex = 0;
 	int module_btf_id;
+	int module_btf_sz;
         int err = 0;
 
 	/* Parse commands line args */
@@ -264,10 +280,10 @@ int main(int argc, char **argv)
 
 //	err = walk_all_ids();
 
-	module_btf_id = find_btf_id_by_name(module_name);
+	module_btf_id = find_btf_id_by_name(module_name, &module_btf_sz);
 	if (module_btf_id > 0) {
-		printf("Found BTF object id:%d for module name:%s\n",
-		       module_btf_id, module_name);
+		printf("Found BTF object id:%d for module name:%s (data sz:%d)\n",
+		       module_btf_id, module_name, module_btf_sz);
 	} else {
 		pr_err("WARN(%d) - no BTF object ID found for module name: %s\n",
 		       module_btf_id, module_name);
