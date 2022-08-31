@@ -309,8 +309,8 @@ static int parse_tcp_ts(struct tcphdr *tcph, void *data_end, __u32 *tsval,
 		if (opt == 8 && opt_size == 10) {
 			if (pos + 10 > opt_end || pos + 10 > data_end)
 				return -1;
-			*tsval = *(__u32 *)(pos + 2);
-			*tsecr = *(__u32 *)(pos + 6);
+			*tsval = bpf_ntohl(*(__u32 *)(pos + 2));
+			*tsecr = bpf_ntohl(*(__u32 *)(pos + 6));
 			return 0;
 		}
 
@@ -885,6 +885,19 @@ static bool is_local_address(struct packet_info *p_info, void *ctx)
 	       ret == BPF_FIB_LKUP_RET_FWD_DISABLED;
 }
 
+static bool is_new_identifier(struct packet_id *pid, struct flow_state *f_state)
+{
+	if (pid->flow.proto == IPPROTO_TCP)
+		/* TCP timestamps should be monotonically non-decreasing
+		 * Check that pid > last_ts (considering wrap around) by
+		 * checking 0 < pid - last_ts < 2^31 as specified by
+		 * RFC7323 Section 5.2*/
+		return pid->identifier - f_state->last_id > 0 &&
+		       pid->identifier - f_state->last_id < 1UL << 31;
+
+	return pid->identifier != f_state->last_id;
+}
+
 /*
  * Attempt to create a timestamp-entry for packet p_info for flow in f_state
  */
@@ -899,7 +912,7 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 		return;
 
 	// Check if identfier is new
-	if (!new_flow && f_state->last_id == p_info->pid.identifier)
+	if (!new_flow && !is_new_identifier(&p_info->pid, f_state))
 		return;
 	f_state->last_id = p_info->pid.identifier;
 
