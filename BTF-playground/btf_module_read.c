@@ -16,11 +16,13 @@
 
 #include <linux/err.h>
 
-static const char *module_name = "tun";
-static const char *symbol_name = "tun_struct";
+static char module_name[128] = "tun";	 	/* Default module to lookup */
+static char symbol_name[128] = "tun_struct";	/* Default symbol to lookup */
 
 static const struct option long_options[] = {
-	{ "debug",	no_argument,	NULL,	'd' },
+	{ "debug",		no_argument,		NULL,	'd' },
+	{ "module-name",	required_argument,	NULL,	'm' },
+	{ "symbol-name",	required_argument,	NULL,	's' },
 	{ 0, 0, NULL, 0 }
 };
 
@@ -97,11 +99,17 @@ int main(int argc, char **argv)
 	int err = 0;
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "d",
+	while ((opt = getopt_long(argc, argv, "dm:s:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
 			libbpf_set_print(print_all_levels);
+			break;
+		case 'm': /* --module */
+			strncpy(module_name, optarg, sizeof(module_name) - 1);
+			break;
+		case 's': /* --symbol */
+			strncpy(symbol_name, optarg, sizeof(symbol_name) - 1);
 			break;
 		default:
 			pr_err("Unrecognized option '%s'\n", argv[optind - 1]);

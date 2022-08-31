@@ -15,9 +15,12 @@
 #include <linux/err.h>
 
 static const struct option long_options[] = {
-	{ "debug",	no_argument,	NULL,	'd' },
+	{ "debug",		no_argument,		NULL,	'd' },
+	{ "module-name",	required_argument,	NULL,	'm' },
 	{ 0, 0, NULL, 0 }
 };
+
+static char module_name[128] = "tun"; /* Default module to lookup */
 
 int print_all_levels(enum libbpf_print_level level,
 		     const char *format, va_list args)
@@ -255,8 +258,6 @@ int find_btf_id_by_name(const char *btf_name, int *btf_size)
 }
 
 
-static const char *module_name = "tun";
-
 int main(int argc, char **argv)
 {
 //	struct btf *vmlinux_btf;
@@ -265,12 +266,16 @@ int main(int argc, char **argv)
 	int module_btf_sz;
         int err = 0;
 
+
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "d",
+	while ((opt = getopt_long(argc, argv, "dm:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
 			libbpf_set_print(print_all_levels);
+			break;
+		case 'm': /* --module */
+			strncpy(module_name, optarg, sizeof(module_name) - 1);
 			break;
 		default:
 			pr_err("Unrecognized option '%s'\n", argv[optind - 1]);
