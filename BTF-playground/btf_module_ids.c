@@ -28,6 +28,16 @@ int print_all_levels(enum libbpf_print_level level,
 #define pr_err(fmt, ...) \
 	fprintf(stderr, "%s:%d - " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
 
+static inline __u64 ptr_to_u64(const void *ptr)
+{
+	return (__u64) (unsigned long) ptr;
+}
+
+static inline const void *u64_to_ptr(__u64 val)
+{
+	return (const void *)(unsigned long)val;
+}
+
 int __btf_obj_id_via_fd(int fd)
 {
 	struct bpf_btf_info info;
@@ -44,6 +54,30 @@ int __btf_obj_id_via_fd(int fd)
 	}
 
 	return info.id;
+}
+
+char * __btf_obj_name_via_fd(int fd)
+{
+	struct bpf_btf_info info;
+	__u32 len = sizeof(info);
+	char name[128];
+	int err;
+
+	memset(&info, 0, sizeof(info));
+	memset(name, 0, sizeof(name));
+
+	info.name_len = sizeof(name);
+	info.name = ptr_to_u64(name);
+
+	err = bpf_obj_get_info_by_fd(fd, &info, &len); /* Privileged op */
+	if (err) {
+		pr_err("ERR(%d): Can't get BTF object info on FD(%d): %s\n",
+		       errno, fd, strerror(errno));
+		return 0;
+	}
+
+	/* Caller must call free() */
+	return strndup(name, sizeof(name));
 }
 
 struct btf *open_vmlinux_btf(void)
@@ -64,6 +98,7 @@ struct btf *open_vmlinux_btf(void)
 int walk_all_ids(void)
 {
 	__u32 lookup_id, id = 0;
+	char *name;
 	int err;
 	int fd;
 
@@ -93,8 +128,10 @@ int walk_all_ids(void)
 		}
 
 		lookup_id = __btf_obj_id_via_fd(fd);
-		printf("Walk id:%d lookup_id:%d (FD:%d)\n",
-		       id, lookup_id, fd);
+		name = __btf_obj_name_via_fd(fd);
+		printf("Walk id:%d lookup_id:%d name:%s\t\t(FD:%d)\n",
+		       id, lookup_id, name, fd);
+		free(name);
 		close(fd);
 	}
 
