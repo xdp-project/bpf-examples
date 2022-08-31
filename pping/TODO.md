@@ -202,29 +202,6 @@ concurrent packets have different identifiers there may be a lost
 update (but for TCP timestamps, concurrent packets would typically be
 expected to have the same timestamp).
 
-A possibly more severe issue is out-of-order packets. If a packet with
-an old identifier arrives out of order, that identifier could be
-detected as a new identifier. If for example the following flow of
-four packets with just two different identifiers (id1 and id2) were to
-occur:
-
-id1 -> id2 -> id1 -> id2
-
-Then the tc/egress program would consider each of these packets to
-have new identifiers and try to create a new timestamp for each of
-them if the sampling strategy allows it. However even if the sampling
-strategy allows it, the (incorrect) creation of timestamps for id1 and
-id2 the second time would only be successful in case the first
-timestamps for id1 and id2 have already been matched against (and thus
-deleted). Even if that is the case, they would only result in
-reporting an incorrect RTT in case there are also new matches against
-these identifiers.
-
-This issue could be avoided entirely by requiring that new-id > old-id
-instead of simply checking that new-id != old-id, as TCP timestamps
-should monotonically increase. That may however not be a suitable
-solution for other types of identifiers.
-
 ### Rate-limiting new timestamps
 In the tc/egress program packets to timestamp are sampled by using a
 per-flow rate-limit, which is enforced by storing when the last
