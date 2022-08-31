@@ -72,6 +72,22 @@ int fail1_get_kernel_btf_obj_id(struct btf *btf_obj)
 	return __btf_obj_id_via_fd(btf_fd);
 }
 
+int fail2_get_kernel_btf_obj_id(const char *module_name)
+{
+	/* *** DOES NOT WORK ***/
+	char path[512] = {};
+	int fd;
+
+	snprintf(path, sizeof(path), "/sys/kernel/btf/%s", module_name);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		pr_err("ERR: Cannot open BTF file %s (FD:%d)\n", path, fd);
+		return 0;
+	}
+
+	return __btf_obj_id_via_fd(fd);
+}
+
 int main(int argc, char **argv)
 {
 	struct btf *vmlinux_btf, *module_btf = NULL;
@@ -121,6 +137,8 @@ int main(int argc, char **argv)
 	/* Wanted to get BTF object ID used by kernel that ident BTF */
 	//btf_obj_id = fail1_get_kernel_btf_obj_id(vmlinux_btf);
 	btf_obj_id = fail1_get_kernel_btf_obj_id(module_btf);
+	if (!btf_obj_id)
+		btf_obj_id = fail2_get_kernel_btf_obj_id(module_name);
 
 	printf("Module:%s (BTF-obj ID:%d) Symbol:%s have BTF type id:%d\n",
 	       module_name, btf_obj_id, symbol_name, type_id);
