@@ -61,6 +61,46 @@ struct btf *open_vmlinux_btf(void)
 	return btf_obj;
 }
 
+int walk_all_ids(void)
+{
+	__u32 lookup_id, id = 0;
+	int err;
+	int fd;
+
+	while (true) {
+		err = bpf_btf_get_next_id(id, &id);
+		if (err) {
+			if (errno == ENOENT) {
+				err = 0;
+				pr_err("No more IDs (last id:%d)\n", id);
+				break;
+			}
+			pr_err("can't get next BTF object: %s%s\n",
+			       strerror(errno),
+			       errno == EINVAL ? " -- kernel too old?" : "");
+			err = -1;
+			break;
+		}
+
+		fd = bpf_btf_get_fd_by_id(id);
+		if (fd < 0) {
+			if (errno == ENOENT)
+				continue;
+			pr_err("can't get BTF object by id (%u): %s",
+			       id, strerror(errno));
+			err = -1;
+			break;
+		}
+
+		lookup_id = __btf_obj_id_via_fd(fd);
+		printf("Walk id:%d lookup_id:%d (FD:%d)\n",
+		       id, lookup_id, fd);
+		close(fd);
+	}
+
+	return err;
+}
+
 int main(int argc, char **argv)
 {
 	struct btf *vmlinux_btf;
@@ -83,6 +123,8 @@ int main(int argc, char **argv)
 	argv += optind;
 
         vmlinux_btf = open_vmlinux_btf();
+
+	err = walk_all_ids();
 
 	if (err)
 		return EXIT_FAILURE;
