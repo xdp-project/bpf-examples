@@ -33,7 +33,12 @@ static inline __u64 ptr_to_u64(const void *ptr)
 	return (__u64) (unsigned long) ptr;
 }
 
-static inline const void *u64_to_ptr(__u64 val)
+static inline void *u64_to_ptr(__u64 val)
+{
+	return (void *)(unsigned long)val;
+}
+
+static inline const void *u64_to_const_ptr(__u64 val)
 {
 	return (const void *)(unsigned long)val;
 }
@@ -79,6 +84,40 @@ char * __btf_obj_name_via_fd(int fd)
 	/* Caller must call free() */
 	return strndup(name, sizeof(name));
 }
+
+int __btf_obj_info_via_fd(int fd, struct bpf_btf_info *info)
+{
+#define SZ 128
+	__u32 len = sizeof(*info);
+	char *name;
+	int err;
+
+	if (!info)
+		return -1;
+
+	/* Caller must call free() */
+	name = malloc(SZ);
+	if (!name)
+		return -ENOMEM;
+
+	memset(name, 0, SZ);
+	memset(info, 0, sizeof(*info));
+
+	info->name_len = SZ;
+	info->name = ptr_to_u64(name);
+
+	err = bpf_obj_get_info_by_fd(fd, info, &len); /* Privileged op */
+	if (err) {
+		pr_err("ERR(%d): Can't get BTF object info on FD(%d): %s\n",
+		       errno, fd, strerror(errno));
+		free(name);
+		return 0;
+	}
+
+	return info->id;
+#undef SZ
+}
+
 
 struct btf *open_vmlinux_btf(void)
 {
@@ -138,10 +177,72 @@ int walk_all_ids(void)
 	return err;
 }
 
+int find_btf_id_by_name(const char *btf_name)
+{
+	struct bpf_btf_info info;
+	__u32 id = 0, id2;
+	char *name;
+	int err;
+	int fd;
+
+	while (true) {
+		err = bpf_btf_get_next_id(id, &id);
+		if (err) {
+			if (errno == ENOENT) {
+				err = 0;
+				pr_err("No more IDs (last id:%d)\n", id);
+				break;
+			}
+			pr_err("can't get next BTF object: %s%s\n",
+			       strerror(errno),
+			       errno == EINVAL ? " -- kernel too old?" : "");
+			err = -1;
+			break;
+		}
+
+		fd = bpf_btf_get_fd_by_id(id);
+		if (fd < 0) {
+			if (errno == ENOENT)
+				continue;
+			pr_err("can't get BTF object by id (%u): %s",
+			       id, strerror(errno));
+			err = -1;
+			break;
+		}
+
+		id2 = __btf_obj_info_via_fd(fd, &info);
+		if (id2 <= 0) {
+			err = -2;
+			break;
+		}
+
+		if (info.name_len == 0) /* Skip non/empty names */
+			continue;
+
+		name = u64_to_ptr(info.name);
+		if (strncmp(name, btf_name, 127) == 0) {
+			free(name);
+			return id;
+		}
+
+		//printf("Walk id:%d lookup_id:%d name:%s\t\t(len:%d)\n",
+		//       id, id2, name, info.name_len);
+
+		free(name);
+		close(fd);
+	}
+
+	return err;
+}
+
+
+static const char *module_name = "tun";
+
 int main(int argc, char **argv)
 {
 	struct btf *vmlinux_btf;
 	int opt, longindex = 0;
+	int module_btf_id;
         int err = 0;
 
 	/* Parse commands line args */
@@ -161,8 +262,18 @@ int main(int argc, char **argv)
 
         vmlinux_btf = open_vmlinux_btf();
 
-	err = walk_all_ids();
+//	err = walk_all_ids();
 
+	module_btf_id = find_btf_id_by_name(module_name);
+	if (module_btf_id > 0) {
+		printf("Found BTF object id:%d for module name:%s\n",
+		       module_btf_id, module_name);
+	} else {
+		pr_err("WARN(%d) - no BTF object ID found for module name: %s\n",
+		       module_btf_id, module_name);
+	}
+
+	btf__free(vmlinux_btf);
 	if (err)
 		return EXIT_FAILURE;
 	return EXIT_SUCCESS;
