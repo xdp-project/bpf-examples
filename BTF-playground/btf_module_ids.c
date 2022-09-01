@@ -184,7 +184,7 @@ int find_btf_id_by_name(const char *btf_name, int *btf_size)
 	int fd;
 
 	while (true) {
-		err = bpf_btf_get_next_id(id, &id);
+		err = bpf_btf_get_next_id(id, &id); /* Privileged op */
 		if (err) {
 			if (errno == ENOENT) {
 				err = 0;
@@ -198,11 +198,11 @@ int find_btf_id_by_name(const char *btf_name, int *btf_size)
 			break;
 		}
 
-		fd = bpf_btf_get_fd_by_id(id);
+		fd = bpf_btf_get_fd_by_id(id); /* Privileged op */
 		if (fd < 0) {
 			if (errno == ENOENT)
 				continue;
-			pr_err("can't get BTF object by id (%u): %s",
+			pr_err("can't get BTF object by id (%u): %s\n",
 			       id, strerror(errno));
 			err = -1;
 			break;
