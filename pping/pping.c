@@ -864,6 +864,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 				struct pping_config *config)
 {
 	int err, detach_err;
+	config->created_tc_hook = false;
 
 	// Open and load ELF file
 	*obj = bpf_object__open(config->object_path);
@@ -897,8 +898,8 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 			return err;
 		}
 		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
-				config->ingress_prog,
-				&config->tc_ingress_opts, NULL);
+				config->ingress_prog, &config->tc_ingress_opts,
+				&config->created_tc_hook);
 		config->ingress_prog_id = err;
 	}
 	if (err < 0) {
@@ -909,10 +910,10 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	}
 
 	// Attach egress prog
-	config->egress_prog_id =
-		tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
-			  config->egress_prog, &config->tc_egress_opts,
-			  &config->created_tc_hook);
+	config->egress_prog_id = tc_attach(
+		*obj, config->ifindex, BPF_TC_EGRESS, config->egress_prog,
+		&config->tc_egress_opts,
+		config->created_tc_hook ? NULL : &config->created_tc_hook);
 	if (config->egress_prog_id < 0) {
 		fprintf(stderr,
 			"Failed attaching egress BPF program on interface %s: %s\n",
@@ -921,7 +922,6 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		err = config->egress_prog_id;
 		goto egress_err;
 	}
-
 
 	return 0;
 
