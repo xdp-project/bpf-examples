@@ -339,6 +339,9 @@ static int parse_tcp_identifier(struct parsing_context *pctx,
 	if (parse_tcphdr(&pctx->nh, pctx->data_end, &hdr) < 0)
 		return -1;
 
+	if (config.skip_syn && hdr->syn)
+		return -1;
+
 	if (parse_tcp_ts(hdr, pctx->data_end, &proto_info->pid,
 			 &proto_info->reply_pid) < 0)
 		return -1; //Possible TODO, fall back on seq/ack instead

@@ -102,6 +102,7 @@ static const struct option long_options[] = {
 	{ "tcp",              no_argument,       NULL, 'T' }, // Calculate and report RTTs for TCP traffic (with TCP timestamps)
 	{ "icmp",             no_argument,       NULL, 'C' }, // Calculate and report RTTs for ICMP echo-reply traffic
 	{ "include-local",    no_argument,       NULL, 'l' }, // Also report "internal" RTTs
+	{ "include-SYN",      no_argument,       NULL, 's' }, // Include SYN-packets in tracking (may fill up flow state with half-open connections)
 	{ 0, 0, NULL, 0 }
 };
 
@@ -170,8 +171,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	config->force = false;
 	config->bpf_config.track_tcp = false;
 	config->bpf_config.track_icmp = false;
+	config->bpf_config.skip_syn = true;
 
-	while ((opt = getopt_long(argc, argv, "hflTCi:r:R:t:c:F:I:",
+	while ((opt = getopt_long(argc, argv, "hflTCsi:r:R:t:c:F:I:",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -265,6 +267,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 'C':
 			config->bpf_config.track_icmp = true;
+			break;
+		case 's':
+			config->bpf_config.skip_syn = false;
 			break;
 		case 'h':
 			printf("HELP:\n");
