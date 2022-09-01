@@ -121,26 +121,6 @@ int __btf_obj_info_via_fd(int fd, struct bpf_btf_info *info)
 #undef SZ
 }
 
-struct btf *open_vmlinux_btf(void)
-{
-	struct btf* btf_obj;
-	int fd;
-
-	//btf_obj = btf_load_vmlinux_from_kernel();
-	btf_obj = btf__load_vmlinux_btf();
-
-	/* *** DOES NOT WORK ***
-	 *
-	 * The struct btf object returned by btf__load_vmlinux_btf() doesn't
-	 * have a file descriptor set we can use.
-	 */
-	fd = btf__fd(btf_obj);
-	if (fd < 0)
-		pr_err("WARN: BTF-obj miss FD(%d)\n", fd);
-
-	return btf_obj;
-}
-
 int walk_all_ids(void)
 {
 	__u32 lookup_id, id = 0;
@@ -260,7 +240,6 @@ int find_btf_id_by_name(const char *btf_name, int *btf_size)
 
 int main(int argc, char **argv)
 {
-//	struct btf *vmlinux_btf;
 	int opt, longindex = 0;
 	int module_btf_id;
 	int module_btf_sz;
@@ -285,8 +264,6 @@ int main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-//	vmlinux_btf = open_vmlinux_btf();
-
 //	err = walk_all_ids();
 
 	module_btf_id = find_btf_id_by_name(module_name, &module_btf_sz);
@@ -298,7 +275,6 @@ int main(int argc, char **argv)
 		       module_btf_id, module_name);
 	}
 
-//	btf__free(vmlinux_btf);
 	if (err)
 		return EXIT_FAILURE;
 	return EXIT_SUCCESS;
