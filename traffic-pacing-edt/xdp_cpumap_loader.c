@@ -219,7 +219,7 @@ int do_xdp_attach(int ifindex, struct bpf_program *prog, __u32 xdp_flags)
 		return EXIT_FAIL_BPF;
 	}
 
-	err = bpf_set_link_xdp_fd(ifindex, prog_fd, xdp_flags);
+	err = bpf_xdp_attach(ifindex, prog_fd, xdp_flags, NULL);
 	if (err) {
 		fprintf(stderr, "%s(): link set xdp fd failed (err:%d)\n",
 			__func__, err);
@@ -232,7 +232,7 @@ int do_xdp_detach(int ifindex, __u32 xdp_flags)
 {
 	int err;
 
-	err = bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+	err = bpf_xdp_detach(ifindex, xdp_flags, NULL);
 	if (err) {
 		fprintf(stderr, "%s(): link set xdp fd failed (err:%d)\n",
 			__func__, err);
@@ -346,7 +346,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Pickup first BPF-program */
-	prog = bpf_program__next(NULL, obj);
+	prog = bpf_object__next_program(obj, NULL);
 	if (!prog) {
 		printf("No program!\n");
 		err = EXIT_FAIL_BPF;
