@@ -29,8 +29,8 @@ int main()
         if (bpf_object__load(obj_target))
             goto out;
 
-        target = bpf_object__find_program_by_title(obj_target, "xdp/pass");
-        prog = bpf_object__find_program_by_title(obj_prog, "xdp/pass");
+        target = bpf_object__find_program_by_name(obj_target, "xdp_pass");
+        prog = bpf_object__find_program_by_name(obj_prog, "xdp_pass");
 
         if (!target || !prog)
                 goto out;
