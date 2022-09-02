@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
 		return err;
 	}
 
-	while ((map = bpf_map__next(map, obj))) {
+	while ((map = bpf_object__next_map(obj, map))) {
 		if (strstr(bpf_map__name(map), ".rodata")) {
 			int ip_only = (iftype == ARPHRD_NONE);
 			bpf_map__set_initial_value(map, &ip_only, sizeof(ip_only));
