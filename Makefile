@@ -13,7 +13,11 @@ MAKEFLAGS += --no-print-directory
 Q = @
 endif
 
-SUBDIRS := encap-forward lsm-nobpf
+SUBDIRS := encap-forward
+SUBDIRS += lsm-nobpf
+SUBDIRS += nat64-bpf
+SUBDIRS += traffic-pacing-edt
+
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
 
 all: lib $(SUBDIRS)
