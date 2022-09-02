@@ -148,8 +148,8 @@ int main(int argc, char **argv)
 	if (!btf_obj_id)
 		btf_obj_id = fail2_get_kernel_btf_obj_id(module_name);
 
-	printf("Module:%s (BTF-obj ID:%d) Symbol:%s have BTF type id:%d\n",
-	       module_name, btf_obj_id, symbol_name, type_id);
+	printf("Module:%s Symbol:%s have BTF type id:%d\n",
+	       module_name, symbol_name, type_id);
 
 out:
 	btf__free(module_btf);
