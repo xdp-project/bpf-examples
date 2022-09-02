@@ -217,6 +217,9 @@ int find_btf_id_by_name(const char *btf_name, int *btf_size)
 		if (info.name_len == 0) /* Skip non/empty names */
 			continue;
 
+		if (info.kernel_btf == 0) /* Looking for kernel module BTF */
+			continue;
+
 		name = u64_to_ptr(info.name);
 		if (strncmp(name, btf_name, 127) == 0) {
 
