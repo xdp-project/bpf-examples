@@ -26,7 +26,7 @@ all: lib $(SUBDIRS)
 lib: config.mk check_submodule
 	@echo; echo $@; $(MAKE) -C $@
 
-$(SUBDIRS):
+$(SUBDIRS): lib
 	@echo; echo $@; $(MAKE) -C $@
 
 help:
