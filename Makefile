@@ -17,7 +17,11 @@ SUBDIRS := encap-forward
 SUBDIRS += ktrace-CO-RE
 SUBDIRS += lsm-nobpf
 SUBDIRS += nat64-bpf
+SUBDIRS += pkt-loop-filter
+SUBDIRS += pping
 SUBDIRS += preserve-dscp
+SUBDIRS += tc-basic-classifier
+SUBDIRS += tc-policy
 SUBDIRS += traffic-pacing-edt
 
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
