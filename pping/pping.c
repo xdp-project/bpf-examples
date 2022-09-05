@@ -937,7 +937,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		fprintf(stderr,
 			"Failed attaching ingress BPF program on interface %s: %s\n",
 			config->ifname, get_libbpf_strerror(err));
-		return err;
+		goto ingress_err;
 	}
 
 	// Attach egress prog
@@ -970,6 +970,8 @@ egress_err:
 		fprintf(stderr,
 			"Failed detaching ingress program from %s: %s\n",
 			config->ifname, get_libbpf_strerror(detach_err));
+ingress_err:
+	bpf_object__close(*obj);
 	return err;
 }
 
@@ -1179,6 +1181,8 @@ cleanup_attached_progs:
 		fprintf(stderr,
 			"Failed removing egress program from interface %s: %s\n",
 			config.ifname, get_libbpf_strerror(detach_err));
+
+	bpf_object__close(obj);
 
 	return (err != 0 && keep_running) || detach_err != 0;
 }
