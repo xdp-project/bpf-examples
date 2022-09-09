@@ -389,9 +389,9 @@ int main(int argc, char *argv[])
 	num_addr = (cfg.c.v4_prefix | ~cfg.c.v4_mask) - cfg.c.v4_prefix - 2;
 
 	obj->bss->config = cfg.c;
-	bpf_map__resize(obj->maps.v6_state_map, num_addr);
-	bpf_map__resize(obj->maps.v4_reversemap, num_addr);
-	bpf_map__resize(obj->maps.reclaimed_addrs, num_addr);
+	bpf_map__set_max_entries(obj->maps.v6_state_map, num_addr);
+	bpf_map__set_max_entries(obj->maps.v4_reversemap, num_addr);
+	bpf_map__set_max_entries(obj->maps.reclaimed_addrs, num_addr);
 
 	err = nat64_kern__load(obj);
 	if (err) {

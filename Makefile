@@ -13,7 +13,17 @@ MAKEFLAGS += --no-print-directory
 Q = @
 endif
 
-SUBDIRS := encap-forward lsm-nobpf
+SUBDIRS := encap-forward
+SUBDIRS += ktrace-CO-RE
+SUBDIRS += lsm-nobpf
+SUBDIRS += nat64-bpf
+SUBDIRS += pkt-loop-filter
+SUBDIRS += pping
+SUBDIRS += preserve-dscp
+SUBDIRS += tc-basic-classifier
+SUBDIRS += tc-policy
+SUBDIRS += traffic-pacing-edt
+
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
 
 all: lib $(SUBDIRS)
@@ -21,7 +31,7 @@ all: lib $(SUBDIRS)
 lib: config.mk check_submodule
 	@echo; echo $@; $(MAKE) -C $@
 
-$(SUBDIRS):
+$(SUBDIRS): lib
 	@echo; echo $@; $(MAKE) -C $@
 
 help:
