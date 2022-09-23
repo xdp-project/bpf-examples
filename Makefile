@@ -23,6 +23,8 @@ SUBDIRS += preserve-dscp
 SUBDIRS += tc-basic-classifier
 SUBDIRS += tc-policy
 SUBDIRS += traffic-pacing-edt
+SUBDIRS += AF_XDP-forwarding
+SUBDIRS += AF_XDP-example
 
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
 
