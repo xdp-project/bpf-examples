@@ -703,6 +703,27 @@ static void send_map_full_event(void *ctx, struct packet_info *p_info,
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &me, sizeof(me));
 }
 
+static void send_rtt_event(void *ctx, __u64 rtt, struct flow_state *f_state,
+			  struct packet_info *p_info)
+{
+	struct rtt_event re = {
+		.event_type = EVENT_TYPE_RTT,
+		.timestamp = p_info->time,
+		.flow = p_info->pid.flow,
+		.padding = 0,
+		.rtt = rtt,
+		.min_rtt = f_state->min_rtt,
+		.sent_pkts = f_state->sent_pkts,
+		.sent_bytes = f_state->sent_bytes,
+		.rec_pkts = f_state->rec_pkts,
+		.rec_bytes = f_state->rec_bytes,
+		.match_on_egress = !p_info->is_ingress,
+		.reserved = { 0 },
+	};
+
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
+}
+
 /*
  * Initilizes an "empty" flow state based on the forward direction of the
  * current packet
@@ -949,7 +970,7 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 static void pping_match_packet(struct flow_state *f_state, void *ctx,
 			       struct packet_info *p_info)
 {
-	struct rtt_event re = { 0 };
+	__u64 rtt;
 	__u64 *p_ts;
 
 	if (!is_flowstate_active(f_state) || !p_info->reply_pid_valid)
@@ -962,7 +983,7 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	if (!p_ts || p_info->time < *p_ts)
 		return;
 
-	re.rtt = p_info->time - *p_ts;
+	rtt = p_info->time - *p_ts;
 
 	// Delete timestamp entry as soon as RTT is calculated
 	if (bpf_map_delete_elem(&packet_ts, &p_info->reply_pid) == 0) {
@@ -970,21 +991,11 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 		debug_increment_autodel(PPING_MAP_PACKETTS);
 	}
 
-	if (f_state->min_rtt == 0 || re.rtt < f_state->min_rtt)
-		f_state->min_rtt = re.rtt;
-	f_state->srtt = calculate_srtt(f_state->srtt, re.rtt);
+	if (f_state->min_rtt == 0 || rtt < f_state->min_rtt)
+		f_state->min_rtt = rtt;
+	f_state->srtt = calculate_srtt(f_state->srtt, rtt);
 
-	// Fill event and push to perf-buffer
-	re.event_type = EVENT_TYPE_RTT;
-	re.timestamp = p_info->time;
-	re.min_rtt = f_state->min_rtt;
-	re.sent_pkts = f_state->sent_pkts;
-	re.sent_bytes = f_state->sent_bytes;
-	re.rec_pkts = f_state->rec_pkts;
-	re.rec_bytes = f_state->rec_bytes;
-	re.flow = p_info->pid.flow;
-	re.match_on_egress = !p_info->is_ingress;
-	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &re, sizeof(re));
+	send_rtt_event(ctx, rtt, f_state, p_info);
 }
 
 /*
