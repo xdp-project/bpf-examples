@@ -69,7 +69,7 @@ static __always_inline __u32 get_sqrt_sh16(__u64 cnt)
 
 static __always_inline __u64 get_next_interval_sqrt(__u64 cnt)
 {
-	__u64 val = (__u64)CODEL_EXCEED_INTERVAL << 16 / get_sqrt_sh16(cnt);
+	__u64 val = ((__u64)CODEL_EXCEED_INTERVAL << 16) / get_sqrt_sh16(cnt);
 	return val;
 }
 
