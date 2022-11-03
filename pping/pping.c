@@ -1013,7 +1013,7 @@ int main(int argc, char *argv[])
 		.clean_args = { .cleanup_interval = 1 * NS_PER_SECOND,
 				.valid_thread = false },
 		.object_path = "pping_kern.o",
-		.ingress_prog = PROG_INGRESS_XDP,
+		.ingress_prog = PROG_INGRESS_TC,
 		.egress_prog = PROG_EGRESS_TC,
 		.cleanup_ts_prog = "tsmap_cleanup",
 		.cleanup_flow_prog = "flowmap_cleanup",
