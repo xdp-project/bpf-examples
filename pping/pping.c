@@ -62,6 +62,7 @@ struct map_cleanup_args {
 	struct bpf_link *tsclean_link;
 	struct bpf_link *flowclean_link;
 	__u64 cleanup_interval;
+	int err;
 	bool valid_thread;
 };
 
@@ -562,28 +563,37 @@ static void *periodic_map_cleanup(void *args)
 	interval.tv_sec = argp->cleanup_interval / NS_PER_SECOND;
 	interval.tv_nsec = argp->cleanup_interval % NS_PER_SECOND;
 	char buf[256];
-	int err;
+	int err1, err2;
 
+	argp->err = 0;
 	while (keep_running) {
-		err = iter_map_execute(argp->tsclean_link);
-		if (err) {
+		err1 = iter_map_execute(argp->tsclean_link);
+		if (err1) {
 			// Running in separate thread so can't use get_libbpf_strerror
-			libbpf_strerror(err, buf, sizeof(buf));
+			libbpf_strerror(err1, buf, sizeof(buf));
 			fprintf(stderr,
 				"Error while cleaning timestamp map: %s\n",
 				buf);
 		}
 
-		err = iter_map_execute(argp->flowclean_link);
-		if (err) {
-			libbpf_strerror(err, buf, sizeof(buf));
+		err2 = iter_map_execute(argp->flowclean_link);
+		if (err2) {
+			libbpf_strerror(err2, buf, sizeof(buf));
 			fprintf(stderr, "Error while cleaning flow map: %s\n",
 				buf);
 		}
 
+		if (err1 || err2) {
+			fprintf(stderr,
+				"Failed cleaning maps - aborting program\n");
+			argp->err = err1 ? err1 : err2;
+			abort_program(SIGUSR1);
+			break;
+		}
+
 		nanosleep(&interval, NULL);
 	}
-	pthread_exit(NULL);
+	pthread_exit(&argp->err);
 }
 
 static __u64 convert_monotonic_to_realtime(__u64 monotonic_time)
@@ -979,6 +989,7 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 					 struct pping_config *config)
 {
 	int err;
+	config->clean_args.err = 0;
 
 	if (config->clean_args.valid_thread) {
 		fprintf(stderr,
@@ -1031,6 +1042,7 @@ destroy_ts_link:
 int main(int argc, char *argv[])
 {
 	int err = 0, detach_err;
+	void *thread_err;
 	struct bpf_object *obj = NULL;
 	struct perf_buffer *pb = NULL;
 
@@ -1153,7 +1165,9 @@ int main(int argc, char *argv[])
 
 	if (config.clean_args.valid_thread) {
 		pthread_cancel(config.clean_args.tid);
-		pthread_join(config.clean_args.tid, NULL);
+		pthread_join(config.clean_args.tid, &thread_err);
+		if (thread_err != PTHREAD_CANCELED)
+			err = err ? err : config.clean_args.err;
 
 		bpf_link__destroy(config.clean_args.tsclean_link);
 		bpf_link__destroy(config.clean_args.flowclean_link);
