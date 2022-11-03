@@ -911,6 +911,16 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		/* xdp_attach() loads 'obj' through libxdp */
 		err = xdp_attach(*obj, config->ingress_prog, config->ifindex,
 				 &config->xdp_prog, config->xdp_mode);
+		if (err) {
+			fprintf(stderr, "Failed attaching XDP program\n");
+			if (config->xdp_mode == XDP_MODE_NATIVE)
+				fprintf(stderr,
+					"%s may not have driver support for XDP, try --xdp-mode generic instead\n",
+					config->ifname);
+			else
+				fprintf(stderr,
+					"Try updating kernel or use --ingress-hook tc instead\n");
+		}
 	} else {
 		err = bpf_object__load(*obj);
 		if (err) {
