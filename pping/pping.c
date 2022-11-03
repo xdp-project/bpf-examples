@@ -32,6 +32,10 @@ static const char *__doc__ =
 #define MON_TO_REAL_UPDATE_FREQ                                                \
 	(1 * NS_PER_SECOND) // Update offset between CLOCK_MONOTONIC and CLOCK_REALTIME once per second
 
+#define PROG_INGRESS_TC "pping_tc_ingress"
+#define PROG_INGRESS_XDP "pping_xdp_ingress"
+#define PROG_EGRESS_TC "pping_tc_egress"
+
 enum PPING_OUTPUT_FORMAT {
 	PPING_OUTPUT_STANDARD,
 	PPING_OUTPUT_JSON,
@@ -247,9 +251,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 'I':
 			if (strcmp(optarg, "xdp") == 0) {
-				config->ingress_prog = "pping_xdp_ingress";
+				config->ingress_prog = PROG_INGRESS_XDP;
 			} else if (strcmp(optarg, "tc") == 0) {
-				config->ingress_prog = "pping_tc_ingress";
+				config->ingress_prog = PROG_INGRESS_TC;
 			} else {
 				fprintf(stderr,
 					"ingress-hook must be \"xdp\" or \"tc\"\n");
@@ -849,9 +853,9 @@ static int set_programs_to_load(struct bpf_object *obj,
 {
 	struct bpf_program *prog;
 	char *unload_prog =
-		strcmp(config->ingress_prog, "pping_xdp_ingress") != 0 ?
-			"pping_xdp_ingress" :
-			      "pping_tc_ingress";
+		strcmp(config->ingress_prog, PROG_INGRESS_XDP) != 0 ?
+			PROG_INGRESS_XDP :
+			PROG_INGRESS_TC;
 
 	prog = bpf_object__find_program_by_name(obj, unload_prog);
 	if (libbpf_get_error(prog))
@@ -886,7 +890,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	set_programs_to_load(*obj, config);
 
 	// Attach ingress prog
-	if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0) {
+	if (strcmp(config->ingress_prog, PROG_INGRESS_XDP) == 0) {
 		/* xdp_attach() loads 'obj' through libxdp */
 		err = xdp_attach(*obj, config->ingress_prog, config->ifindex,
 				 &config->xdp_prog);
@@ -1009,8 +1013,8 @@ int main(int argc, char *argv[])
 		.clean_args = { .cleanup_interval = 1 * NS_PER_SECOND,
 				.valid_thread = false },
 		.object_path = "pping_kern.o",
-		.ingress_prog = "pping_xdp_ingress",
-		.egress_prog = "pping_tc_egress",
+		.ingress_prog = PROG_INGRESS_XDP,
+		.egress_prog = PROG_EGRESS_TC,
 		.cleanup_ts_prog = "tsmap_cleanup",
 		.cleanup_flow_prog = "flowmap_cleanup",
 		.packet_map = "packet_ts",
