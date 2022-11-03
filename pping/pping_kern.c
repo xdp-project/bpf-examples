@@ -1041,7 +1041,7 @@ static void pping_xdp(struct xdp_md *ctx)
 		return;
 
 	p_info.is_ingress = true;
-	p_info.ingress_ifindex = ctx->rx_queue_index;
+	p_info.ingress_ifindex = ctx->ingress_ifindex;
 
 	pping_parsed_packet(ctx, &p_info);
 }
