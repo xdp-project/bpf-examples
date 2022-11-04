@@ -104,6 +104,7 @@ struct packet_info {
 	bool reply_pid_valid;        // reply_identifier can be used to match packet
 	enum flow_event_type event_type; // flow event triggered by packet
 	enum flow_event_reason event_reason; // reason for triggering flow event
+	bool wait_first_edge;        // Do we need to wait for the first identifier change before timestamping?
 };
 
 /*
@@ -116,6 +117,7 @@ struct protocol_info {
 	bool reply_pid_valid;
 	enum flow_event_type event_type;
 	enum flow_event_reason event_reason;
+	bool wait_first_edge;
 };
 
 char _license[] SEC("license") = "GPL";
@@ -364,9 +366,11 @@ static int parse_tcp_identifier(struct parsing_context *pctx,
 		proto_info->event_type = FLOW_EVENT_OPENING;
 		proto_info->event_reason =
 			hdr->ack ? EVENT_REASON_SYN_ACK : EVENT_REASON_SYN;
+		proto_info->wait_first_edge = false;
 	} else {
 		proto_info->event_type = FLOW_EVENT_NONE;
 		proto_info->event_reason = EVENT_REASON_NONE;
+		proto_info->wait_first_edge = true;
 	}
 
 	*sport = hdr->source;
@@ -419,6 +423,7 @@ static int parse_icmp6_identifier(struct parsing_context *pctx,
 
 	proto_info->event_type = FLOW_EVENT_NONE;
 	proto_info->event_reason = EVENT_REASON_NONE;
+	proto_info->wait_first_edge = false;
 	*sport = hdr->icmp6_identifier;
 	*dport = hdr->icmp6_identifier;
 	*icmp6h = hdr;
@@ -456,6 +461,7 @@ static int parse_icmp_identifier(struct parsing_context *pctx,
 
 	proto_info->event_type = FLOW_EVENT_NONE;
 	proto_info->event_reason = EVENT_REASON_NONE;
+	proto_info->wait_first_edge = false;
 	*sport = hdr->un.echo.id;
 	*dport = hdr->un.echo.id;
 	*icmph = hdr;
@@ -534,6 +540,7 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	p_info->reply_pid_valid = proto_info.reply_pid_valid;
 	p_info->event_type = proto_info.event_type;
 	p_info->event_reason = proto_info.event_reason;
+	p_info->wait_first_edge = proto_info.wait_first_edge;
 
 	if (p_info->pid.flow.ipv == AF_INET) {
 		map_ipv4_to_ipv6(&p_info->pid.flow.saddr.ip,
@@ -708,14 +715,19 @@ static void init_flowstate(struct flow_state *f_state,
 {
 	f_state->conn_state = CONNECTION_STATE_WAITOPEN;
 	f_state->last_timestamp = p_info->time;
+	/* We should only ever create new flows for packet with valid pid,
+	   so assume pid is valid*/
+	f_state->last_id = p_info->pid.identifier;
 	f_state->opening_reason = p_info->event_type == FLOW_EVENT_OPENING ?
 					  p_info->event_reason :
 						EVENT_REASON_FIRST_OBS_PCKT;
+	f_state->has_been_timestamped = false;
 }
 
 static void init_empty_flowstate(struct flow_state *f_state)
 {
 	f_state->conn_state = CONNECTION_STATE_EMPTY;
+	f_state->has_been_timestamped = false;
 }
 
 /*
@@ -735,18 +747,15 @@ static void init_dualflow_state(struct dual_flow_state *df_state,
 }
 
 static struct dual_flow_state *
-create_dualflow_state(void *ctx, struct packet_info *p_info, bool *new_flow)
+create_dualflow_state(void *ctx, struct packet_info *p_info)
 {
 	struct network_tuple *key = get_dualflow_key_from_packet(p_info);
 	struct dual_flow_state new_state = { 0 };
 
 	init_dualflow_state(&new_state, p_info);
 
-	if (bpf_map_update_elem(&flow_state, key, &new_state, BPF_NOEXIST) ==
+	if (bpf_map_update_elem(&flow_state, key, &new_state, BPF_NOEXIST) !=
 	    0) {
-		if (new_flow)
-			*new_flow = true;
-	} else {
 		send_map_full_event(ctx, p_info, PPING_MAP_FLOWSTATE);
 		return NULL;
 	}
@@ -755,8 +764,7 @@ create_dualflow_state(void *ctx, struct packet_info *p_info, bool *new_flow)
 }
 
 static struct dual_flow_state *
-lookup_or_create_dualflow_state(void *ctx, struct packet_info *p_info,
-				bool *new_flow)
+lookup_or_create_dualflow_state(void *ctx, struct packet_info *p_info)
 {
 	struct dual_flow_state *df_state;
 
@@ -771,7 +779,7 @@ lookup_or_create_dualflow_state(void *ctx, struct packet_info *p_info,
 	    p_info->event_type == FLOW_EVENT_CLOSING_BOTH)
 		return NULL;
 
-	return create_dualflow_state(ctx, p_info, new_flow);
+	return create_dualflow_state(ctx, p_info);
 }
 
 static bool is_flowstate_active(struct flow_state *f_state)
@@ -781,15 +789,11 @@ static bool is_flowstate_active(struct flow_state *f_state)
 }
 
 static void update_forward_flowstate(struct packet_info *p_info,
-				     struct flow_state *f_state, bool *new_flow)
+				     struct flow_state *f_state)
 {
 	// "Create" flowstate if it's empty
-	if (f_state->conn_state == CONNECTION_STATE_EMPTY &&
-	    p_info->pid_valid) {
+	if (f_state->conn_state == CONNECTION_STATE_EMPTY && p_info->pid_valid)
 		init_flowstate(f_state, p_info);
-		if (new_flow)
-			*new_flow = true;
-	}
 
 	if (is_flowstate_active(f_state)) {
 		f_state->sent_pkts++;
@@ -905,7 +909,7 @@ static bool is_new_identifier(struct packet_id *pid, struct flow_state *f_state)
  * Attempt to create a timestamp-entry for packet p_info for flow in f_state
  */
 static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
-				   struct packet_info *p_info, bool new_flow)
+				   struct packet_info *p_info)
 {
 	if (!is_flowstate_active(f_state) || !p_info->pid_valid)
 		return;
@@ -915,12 +919,13 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 		return;
 
 	// Check if identfier is new
-	if (!new_flow && !is_new_identifier(&p_info->pid, f_state))
+	if ((f_state->has_been_timestamped || p_info->wait_first_edge) &&
+	    !is_new_identifier(&p_info->pid, f_state))
 		return;
 	f_state->last_id = p_info->pid.identifier;
 
 	// Check rate-limit
-	if (!new_flow &&
+	if (f_state->has_been_timestamped &&
 	    is_rate_limited(p_info->time, f_state->last_timestamp,
 			    config.use_srtt ? f_state->srtt : f_state->min_rtt))
 		return;
@@ -931,6 +936,7 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 	 * the next available map slot somewhat fairer between heavy and sparse
 	 * flows.
 	 */
+	f_state->has_been_timestamped = true;
 	f_state->last_timestamp = p_info->time;
 
 	if (bpf_map_update_elem(&packet_ts, &p_info->pid, &p_info->time,
@@ -996,15 +1002,14 @@ static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
 {
 	struct dual_flow_state *df_state;
 	struct flow_state *fw_flow, *rev_flow;
-	bool new_flow = false;
 
-	df_state = lookup_or_create_dualflow_state(ctx, p_info, &new_flow);
+	df_state = lookup_or_create_dualflow_state(ctx, p_info);
 	if (!df_state)
 		return;
 
 	fw_flow = get_flowstate_from_packet(df_state, p_info);
-	update_forward_flowstate(p_info, fw_flow, &new_flow);
-	pping_timestamp_packet(fw_flow, ctx, p_info, new_flow);
+	update_forward_flowstate(p_info, fw_flow);
+	pping_timestamp_packet(fw_flow, ctx, p_info);
 
 	rev_flow = get_reverse_flowstate_from_packet(df_state, p_info);
 	update_reverse_flowstate(ctx, p_info, rev_flow);

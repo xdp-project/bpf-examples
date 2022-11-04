@@ -106,7 +106,8 @@ struct flow_state {
 	__u32 outstanding_timestamps;
 	enum connection_state conn_state;
 	enum flow_event_reason opening_reason;
-	__u8 reserved[6];
+	bool has_been_timestamped;
+	__u8 reserved[5];
 };
 
 /*
