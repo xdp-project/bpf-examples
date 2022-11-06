@@ -64,7 +64,8 @@ struct bpf_config {
 	bool track_tcp;
 	bool track_icmp;
 	bool localfilt;
-	__u32 reserved;
+	bool skip_syn;
+	__u8 reserved[3];
 };
 
 /*
@@ -105,7 +106,8 @@ struct flow_state {
 	__u32 outstanding_timestamps;
 	enum connection_state conn_state;
 	enum flow_event_reason opening_reason;
-	__u8 reserved[6];
+	bool has_been_timestamped;
+	__u8 reserved[5];
 };
 
 /*
