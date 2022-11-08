@@ -85,6 +85,7 @@ struct pping_config {
 	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
 	enum PPING_OUTPUT_FORMAT output_format;
+	enum xdp_attach_mode xdp_mode;
 	bool force;
 	bool created_tc_hook;
 };
@@ -103,6 +104,7 @@ static const struct option long_options[] = {
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
+	{ "xdp-mode",         required_argument, NULL, 'x' }, // Which xdp-mode to use (unspecified, native or generic)
 	{ "tcp",              no_argument,       NULL, 'T' }, // Calculate and report RTTs for TCP traffic (with TCP timestamps)
 	{ "icmp",             no_argument,       NULL, 'C' }, // Calculate and report RTTs for ICMP echo-reply traffic
 	{ "include-local",    no_argument,       NULL, 'l' }, // Also report "internal" RTTs
@@ -177,7 +179,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	config->bpf_config.track_icmp = false;
 	config->bpf_config.skip_syn = true;
 
-	while ((opt = getopt_long(argc, argv, "hflTCsi:r:R:t:c:F:I:",
+	while ((opt = getopt_long(argc, argv, "hflTCsi:r:R:t:c:F:I:x:",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -275,6 +277,19 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 		case 's':
 			config->bpf_config.skip_syn = false;
 			break;
+		case 'x':
+			if (strcmp(optarg, "unspecified") == 0) {
+				config->xdp_mode = XDP_MODE_UNSPEC;
+			} else if (strcmp(optarg, "native") == 0) {
+				config->xdp_mode = XDP_MODE_NATIVE;
+			} else if (strcmp(optarg, "generic") == 0) {
+				config->xdp_mode = XDP_MODE_SKB;
+			} else {
+				fprintf(stderr,
+					"xdp-mode must be 'unspecified', 'native' or 'generic'\n");
+				return -EINVAL;
+			}
+			break;
 		case 'h':
 			printf("HELP:\n");
 			print_usage(argv);
@@ -348,7 +363,8 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
  * On failure, will return a negative error code.
  */
 static int xdp_attach(struct bpf_object *obj, const char *prog_name,
-		      int ifindex, struct xdp_program **xdp_prog)
+		      int ifindex, struct xdp_program **xdp_prog,
+		      enum xdp_attach_mode xdp_mode)
 {
 	struct xdp_program *prog;
 	int err;
@@ -360,7 +376,7 @@ static int xdp_attach(struct bpf_object *obj, const char *prog_name,
 	if (!prog)
 		return -errno;
 
-	err = xdp_program__attach(prog, ifindex, XDP_MODE_UNSPEC, 0);
+	err = xdp_program__attach(prog, ifindex, xdp_mode, 0);
 	if (err) {
 		xdp_program__close(prog);
 		return err;
@@ -370,11 +386,12 @@ static int xdp_attach(struct bpf_object *obj, const char *prog_name,
 	return 0;
 }
 
-static int xdp_detach(struct xdp_program *prog, int ifindex)
+static int xdp_detach(struct xdp_program *prog, int ifindex,
+		      enum xdp_attach_mode xdp_mode)
 {
 	int err;
 
-	err = xdp_program__detach(prog, ifindex, XDP_MODE_UNSPEC, 0);
+	err = xdp_program__detach(prog, ifindex, xdp_mode, 0);
 	xdp_program__close(prog);
 	return err;
 }
@@ -893,7 +910,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	if (strcmp(config->ingress_prog, PROG_INGRESS_XDP) == 0) {
 		/* xdp_attach() loads 'obj' through libxdp */
 		err = xdp_attach(*obj, config->ingress_prog, config->ifindex,
-				 &config->xdp_prog);
+				 &config->xdp_prog, config->xdp_mode);
 	} else {
 		err = bpf_object__load(*obj);
 		if (err) {
@@ -931,15 +948,17 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 
 egress_err:
 	if (config->xdp_prog) {
-		detach_err = xdp_detach(config->xdp_prog, config->ifindex);
+		detach_err = xdp_detach(config->xdp_prog, config->ifindex,
+					config->xdp_mode);
 		config->xdp_prog = NULL;
 	} else {
-		detach_err =
-			tc_detach(config->ifindex, BPF_TC_INGRESS,
-				  &config->tc_ingress_opts, config->created_tc_hook);
+		detach_err = tc_detach(config->ifindex, BPF_TC_INGRESS,
+				       &config->tc_ingress_opts,
+				       config->created_tc_hook);
 	}
 	if (detach_err)
-		fprintf(stderr, "Failed detaching ingress program from %s: %s\n",
+		fprintf(stderr,
+			"Failed detaching ingress program from %s: %s\n",
 			config->ifname, get_libbpf_strerror(detach_err));
 	return err;
 }
@@ -1022,6 +1041,7 @@ int main(int argc, char *argv[])
 		.event_map = "events",
 		.tc_ingress_opts = tc_ingress_opts,
 		.tc_egress_opts = tc_egress_opts,
+		.xdp_mode = XDP_MODE_NATIVE,
 		.output_format = PPING_OUTPUT_STANDARD,
 	};
 
@@ -1132,7 +1152,8 @@ cleanup_perf_buffer:
 
 cleanup_attached_progs:
 	if (config.xdp_prog)
-		detach_err = xdp_detach(config.xdp_prog, config.ifindex);
+		detach_err = xdp_detach(config.xdp_prog, config.ifindex,
+					config.xdp_mode);
 	else
 		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
 				       &config.tc_ingress_opts, false);
