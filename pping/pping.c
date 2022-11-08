@@ -32,6 +32,10 @@ static const char *__doc__ =
 #define MON_TO_REAL_UPDATE_FREQ                                                \
 	(1 * NS_PER_SECOND) // Update offset between CLOCK_MONOTONIC and CLOCK_REALTIME once per second
 
+#define PROG_INGRESS_TC "pping_tc_ingress"
+#define PROG_INGRESS_XDP "pping_xdp_ingress"
+#define PROG_EGRESS_TC "pping_tc_egress"
+
 enum PPING_OUTPUT_FORMAT {
 	PPING_OUTPUT_STANDARD,
 	PPING_OUTPUT_JSON,
@@ -58,6 +62,7 @@ struct map_cleanup_args {
 	struct bpf_link *tsclean_link;
 	struct bpf_link *flowclean_link;
 	__u64 cleanup_interval;
+	int err;
 	bool valid_thread;
 };
 
@@ -81,6 +86,7 @@ struct pping_config {
 	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
 	enum PPING_OUTPUT_FORMAT output_format;
+	enum xdp_attach_mode xdp_mode;
 	bool force;
 	bool created_tc_hook;
 };
@@ -99,6 +105,7 @@ static const struct option long_options[] = {
 	{ "cleanup-interval", required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",           required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
 	{ "ingress-hook",     required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
+	{ "xdp-mode",         required_argument, NULL, 'x' }, // Which xdp-mode to use (unspecified, native or generic)
 	{ "tcp",              no_argument,       NULL, 'T' }, // Calculate and report RTTs for TCP traffic (with TCP timestamps)
 	{ "icmp",             no_argument,       NULL, 'C' }, // Calculate and report RTTs for ICMP echo-reply traffic
 	{ "include-local",    no_argument,       NULL, 'l' }, // Also report "internal" RTTs
@@ -173,7 +180,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	config->bpf_config.track_icmp = false;
 	config->bpf_config.skip_syn = true;
 
-	while ((opt = getopt_long(argc, argv, "hflTCsi:r:R:t:c:F:I:",
+	while ((opt = getopt_long(argc, argv, "hflTCsi:r:R:t:c:F:I:x:",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -247,9 +254,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 'I':
 			if (strcmp(optarg, "xdp") == 0) {
-				config->ingress_prog = "pping_xdp_ingress";
+				config->ingress_prog = PROG_INGRESS_XDP;
 			} else if (strcmp(optarg, "tc") == 0) {
-				config->ingress_prog = "pping_tc_ingress";
+				config->ingress_prog = PROG_INGRESS_TC;
 			} else {
 				fprintf(stderr,
 					"ingress-hook must be \"xdp\" or \"tc\"\n");
@@ -270,6 +277,19 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			break;
 		case 's':
 			config->bpf_config.skip_syn = false;
+			break;
+		case 'x':
+			if (strcmp(optarg, "unspecified") == 0) {
+				config->xdp_mode = XDP_MODE_UNSPEC;
+			} else if (strcmp(optarg, "native") == 0) {
+				config->xdp_mode = XDP_MODE_NATIVE;
+			} else if (strcmp(optarg, "generic") == 0) {
+				config->xdp_mode = XDP_MODE_SKB;
+			} else {
+				fprintf(stderr,
+					"xdp-mode must be 'unspecified', 'native' or 'generic'\n");
+				return -EINVAL;
+			}
 			break;
 		case 'h':
 			printf("HELP:\n");
@@ -344,7 +364,8 @@ static int init_rodata(struct bpf_object *obj, void *src, size_t size)
  * On failure, will return a negative error code.
  */
 static int xdp_attach(struct bpf_object *obj, const char *prog_name,
-		      int ifindex, struct xdp_program **xdp_prog)
+		      int ifindex, struct xdp_program **xdp_prog,
+		      enum xdp_attach_mode xdp_mode)
 {
 	struct xdp_program *prog;
 	int err;
@@ -356,7 +377,7 @@ static int xdp_attach(struct bpf_object *obj, const char *prog_name,
 	if (!prog)
 		return -errno;
 
-	err = xdp_program__attach(prog, ifindex, XDP_MODE_UNSPEC, 0);
+	err = xdp_program__attach(prog, ifindex, xdp_mode, 0);
 	if (err) {
 		xdp_program__close(prog);
 		return err;
@@ -366,11 +387,12 @@ static int xdp_attach(struct bpf_object *obj, const char *prog_name,
 	return 0;
 }
 
-static int xdp_detach(struct xdp_program *prog, int ifindex)
+static int xdp_detach(struct xdp_program *prog, int ifindex,
+		      enum xdp_attach_mode xdp_mode)
 {
 	int err;
 
-	err = xdp_program__detach(prog, ifindex, XDP_MODE_UNSPEC, 0);
+	err = xdp_program__detach(prog, ifindex, xdp_mode, 0);
 	xdp_program__close(prog);
 	return err;
 }
@@ -541,28 +563,37 @@ static void *periodic_map_cleanup(void *args)
 	interval.tv_sec = argp->cleanup_interval / NS_PER_SECOND;
 	interval.tv_nsec = argp->cleanup_interval % NS_PER_SECOND;
 	char buf[256];
-	int err;
+	int err1, err2;
 
+	argp->err = 0;
 	while (keep_running) {
-		err = iter_map_execute(argp->tsclean_link);
-		if (err) {
+		err1 = iter_map_execute(argp->tsclean_link);
+		if (err1) {
 			// Running in separate thread so can't use get_libbpf_strerror
-			libbpf_strerror(err, buf, sizeof(buf));
+			libbpf_strerror(err1, buf, sizeof(buf));
 			fprintf(stderr,
 				"Error while cleaning timestamp map: %s\n",
 				buf);
 		}
 
-		err = iter_map_execute(argp->flowclean_link);
-		if (err) {
-			libbpf_strerror(err, buf, sizeof(buf));
+		err2 = iter_map_execute(argp->flowclean_link);
+		if (err2) {
+			libbpf_strerror(err2, buf, sizeof(buf));
 			fprintf(stderr, "Error while cleaning flow map: %s\n",
 				buf);
 		}
 
+		if (err1 || err2) {
+			fprintf(stderr,
+				"Failed cleaning maps - aborting program\n");
+			argp->err = err1 ? err1 : err2;
+			abort_program(SIGUSR1);
+			break;
+		}
+
 		nanosleep(&interval, NULL);
 	}
-	pthread_exit(NULL);
+	pthread_exit(&argp->err);
 }
 
 static __u64 convert_monotonic_to_realtime(__u64 monotonic_time)
@@ -849,9 +880,9 @@ static int set_programs_to_load(struct bpf_object *obj,
 {
 	struct bpf_program *prog;
 	char *unload_prog =
-		strcmp(config->ingress_prog, "pping_xdp_ingress") != 0 ?
-			"pping_xdp_ingress" :
-			      "pping_tc_ingress";
+		strcmp(config->ingress_prog, PROG_INGRESS_XDP) != 0 ?
+			PROG_INGRESS_XDP :
+			PROG_INGRESS_TC;
 
 	prog = bpf_object__find_program_by_name(obj, unload_prog);
 	if (libbpf_get_error(prog))
@@ -864,6 +895,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 				struct pping_config *config)
 {
 	int err, detach_err;
+	config->created_tc_hook = false;
 
 	// Open and load ELF file
 	*obj = bpf_object__open(config->object_path);
@@ -885,10 +917,20 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	set_programs_to_load(*obj, config);
 
 	// Attach ingress prog
-	if (strcmp(config->ingress_prog, "pping_xdp_ingress") == 0) {
+	if (strcmp(config->ingress_prog, PROG_INGRESS_XDP) == 0) {
 		/* xdp_attach() loads 'obj' through libxdp */
 		err = xdp_attach(*obj, config->ingress_prog, config->ifindex,
-				 &config->xdp_prog);
+				 &config->xdp_prog, config->xdp_mode);
+		if (err) {
+			fprintf(stderr, "Failed attaching XDP program\n");
+			if (config->xdp_mode == XDP_MODE_NATIVE)
+				fprintf(stderr,
+					"%s may not have driver support for XDP, try --xdp-mode generic instead\n",
+					config->ifname);
+			else
+				fprintf(stderr,
+					"Try updating kernel or use --ingress-hook tc instead\n");
+		}
 	} else {
 		err = bpf_object__load(*obj);
 		if (err) {
@@ -897,22 +939,22 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 			return err;
 		}
 		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
-				config->ingress_prog,
-				&config->tc_ingress_opts, NULL);
+				config->ingress_prog, &config->tc_ingress_opts,
+				&config->created_tc_hook);
 		config->ingress_prog_id = err;
 	}
 	if (err < 0) {
 		fprintf(stderr,
 			"Failed attaching ingress BPF program on interface %s: %s\n",
 			config->ifname, get_libbpf_strerror(err));
-		return err;
+		goto ingress_err;
 	}
 
 	// Attach egress prog
-	config->egress_prog_id =
-		tc_attach(*obj, config->ifindex, BPF_TC_EGRESS,
-			  config->egress_prog, &config->tc_egress_opts,
-			  &config->created_tc_hook);
+	config->egress_prog_id = tc_attach(
+		*obj, config->ifindex, BPF_TC_EGRESS, config->egress_prog,
+		&config->tc_egress_opts,
+		config->created_tc_hook ? NULL : &config->created_tc_hook);
 	if (config->egress_prog_id < 0) {
 		fprintf(stderr,
 			"Failed attaching egress BPF program on interface %s: %s\n",
@@ -922,21 +964,24 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		goto egress_err;
 	}
 
-
 	return 0;
 
 egress_err:
 	if (config->xdp_prog) {
-		detach_err = xdp_detach(config->xdp_prog, config->ifindex);
+		detach_err = xdp_detach(config->xdp_prog, config->ifindex,
+					config->xdp_mode);
 		config->xdp_prog = NULL;
 	} else {
-		detach_err =
-			tc_detach(config->ifindex, BPF_TC_INGRESS,
-				  &config->tc_ingress_opts, config->created_tc_hook);
+		detach_err = tc_detach(config->ifindex, BPF_TC_INGRESS,
+				       &config->tc_ingress_opts,
+				       config->created_tc_hook);
 	}
 	if (detach_err)
-		fprintf(stderr, "Failed detaching ingress program from %s: %s\n",
+		fprintf(stderr,
+			"Failed detaching ingress program from %s: %s\n",
 			config->ifname, get_libbpf_strerror(detach_err));
+ingress_err:
+	bpf_object__close(*obj);
 	return err;
 }
 
@@ -944,6 +989,7 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 					 struct pping_config *config)
 {
 	int err;
+	config->clean_args.err = 0;
 
 	if (config->clean_args.valid_thread) {
 		fprintf(stderr,
@@ -996,6 +1042,7 @@ destroy_ts_link:
 int main(int argc, char *argv[])
 {
 	int err = 0, detach_err;
+	void *thread_err;
 	struct bpf_object *obj = NULL;
 	struct perf_buffer *pb = NULL;
 
@@ -1009,8 +1056,8 @@ int main(int argc, char *argv[])
 		.clean_args = { .cleanup_interval = 1 * NS_PER_SECOND,
 				.valid_thread = false },
 		.object_path = "pping_kern.o",
-		.ingress_prog = "pping_xdp_ingress",
-		.egress_prog = "pping_tc_egress",
+		.ingress_prog = PROG_INGRESS_TC,
+		.egress_prog = PROG_EGRESS_TC,
 		.cleanup_ts_prog = "tsmap_cleanup",
 		.cleanup_flow_prog = "flowmap_cleanup",
 		.packet_map = "packet_ts",
@@ -1018,6 +1065,7 @@ int main(int argc, char *argv[])
 		.event_map = "events",
 		.tc_ingress_opts = tc_ingress_opts,
 		.tc_egress_opts = tc_egress_opts,
+		.xdp_mode = XDP_MODE_NATIVE,
 		.output_format = PPING_OUTPUT_STANDARD,
 	};
 
@@ -1117,7 +1165,9 @@ int main(int argc, char *argv[])
 
 	if (config.clean_args.valid_thread) {
 		pthread_cancel(config.clean_args.tid);
-		pthread_join(config.clean_args.tid, NULL);
+		pthread_join(config.clean_args.tid, &thread_err);
+		if (thread_err != PTHREAD_CANCELED)
+			err = err ? err : config.clean_args.err;
 
 		bpf_link__destroy(config.clean_args.tsclean_link);
 		bpf_link__destroy(config.clean_args.flowclean_link);
@@ -1128,7 +1178,8 @@ cleanup_perf_buffer:
 
 cleanup_attached_progs:
 	if (config.xdp_prog)
-		detach_err = xdp_detach(config.xdp_prog, config.ifindex);
+		detach_err = xdp_detach(config.xdp_prog, config.ifindex,
+					config.xdp_mode);
 	else
 		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
 				       &config.tc_ingress_opts, false);
@@ -1144,6 +1195,8 @@ cleanup_attached_progs:
 		fprintf(stderr,
 			"Failed removing egress program from interface %s: %s\n",
 			config.ifname, get_libbpf_strerror(detach_err));
+
+	bpf_object__close(obj);
 
 	return (err != 0 && keep_running) || detach_err != 0;
 }
