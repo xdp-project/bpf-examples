@@ -228,9 +228,6 @@ static void make_dualflow_key(struct network_tuple *key,
 static struct flow_state *fstate_from_dfkey(struct dual_flow_state *df_state,
 					    bool is_dfkey)
 {
-	if (!df_state)
-		return NULL;
-
 	return is_dfkey ? &df_state->dir1 : &df_state->dir2;
 }
 
@@ -1127,7 +1124,7 @@ SEC("iter/bpf_map_elem")
 int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 {
 	struct packet_id local_pid;
-	struct flow_state *f_state;
+	struct flow_state *f_state = NULL;
 	struct dual_flow_state *df_state;
 	struct network_tuple df_key;
 	struct packet_id *pid = ctx->key;
@@ -1146,7 +1143,8 @@ int tsmap_cleanup(struct bpf_iter__bpf_map_elem *ctx)
 
 	make_dualflow_key(&df_key, &pid->flow);
 	df_state = bpf_map_lookup_elem(&flow_state, &df_key);
-	f_state = get_flowstate_from_dualflow(df_state, &pid->flow);
+	if (df_state)
+		f_state = get_flowstate_from_dualflow(df_state, &pid->flow);
 	rtt = f_state ? f_state->srtt : 0;
 
 	if ((rtt && now - *timestamp > rtt * TIMESTAMP_RTT_LIFETIME) ||
