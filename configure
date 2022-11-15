@@ -189,19 +189,6 @@ EOF
 
 check_libxdp()
 {
-    if [ "${FORCE_SUBMODULE_LIBXDP:-0}" -ne "1" ] && ${PKG_CONFIG} libxdp --exists; then
-
-        LIBXDP_CFLAGS=$(${PKG_CONFIG} libxdp --cflags)
-        LIBXDP_LDLIBS=$(${PKG_CONFIG} libxdp --libs)
-        echo "SYSTEM_LIBXDP:=y" >>$CONFIG
-        echo 'CFLAGS += ' $LIBXDP_CFLAGS >> $CONFIG
-        echo 'LDLIBS += ' $LIBXDP_LDLIBS >>$CONFIG
-        echo 'OBJECT_LIBXDP = ' >>$CONFIG
-        echo system
-
-        return 0
-    fi
-
     echo submodule
     echo "SYSTEM_LIBXDP:=n" >> $CONFIG
     if [ "$SUBMODULE_LIBBPF" -eq "1" ]; then
