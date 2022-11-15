@@ -73,6 +73,20 @@ check_zlib()
     fi
 }
 
+check_libmnl()
+{
+    if ${PKG_CONFIG} libmnl --exists; then
+        echo "HAVE_LIBMNL:=y" >>$CONFIG
+        echo "yes"
+
+        echo 'CFLAGS += -DHAVE_LIBMNL' `${PKG_CONFIG} libmnl --cflags` >> $CONFIG
+        echo 'LDLIBS += ' `${PKG_CONFIG} libmnl --libs` >>$CONFIG
+    else
+        echo "missing - this is required"
+        return 1
+    fi
+}
+
 check_libbpf()
 {
     local libbpf_err
@@ -250,6 +264,8 @@ quiet_config >> $CONFIG
 
 check_toolchain
 
+echo -n "libmnl support: "
+check_libmnl
 echo -n "libbpf support: "
 check_libbpf
 echo -n "libxdp support: "
