@@ -125,7 +125,7 @@ int fork_and_wait(struct bpf_link *trace_link, int ifindex)
 
 	fprintf(stderr, "Forked pid %d.\n", pid);
 
-	fd = open(pid_path, O_CREAT|O_EXCL|O_WRONLY);
+	fd = open(pid_path, O_CREAT|O_EXCL|O_WRONLY, 0600);
 	if (fd < 0) {
 		err = -errno;
 		fprintf(stderr, "Couldn't open file %s for writing: %s\n",
