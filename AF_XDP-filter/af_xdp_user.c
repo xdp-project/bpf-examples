@@ -57,6 +57,7 @@ const char *pin_basedir = "/sys/fs/bpf";
 enum {
 	k_instrument = true,
 	k_instrument_detail = false,
+	k_receive_tuntap = false,
 	k_verify_umem = false,
 	k_verbose = true,
 	k_skipping = false
@@ -893,7 +894,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* Start TAP */
+	/* Start TUN */
 	strcpy(tun_name, "tun0");
 	tun_fd = tun_alloc(tun_name);
 	if (tun_fd < 0) {
@@ -903,14 +904,16 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	// Start thread to read from the tun
-	ret = pthread_create(&tun_read_thread, NULL, tun_read, &tun_fd);
-	if (ret) {
-		fprintf(stderr,
-			"ERROR: Failed creating tun_read thread "
-			"\"%s\"\n",
-			strerror(errno));
-		exit(EXIT_FAILURE);
+	if (k_receive_tuntap) {
+		// Start thread to read from the tun
+		ret = pthread_create(&tun_read_thread, NULL, tun_read, &tun_fd);
+		if (ret) {
+			fprintf(stderr,
+				"ERROR: Failed creating tun_read thread "
+				"\"%s\"\n",
+				strerror(errno));
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	accept_map_fd = open_bpf_map_file(pin_basedir, "accept_map", &info);
