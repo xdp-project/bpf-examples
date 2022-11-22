@@ -1,0 +1,31 @@
+This repository exists to serve as an example of well-written code that uses BPF
+so that others can learn best practices. Examples range from small snippets
+demonstrating a single feature, to slightly larger functional applications.
+
+If you have a code example that you think others would benefit from, you are
+very welcome to open a pull request adding your example to this repository. When
+doing so, please bear in mind the following guidelines:
+
+- Code should be written following the Linux kernel style guide for C code.
+  There's a .clang-format file in the kernel source tree you can use to aid
+  formatting.
+
+- The code example should generally use the infrastructure in this repository
+  for building. This includes the Makefile and header files in include/. If your
+  example requires changes to this infrastructure that is OK; just include those
+  as separate commits in the beginning of your PR.
+
+- Make sure to split out your changes into separate commits that can be reviewed
+  independently, with a well-written commit message for each describing your
+  change at a high level. The kernel guide to submitting patches may be helpful
+  here, specifically the sections on "Describe your changes" and "Separate your
+  changes": https://docs.kernel.org/process/submitting-patches.html
+
+- Code contributions should generally be licensed as GPLv2, or optionally
+  dual-licensed GPLv2/BSD. Source files should have SPDX headers indicating
+  their license, and your commits should include a Signed-off-by header
+  serving as your Developer's Certificate of Origin (see
+  https://docs.kernel.org/process/submitting-patches.html#sign-your-work-the-developer-s-certificate-of-origin)
+
+- Make sure to include your code directory in the top-level Makefile, and add a
+  README.org file inside the directory describing what your example does.
