@@ -16,6 +16,10 @@
 
 #include "af_xdp_kern_shared.h"
 
+#ifndef NULL
+#define NULL 0
+#endif
+
 #ifndef XDP_ACTION_MAX
 #define XDP_ACTION_MAX (XDP_REDIRECT + 1)
 #endif
