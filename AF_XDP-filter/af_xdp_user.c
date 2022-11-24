@@ -804,8 +804,6 @@ int main(int argc, char **argv)
 
 	memset(&stats, 0, sizeof(stats));
 
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-
 	/* Global shutdown handler */
 	signal(SIGINT, exit_application);
 
