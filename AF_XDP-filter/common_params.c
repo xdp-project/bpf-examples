@@ -37,9 +37,11 @@ void _print_options(const struct option_wrapper *long_options, bool required)
 			printf(" -%c,", long_options[i].option.val);
 		else
 			printf("    ");
-		pos = snprintf(buf, BUFSIZE, " --%s", long_options[i].option.name);
+		pos = snprintf(buf, BUFSIZE, " --%s",
+			       long_options[i].option.name);
 		if (long_options[i].metavar)
-			snprintf(&buf[pos], BUFSIZE-pos, " %s", long_options[i].metavar);
+			snprintf(&buf[pos], BUFSIZE - pos, " %s",
+				 long_options[i].metavar);
 		printf("%-22s", buf);
 		printf("  %s", long_options[i].help);
 		printf("\n");
@@ -47,7 +49,7 @@ void _print_options(const struct option_wrapper *long_options, bool required)
 }
 
 void usage(const char *prog_name, const char *doc,
-           const struct option_wrapper *long_options, bool full)
+	   const struct option_wrapper *long_options, bool full)
 {
 	printf("Usage: %s [options]\n", prog_name);
 
@@ -73,7 +75,8 @@ bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
 	res = inet_pton(AF_INET, ip_str, ip_addr);
 	if (res <= 0) {
 		if (res == 0)
-			fprintf(stderr,	"ERROR: IP%s \"%s\" not in presentation format\n",
+			fprintf(stderr,
+				"ERROR: IP%s \"%s\" not in presentation format\n",
 				"v4", ip_str);
 		else
 			perror("inet_pton");
@@ -83,11 +86,12 @@ bool get_ipv4_u32(char *ip_str, uint32_t *ip_addr)
 }
 
 int option_wrappers_to_options(const struct option_wrapper *wrapper,
-				struct option **options)
+			       struct option **options)
 {
 	int i, num;
 	struct option *new_options;
-	for (i = 0; wrapper[i].option.name != 0; i++) {}
+	for (i = 0; wrapper[i].option.name != 0; i++) {
+	}
 	num = i;
 
 	new_options = malloc(sizeof(struct option) * num);
@@ -103,7 +107,7 @@ int option_wrappers_to_options(const struct option_wrapper *wrapper,
 
 void parse_cmdline_args(int argc, char **argv,
 			const struct option_wrapper *options_wrapper,
-                        struct config *cfg, const char *doc)
+			struct config *cfg, const char *doc)
 {
 	struct option *long_options;
 	bool full_help = false;
@@ -128,7 +132,7 @@ void parse_cmdline_args(int argc, char **argv,
 				goto error;
 			}
 			cfg->ifname = (char *)&cfg->ifname_buf;
-			strncpy(cfg->ifname, optarg, IF_NAMESIZE-1);
+			strncpy(cfg->ifname, optarg, IF_NAMESIZE - 1);
 			cfg->ifindex = if_nametoindex(cfg->ifname);
 			if (cfg->ifindex == 0) {
 				fprintf(stderr,
@@ -139,30 +143,35 @@ void parse_cmdline_args(int argc, char **argv,
 			break;
 		case 'r':
 			if (strlen(optarg) >= IF_NAMESIZE) {
-				fprintf(stderr, "ERR: --redirect-dev name too long\n");
+				fprintf(stderr,
+					"ERR: --redirect-dev name too long\n");
 				goto error;
 			}
-			cfg->redirect_ifname = (char *)&cfg->redirect_ifname_buf;
-			strncpy(cfg->redirect_ifname, optarg, IF_NAMESIZE-1);
-			cfg->redirect_ifindex = if_nametoindex(cfg->redirect_ifname);
+			cfg->redirect_ifname =
+				(char *)&cfg->redirect_ifname_buf;
+			strncpy(cfg->redirect_ifname, optarg, IF_NAMESIZE - 1);
+			cfg->redirect_ifindex =
+				if_nametoindex(cfg->redirect_ifname);
 			if (cfg->redirect_ifindex == 0) {
 				fprintf(stderr,
-						"ERR: --redirect-dev name unknown err(%d):%s\n",
-						errno, strerror(errno));
+					"ERR: --redirect-dev name unknown err(%d):%s\n",
+					errno, strerror(errno));
 				goto error;
 			}
 			break;
 		case 'G':
-			if (!ether_aton_r(optarg,
-					  (struct ether_addr *)&cfg->opt_tx_dmac)) {
+			if (!ether_aton_r(
+				    optarg,
+				    (struct ether_addr *)&cfg->opt_tx_dmac)) {
 				fprintf(stderr, "Invalid dest MAC address:%s\n",
 					optarg);
 				goto error;
 			}
 			break;
 		case 'H':
-			if (!ether_aton_r(optarg,
-					  (struct ether_addr *)&cfg->opt_tx_smac)) {
+			if (!ether_aton_r(
+				    optarg,
+				    (struct ether_addr *)&cfg->opt_tx_smac)) {
 				fprintf(stderr, "Invalid src MAC address:%s\n",
 					optarg);
 				goto error;
@@ -171,7 +180,8 @@ void parse_cmdline_args(int argc, char **argv,
 		case 'b':
 			cfg->batch_pkts = atoi(optarg);
 			if (cfg->batch_pkts > BATCH_PKTS_MAX) {
-				fprintf(stderr, "ERROR: "
+				fprintf(stderr,
+					"ERROR: "
 					" batch (%u) pkts limited to %u\n",
 					cfg->batch_pkts, BATCH_PKTS_MAX);
 				goto error;
@@ -181,21 +191,21 @@ void parse_cmdline_args(int argc, char **argv,
 			cfg->opt_busy_poll = true;
 			break;
 		case 'A':
-			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
+			cfg->xdp_flags &= ~XDP_FLAGS_MODES; /* Clear flags */
 			break;
 		case 'S':
-			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
-			cfg->xdp_flags |= XDP_FLAGS_SKB_MODE;  /* Set   flag */
-			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY;  /* Clear flag */
-			cfg->xsk_bind_flags |= XDP_COPY;       /* Set   flag */
+			cfg->xdp_flags &= ~XDP_FLAGS_MODES; /* Clear flags */
+			cfg->xdp_flags |= XDP_FLAGS_SKB_MODE; /* Set   flag */
+			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY; /* Clear flag */
+			cfg->xsk_bind_flags |= XDP_COPY; /* Set   flag */
 			break;
 		case 'N':
-			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
-			cfg->xdp_flags |= XDP_FLAGS_DRV_MODE;  /* Set   flag */
+			cfg->xdp_flags &= ~XDP_FLAGS_MODES; /* Clear flags */
+			cfg->xdp_flags |= XDP_FLAGS_DRV_MODE; /* Set   flag */
 			break;
 		case 3: /* --offload-mode */
-			cfg->xdp_flags &= ~XDP_FLAGS_MODES;    /* Clear flags */
-			cfg->xdp_flags |= XDP_FLAGS_HW_MODE;   /* Set   flag */
+			cfg->xdp_flags &= ~XDP_FLAGS_MODES; /* Clear flags */
+			cfg->xdp_flags |= XDP_FLAGS_HW_MODE; /* Set   flag */
 			break;
 		case 'F':
 			cfg->xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
@@ -235,12 +245,12 @@ void parse_cmdline_args(int argc, char **argv,
 			cfg->xsk_if_queue = atoi(optarg);
 			break;
 		case 1: /* --filename */
-			dest  = (char *)&cfg->filename;
-			strncpy(dest, optarg, sizeof(cfg->filename)-1);
+			dest = (char *)&cfg->filename;
+			strncpy(dest, optarg, sizeof(cfg->filename) - 1);
 			break;
 		case 2: /* --progsec */
-			dest  = (char *)&cfg->progsec;
-			strncpy(dest, optarg, sizeof(cfg->progsec)-1);
+			dest = (char *)&cfg->progsec;
+			strncpy(dest, optarg, sizeof(cfg->progsec) - 1);
 			break;
 		case 4: /* --src-ip */
 			if (!get_ipv4_u32(optarg, &ipv4_tmp))
@@ -253,28 +263,28 @@ void parse_cmdline_args(int argc, char **argv,
 			cfg->opt_ip_dst = ipv4_tmp;
 			break;
 		case 'L': /* --src-mac */
-			dest  = (char *)&cfg->src_mac;
-			strncpy(dest, optarg, sizeof(cfg->src_mac)-1);
+			dest = (char *)&cfg->src_mac;
+			strncpy(dest, optarg, sizeof(cfg->src_mac) - 1);
 			break;
 		case 'R': /* --dest-mac */
-			dest  = (char *)&cfg->dest_mac;
-			strncpy(dest, optarg, sizeof(cfg->dest_mac)-1);
+			dest = (char *)&cfg->dest_mac;
+			strncpy(dest, optarg, sizeof(cfg->dest_mac) - 1);
 			break;
 		case 'i':
 			cfg->interval = atoi(optarg);
 			break;
 		case 'c':
-			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY;	/* Clear flag */
-			cfg->xsk_bind_flags |= XDP_COPY;	/* Set   flag */
+			cfg->xsk_bind_flags &= ~XDP_ZEROCOPY; /* Clear flag */
+			cfg->xsk_bind_flags |= XDP_COPY; /* Set   flag */
 			break;
 		case 'z':
-			cfg->xsk_bind_flags &= ~XDP_COPY;	/* Clear flag */
-			cfg->xsk_bind_flags |= XDP_ZEROCOPY;	/* Set   flag */
+			cfg->xsk_bind_flags &= ~XDP_COPY; /* Clear flag */
+			cfg->xsk_bind_flags |= XDP_ZEROCOPY; /* Set   flag */
 			break;
 		case 'h':
 			full_help = true;
 			/* fall-through */
-		error:
+error:
 		default:
 			usage(argv[0], doc, options_wrapper, full_help);
 			free(long_options);

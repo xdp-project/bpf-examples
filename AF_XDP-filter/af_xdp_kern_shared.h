@@ -14,7 +14,7 @@ struct datarec {
 };
 
 enum {
-	k_rx_queue_count_max = 64  /* Assume netdev has no more than 64 queues */
-} ;
+	k_rx_queue_count_max = 64 /* Assume netdev has no more than 64 queues */
+};
 
 #endif

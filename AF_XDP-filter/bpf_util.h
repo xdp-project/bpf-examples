@@ -38,15 +38,16 @@ static inline unsigned int bpf_num_possible_cpus(void)
 	return possible_cpus;
 }
 
-#define __bpf_percpu_val_align	__attribute__((__aligned__(8)))
+#define __bpf_percpu_val_align __attribute__((__aligned__(8)))
 
-#define BPF_DECLARE_PERCPU(type, name)				\
-	struct { type v; /* padding */ } __bpf_percpu_val_align	\
-		name[bpf_num_possible_cpus()]
+#define BPF_DECLARE_PERCPU(type, name) \
+	struct {                       \
+		type v; /* padding */  \
+	} __bpf_percpu_val_align name[bpf_num_possible_cpus()]
 #define bpf_percpu(name, cpu) name[(cpu)].v
 
 #ifndef ARRAY_SIZE
-# define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 
 #ifndef sizeof_field
@@ -55,7 +56,7 @@ static inline unsigned int bpf_num_possible_cpus(void)
 
 #ifndef offsetofend
 #define offsetofend(TYPE, MEMBER) \
-	(offsetof(TYPE, MEMBER)	+ sizeof_field(TYPE, MEMBER))
+	(offsetof(TYPE, MEMBER) + sizeof_field(TYPE, MEMBER))
 #endif
 
 #endif /* __BPF_UTIL__ */
