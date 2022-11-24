@@ -14,4 +14,4 @@ LIB_DIR = ../lib/
 include $(LIB_DIR)/common.mk
 CFLAGS += -pthread
 LDFLAGS += -pthread
-LIBS += -lxdp -lz
+LIBS += -lxdp -lbpf -lz
