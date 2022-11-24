@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* Common function that with time should be moved to libbpf */
 
 #include <errno.h>

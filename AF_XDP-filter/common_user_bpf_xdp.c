@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 //#include <uapi/linux/bpf.h>
 #include <bpf/libbpf.h> /* bpf_get_link_xdp_id + bpf_set_link_xdp_id */
 #include <string.h>     /* strerror */

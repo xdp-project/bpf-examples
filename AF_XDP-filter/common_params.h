@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* This common_user.h is used by userspace programs */
 #ifndef __COMMON_PARAMS_H
 #define __COMMON_PARAMS_H

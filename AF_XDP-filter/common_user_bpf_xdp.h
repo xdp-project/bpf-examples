@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* Common BPF/XDP functions used by userspace side programs */
 #ifndef __COMMON_USER_BPF_XDP_H
 #define __COMMON_USER_BPF_XDP_H

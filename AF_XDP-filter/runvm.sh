@@ -1,4 +1,5 @@
 #!/bin/bash -x
+# SPDX-License-Identifier: GPL-2.0
 ip link set dev enp1s0 xdpgeneric off
 rm -f /sys/fs/bpf/accept_map /sys/fs/bpf/xdp_stats_map
 ip tuntap add mode tun tun0
