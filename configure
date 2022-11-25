@@ -252,7 +252,7 @@ quiet_config >> $CONFIG
 check_toolchain
 
 echo -n "libmnl support: "
-check_libmnl
+check_libmnl || exit 1
 echo -n "libbpf support: "
 check_libbpf
 echo -n "libxdp support: "
