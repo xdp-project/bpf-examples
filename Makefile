@@ -25,7 +25,7 @@ SUBDIRS += tc-policy
 SUBDIRS += traffic-pacing-edt
 SUBDIRS += AF_XDP-forwarding
 SUBDIRS += AF_XDP-example
-SUBDIRS += AF_XDP_filter
+SUBDIRS += AF_XDP-filter
 
 .PHONY: check_submodule help clobber distclean clean $(SUBDIRS)
 
