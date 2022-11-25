@@ -6,5 +6,9 @@ ip tuntap add mode tun tun0
 ip link set dev tun0 down
 ip link set dev tun0 addr 10.1.0.254/24
 ip link set dev tun0 up
+for device in /proc/sys/net/ipv4/conf/*
+do
+  echo 0 >${device}/rp_filter
+done
 export LD_LIBRARY_PATH=/usr/local/lib
 ./af_xdp_user -S -d enp25s0 -Q 16 --filename ./af_xdp_kern.o
