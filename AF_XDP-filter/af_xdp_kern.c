@@ -24,7 +24,7 @@
 #define XDP_ACTION_MAX (XDP_REDIRECT + 1)
 #endif
 
-enum { k_tracing = 1, k_tracing_detail = 0 };
+enum { k_tracing = 0, k_tracing_detail = 0 };
 
 enum { k_hashmap_size = 64 };
 
