@@ -53,6 +53,14 @@
 #define PF_XDP AF_XDP
 #endif
 
+#ifndef SO_PREFER_BUSY_POLL
+#define SO_PREFER_BUSY_POLL     69
+#endif
+
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET     70
+#endif
+
 #define NUM_FRAMES (4 * 1024)
 #define MIN_PKT_SIZE 64
 
