@@ -3,6 +3,7 @@
 USER_TARGETS   := xdpsock
 BPF_TARGETS    := xdpsock_kern
 
+LDLIBS += -lpthread
 LIB_DIR = ../lib
 
 include $(LIB_DIR)/common.mk
