@@ -26,6 +26,10 @@ static const char *__doc__ = "XDP stats program\n"
 
 #include "bpf_util.h" /* bpf_num_possible_cpus */
 
+enum {
+	k_trace = false
+};
+
 static const struct option_wrapper long_options[] = {
 	{ { "help", no_argument, NULL, 'h' }, "Show help", false },
 
@@ -160,6 +164,8 @@ static void stats_print(struct stats_record *stats_rec,
 /* BPF_MAP_TYPE_ARRAY */
 void map_get_value_array(int fd, __u32 key, struct datarec *value)
 {
+	if (k_trace)
+		fprintf(stderr, "map_get_value_array fd=%i key=0x%08x\n", fd, key) ;
 	if ((bpf_map_lookup_elem(fd, &key, value)) != 0) {
 		fprintf(stderr, "ERR: bpf_map_lookup_elem failed key:0x%X\n",
 			key);
@@ -176,6 +182,9 @@ void map_get_value_percpu_array(int fd, __u32 key, struct datarec *value)
 	__u64 sum_pkts = 0;
 	int i;
 
+	if (k_trace)
+		fprintf(stderr, "map_get_value_percpu_array fd=%i key=0x%08x nr_cpus=%d\n",
+				fd, key, nr_cpus) ;
 	if ((bpf_map_lookup_elem(fd, &key, values)) != 0) {
 		fprintf(stderr, "ERR: bpf_map_lookup_elem failed key:0x%X\n",
 			key);
@@ -186,6 +195,9 @@ void map_get_value_percpu_array(int fd, __u32 key, struct datarec *value)
 	for (i = 0; i < nr_cpus; i++) {
 		sum_pkts += values[i].rx_packets;
 		sum_bytes += values[i].rx_bytes;
+		if(k_trace)
+			fprintf(stderr, "values[%d].rx_packets=%llu .rx_bytes=%llu\n",
+					i,values[i].rx_packets, values[i].rx_bytes) ;
 	}
 	value->rx_packets = sum_pkts;
 	value->rx_bytes = sum_bytes;

@@ -2,10 +2,9 @@
 
 
 STSTEM_LIBBPF := y
-BPF_TARGETS  := af_xdp_kern
+BPF_TARGETS  := af_xdp_kern af_xdp_kern_passall
 USER_TARGETS := af_xdp_user filter-xdp_stats
 USER_TARGETS_OBJS := common_params.o common_user_bpf_xdp.o
-LDFLAGS := -L /usr/local/lib
 USER_LIBS := -lxdp -lbpf -lz
 
 LIBBPF_DIR = ../libbpf/src/

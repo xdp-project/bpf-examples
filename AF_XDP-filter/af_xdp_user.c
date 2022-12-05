@@ -37,6 +37,8 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 
+#include <sys/time.h>
+
 #include "common_params.h"
 #include "common_user_bpf_xdp.h"
 #include <common/common_libbpf.h>
@@ -60,7 +62,9 @@ enum {
 	k_receive_tuntap = false,
 	k_verify_umem = false,
 	k_verbose = false,
-	k_skipping = false
+	k_skipping = false,
+	k_timestamp = false,
+	k_showpacket = false
 };
 
 struct xsk_umem_info {
@@ -114,6 +118,7 @@ struct socket_stats {
 	struct stats_record stats;
 	struct stats_record prev_stats;
 	struct transfer_state trans;
+	struct timeval start_time;
 	uint8_t prev_sequence;
 };
 
@@ -462,7 +467,15 @@ static bool process_packet(struct xsk_socket_info *xsk_src, uint64_t addr,
 		__u8 protocol = ip->protocol;
 		__u32 saddr = ntohl(ip->saddr);
 		__u32 daddr = ntohl(ip->daddr);
-		hexdump(stdout, ip, (len < 32) ? len : 32);
+		if (k_showpacket)
+			hexdump(stdout, ip, (len < 32) ? len : 32);
+		if (k_timestamp) {
+			struct timeval tv ;
+			gettimeofday(&tv, NULL) ;
+			double elapsed=(tv.tv_sec-stats->start_time.tv_sec)
+					+ 1e-6*(tv.tv_usec-stats->start_time.tv_usec) ;
+			fprintf(stdout, "timestamp %15.6f\n", elapsed) ;
+		}
 		if (k_instrument)
 			fprintf(stdout,
 				"iphdr ihl=0x%01x version=0x%01x tos=0x%02x "
@@ -499,10 +512,12 @@ static bool process_packet(struct xsk_socket_info *xsk_src, uint64_t addr,
 			uint8_t *write_addr = (uint8_t *)ip;
 			size_t write_len = len - sizeof(struct ethhdr);
 			ssize_t ret = write(tun_fd, write_addr, write_len);
-			hexdump(stdout, write_addr,
-				(write_len < 32) ? write_len : 32);
-			fprintf(stdout, "Write length %lu actual %ld\n",
-				write_len, ret);
+			if (k_instrument) {
+				hexdump(stdout, write_addr,
+					(write_len < 32) ? write_len : 32);
+				fprintf(stdout, "Write length %lu actual %ld\n",
+						write_len, ret);
+			}
 			if (ret != write_len) {
 				fprintf(stderr,
 					"Error. %lu bytes requested, %ld bytes delivered, errno=%d %s\n",
@@ -927,6 +942,7 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 	/* Receive and count packets than drop them */
+	gettimeofday(&(stats.start_time), NULL) ;
 	rx_and_process(&cfg, all_socket_info, &stats, tun_fd, accept_map_fd);
 
 	/* Cleanup */

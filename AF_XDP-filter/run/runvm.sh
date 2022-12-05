@@ -10,5 +10,5 @@ for device in /proc/sys/net/ipv4/conf/*
 do
   echo 0 >${device}/rp_filter
 done
-export LD_LIBRARY_PATH=/usr/local/lib
+cd ..
 ./af_xdp_user -S -d enp1s0 -Q 1 --filename ./af_xdp_kern.o
