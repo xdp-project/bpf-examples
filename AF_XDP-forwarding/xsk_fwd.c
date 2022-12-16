@@ -728,7 +728,7 @@ static const struct port_params port_params_default = {
 		.tx_size = XSK_RING_PROD__DEFAULT_NUM_DESCS,
 		.libxdp_flags = 0,
 		.xdp_flags = XDP_FLAGS_DRV_MODE,
-		.bind_flags = XDP_USE_NEED_WAKEUP | XDP_ZEROCOPY,
+		.bind_flags = XDP_USE_NEED_WAKEUP,
 	},
 
 	.bp = NULL,
