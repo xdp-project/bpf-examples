@@ -1177,7 +1177,7 @@ static void parse_command_line(int argc, char **argv)
 			opt_poll = 1;
 			break;
 		case 'S':
-			opt_attach_mode |= XDP_MODE_SKB;
+			opt_attach_mode = XDP_MODE_SKB;
 			opt_xdp_bind_flags |= XDP_COPY;
 			break;
 		case 'N':
