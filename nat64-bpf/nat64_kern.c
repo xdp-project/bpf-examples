@@ -65,11 +65,46 @@ struct icmpv6_pseudo {
 	__u8 nh;
 } __attribute__((packed));
 
-static __always_inline void update_icmp_checksum(struct __sk_buff *skb,
-                                                 struct ipv6hdr *ip6h,
-                                                 void *icmp_before,
-                                                 void *icmp_after,
-                                                 bool add)
+static __always_inline void
+update_l4_checksum(struct __sk_buff *skb, struct ipv6hdr *ip6h,
+                   struct iphdr *iph, int ip_type, bool v4to6)
+{
+	void *data = (void *)(unsigned long long)skb->data;
+        int flags = BPF_F_PSEUDO_HDR;
+        __u16 offset;
+        __u32 csum;
+
+	if (v4to6) {
+		csum = bpf_csum_diff((__be32 *)&iph->saddr, 2 * sizeof(__u32),
+				     (__be32 *)&ip6h->saddr,
+				     2 * sizeof(struct in6_addr), 0);
+		offset = (void *)(iph + 1) - data;
+	} else {
+		csum = bpf_csum_diff((__be32 *)&ip6h->saddr,
+				     2 * sizeof(struct in6_addr),
+				     (__be32 *)&iph->saddr, 2 * sizeof(__u32),
+				     0);
+		offset = (void *)(ip6h + 1) - data;
+	}
+
+	switch (ip_type) {
+	case IPPROTO_TCP:
+		offset += offsetof(struct tcphdr, check);
+		break;
+	case IPPROTO_UDP:
+		offset += offsetof(struct udphdr, check);
+                flags |= BPF_F_MARK_MANGLED_0;
+		break;
+	default:
+		return;
+	}
+
+        bpf_l4_csum_replace(skb, offset, 0, csum, flags);
+}
+
+static __always_inline void
+update_icmp_checksum(struct __sk_buff *skb, struct ipv6hdr *ip6h,
+		     void *icmp_before, void *icmp_after, bool add)
 {
 	void *data = (void *)(unsigned long long)skb->data;
 	struct icmpv6_pseudo ph = {
@@ -293,13 +328,21 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
         dst_hdr.flow_lbl[0] = iph->tos << 4;
         dst_hdr.payload_len = bpf_htons(bpf_ntohs(iph->tot_len) - iphdr_len);
 
-        if (dst_hdr.nexthdr == IPPROTO_ICMP) {
+	switch (dst_hdr.nexthdr) {
+	case IPPROTO_ICMP:
 		if (rewrite_icmp(iph, &dst_hdr, skb))
 			goto out;
 		dst_hdr.nexthdr = IPPROTO_ICMPV6;
+		break;
+	case IPPROTO_TCP:
+	case IPPROTO_UDP:
+		update_l4_checksum(skb, &dst_hdr, iph, dst_hdr.nexthdr, true);
+		break;
+        default:
+                break;
 	}
 
-        if (bpf_skb_change_proto(skb, bpf_htons(ETH_P_IPV6), 0))
+	if (bpf_skb_change_proto(skb, bpf_htons(ETH_P_IPV6), 0))
                 goto out;
 
 	data = (void *)(unsigned long long)skb->data;
@@ -612,10 +655,18 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
         dst_hdr.tos = ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4);
         dst_hdr.tot_len = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(dst_hdr));
 
-        if (dst_hdr.protocol == IPPROTO_ICMPV6) {
+	switch (dst_hdr.protocol) {
+	case IPPROTO_ICMPV6:
 		if (rewrite_icmpv6(ip6h, skb))
 			goto out;
 		dst_hdr.protocol = IPPROTO_ICMP;
+		break;
+	case IPPROTO_TCP:
+	case IPPROTO_UDP:
+		update_l4_checksum(skb, ip6h, &dst_hdr, dst_hdr.protocol, false);
+		break;
+        default:
+                break;
 	}
 
         dst_hdr.check = csum_fold_helper(bpf_csum_diff((__be32 *)&dst_hdr, 0,
