@@ -709,13 +709,13 @@ static int nat64_handler(struct __sk_buff *skb, bool egress)
 
 	return TC_ACT_OK;
 }
-SEC("classifier")
+SEC("tc")
 int nat64_egress(struct __sk_buff *skb)
 {
         return nat64_handler(skb, true);
 }
 
-SEC("classifier")
+SEC("tc")
 int nat64_ingress(struct __sk_buff *skb)
 {
         return nat64_handler(skb, false);
