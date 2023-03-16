@@ -22,7 +22,7 @@ LIBBPF_DIR := $(LIB_DIR)/libbpf
 
 DEFINES := -DBPF_DIR_MNT=\"$(BPF_DIR_MNT)\" -DBPF_OBJECT_PATH=\"$(BPF_OBJECT_DIR)\"
 
-ifneq ($(PRODUCTION),1)
+ifeq ($(DEBUG),1)
 DEFINES += -DDEBUG
 endif
 
