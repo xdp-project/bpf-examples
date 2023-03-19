@@ -91,7 +91,7 @@ static void set_dscp(struct __sk_buff *skb, __u8 dscp)
 		ipv6_change_dsfield(ipv6hdr, INET_ECN_MASK, dscp << 2);
 }
 
-SEC("classifier/read")
+SEC("tc")
 int read_dscp(struct __sk_buff *skb)
 {
 	__u32 key = bpf_get_hash_recalc(skb);
@@ -106,7 +106,7 @@ int read_dscp(struct __sk_buff *skb)
 	return TC_ACT_OK;
 }
 
-SEC("classifier/write")
+SEC("tc")
 int write_dscp(struct __sk_buff *skb)
 {
 	__u32 key = skb->hash;
