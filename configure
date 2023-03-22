@@ -106,18 +106,17 @@ check_libbpf()
 int main(int argc, char **argv) {
     void *ptr;
     DECLARE_LIBBPF_OPTS(bpf_object_open_opts, opts, .pin_root_path = "/path");
-    DECLARE_LIBBPF_OPTS(bpf_xdp_set_link_opts, lopts, .old_fd = -1);
     (void) bpf_object__open_file("file", &opts);
     (void) bpf_program__name(ptr);
     (void) bpf_map__set_initial_value(ptr, ptr, 0);
-    (void) bpf_set_link_xdp_fd_opts(0, 0, 0, &lopts);
+    (void) bpf_xdp_attach(0, 0, 0, NULL);
     (void) bpf_tc_attach(ptr, ptr);
     (void) bpf_object__next_program(ptr, ptr);
     return 0;
 }
 EOF
 
-        libbpf_err=$($CC -o $TMPDIR/libbpftest $TMPDIR/libbpftest.c  $LIBBPF_CFLAGS -lbpf 2>&1)
+        libbpf_err=$($CC -o $TMPDIR/libbpftest $LIBBPF_CFLAGS $LIBBPF_LDLIBS $TMPDIR/libbpftest.c 2>&1)
         if [ "$?" -eq "0" ]; then
             echo "SYSTEM_LIBBPF:=y" >>$CONFIG
             echo 'CFLAGS += ' $LIBBPF_CFLAGS >> $CONFIG
