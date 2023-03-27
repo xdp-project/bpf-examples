@@ -171,7 +171,7 @@ static int parse_bounded_double(double *res, const char *str, double low,
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 {
 	int err, opt;
-	double rate_limit_ms, cleanup_interval_s, rtt_rate;
+	double user_float;
 
 	config->ifindex = 0;
 	config->bpf_config.localfilt = true;
@@ -201,22 +201,21 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			}
 			break;
 		case 'r':
-			err = parse_bounded_double(&rate_limit_ms, optarg, 0,
+			err = parse_bounded_double(&user_float, optarg, 0,
 						   7 * S_PER_DAY * MS_PER_S,
 						   "rate-limit");
 			if (err)
 				return -EINVAL;
 
-			config->bpf_config.rate_limit =
-				rate_limit_ms * NS_PER_MS;
+			config->bpf_config.rate_limit = user_float * NS_PER_MS;
 			break;
 		case 'R':
-			err = parse_bounded_double(&rtt_rate, optarg, 0, 10000,
-						   "rtt-rate");
+			err = parse_bounded_double(&user_float, optarg, 0,
+						   10000, "rtt-rate");
 			if (err)
 				return -EINVAL;
 			config->bpf_config.rtt_rate =
-				DOUBLE_TO_FIXPOINT(rtt_rate);
+				DOUBLE_TO_FIXPOINT(user_float);
 			break;
 		case 't':
 			if (strcmp(optarg, "min") == 0) {
@@ -230,14 +229,14 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			}
 			break;
 		case 'c':
-			err = parse_bounded_double(&cleanup_interval_s, optarg,
-						   0, 7 * S_PER_DAY,
+			err = parse_bounded_double(&user_float, optarg, 0,
+						   7 * S_PER_DAY,
 						   "cleanup-interval");
 			if (err)
 				return -EINVAL;
 
 			config->clean_args.cleanup_interval =
-				cleanup_interval_s * NS_PER_SECOND;
+				user_float * NS_PER_SECOND;
 			break;
 		case 'F':
 			if (strcmp(optarg, "standard") == 0) {
