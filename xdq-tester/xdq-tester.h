@@ -15,6 +15,7 @@
 #define BPF_F_TEST_XDP_DO_REDIRECT	(1U << 1)
 
 #define XDQ_LIBRARY "lib.lua"
+#define XDQ_CONFIG "config.lua"
 
 struct packet {
 	char *data;
@@ -29,6 +30,7 @@ struct xdq_state {
 	char *prog_name;
 	int xdp_prog_fd;
 	int dequeue_prog_fd;
+	int metadata_size;
 };
 
 struct xdq_state *get_xdq_state(lua_State *L);

@@ -13,7 +13,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_PIFO_XDP);
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(__u32));
-	__uint(max_entries, 4096);
+	__uint(max_entries, 2000);
 	__uint(map_extra, 4096); /* range */
 } pifo_map SEC(".maps");
 

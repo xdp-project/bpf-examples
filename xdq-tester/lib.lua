@@ -1,78 +1,30 @@
 -- SPDX-License-Identifier: GPL-2.0
 -- Copyright (c) 2022 Freysteinn Alfredsson <freysteinn@freysteinn.com>
 
-IPPROTO_UDP = 17
-ETH_P_IPV6 = 0x86dd
-
-XDP_ABORTED = 0
-XDP_DROP = 1
-XDP_PASS = 2
-XDP_TX = 3
-XDP_REDIRECT = 4
-
-config = {
-  bpf = {
-    file = "./sched_fifo.bpf.o",
-    xdp_func = "enqueue_prog",
-    dequeue_func = "dequeue_prog",
-  },
-
-  defaultUdp = {
-    eth = {
-      proto = ETH_P_IPV6,
-      source = "01:00:00:00:00:01",
-      dest = "01:00:00:00:00:02",
-    },
-
-    ip = {
-      priority = 0,
-      version = 6,
-      flow_lbl = { 0, 0, 0 },
-      -- payload_len = <set by framework if not set>,
-      nexthdr = IPPROTO_UDP,
-      hop_limit = 1,
-      saddr = "fe80::1",
-      daddr = "fe80::2",
-    },
-
-    udp = {
-      source = 1,
-      dest = 1,
-      -- len = <set by the framework if not set>,
-      -- check = <set by the framework if not set>,
-      payload = ""
-    }
-  }
-}
-
 xdq = {
   total_queued = 0,
   total_dequeued = 0,
   currently_queued = 0,
 }
 
--- Monitor config.bpf for changes
-local _config_bpf = config.bpf
-config.bpf = {} -- create proxy table
-local config_bpf_mt = {
-  __index = function (t,k)
-    if k == "file" then
-      load_xdq_file(_config_bpf[k])
-    end
-    return _config_bpf[k]
-  end,
+function table_has_key(table, key)
+  return table[key] ~= nil
+end
 
-  __newindex = function (t,k,v)
-    if k == "file" then
-      load_xdq_file(v)
-    end
-    _config_bpf[k] = v
+function hex_dump(buf)
+  return buf:gsub('.', function (c) return string.format('%02x ', string.byte(c)) end)
+end
+
+function trim_hex(hex)
+  local result = hex
+  local max_length = 16 * 3 -- Each byte is two hex characters followed by a space
+  local length = #hex
+  result = result:gsub(' +$', '')
+  if (#result > max_length) then
+    result = result:sub(1, max_length)
+    result = result .. '... (' .. string.format('%d', length) .. ' bytes)'
   end
-}
-setmetatable(config.bpf, config_bpf_mt)
-
-function table_has_key(table,key)
-    return table[key] ~= nil
+  return result
 end
 
 function compare_eth(cmp_eth, eth)
@@ -108,10 +60,10 @@ function compare_eth(cmp_eth, eth)
 end
 
 function compare_ip(cmp_ip, ip)
-  local cmp_ip_saddr = nil
-  local ip_saddr = nil
-  local cmp_ip_daddr = nil
-  local ip_daddr = nil
+  local cmp_ip_saddr
+  local ip_saddr
+  local cmp_ip_daddr
+  local ip_daddr
 
   if type(cmp_ip.priority) ~= "number" then
     fail("comparison ip.priority must be a number")
@@ -151,7 +103,7 @@ function compare_ip(cmp_ip, ip)
     end
   end
 
-    -- TODO: Add function that calculates the payload_len in lua
+  -- TODO: Add function that calculates the payload_len in lua
   -- if type(cmp_ip.payload_len) ~= "number" then
   --   fail("comparison ip.payload_len must be a number")
   -- end
@@ -255,15 +207,34 @@ function compare_udp(cmp_udp, udp)
     fail("dequeued udp.payload must be a string")
   end
   if cmp_udp.payload ~= udp.payload then
-    fail(string.format("expected udp.payload: %s, but found %s", cmp_udp.payload, udp.payload));
+    local cmp_payload, _ = trim_hex(hex_dump(cmp_udp.payload))
+    local payload, _ = trim_hex(hex_dump(udp.payload))
+    fail(string.format("expected udp.payload: %s,\n" ..
+                       "                    but found: %s", cmp_payload, payload));
   end
 end
 
-function dequeue_cmp(cmp)
-  local packet, retval = dequeue()
-  local protocol = nil
+function update_sequence(packet, packet_nr)
+  for _, v in pairs(packet) do
+    if type(v) == "table" then
+      if type(v.next_sequence) == "function" then
+        v.next_sequence(packet, packet_nr)
+      end
+    end
+  end
+end
 
-  if type(cmp) ~= "table" then
+function enqueue(packet, packet_nr)
+  update_sequence(packet, packet_nr)
+  return xdq_enqueue(packet)
+end
+
+function dequeue()
+  return xdq_dequeue()
+end
+
+function cmp(packet, cmp_packet, packet_nr)
+  if type(cmp_packet) ~= "table" then
     fail("parameter not a table")
   end
   if type(packet) ~= "table" then
@@ -276,68 +247,102 @@ function dequeue_cmp(cmp)
   if type(packet.eth) ~= "table" then
     fail("dequeued packet missing eth table")
   end
-  compare_eth(cmp.eth, packet.eth)
-  if cmp.eth.proto == ETH_P_IPV6 then
-    if type(cmp.ip) ~= "table" then
+  compare_eth(cmp_packet.eth, packet.eth)
+  if cmp_packet.eth.proto == ETH_P_IPV6 then
+    if type(cmp_packet.ip) ~= "table" then
       fail("comparision packet missing ip table")
     end
     if type(packet.ip) ~= "table" then
       fail("dequeued packet missing ip table")
     end
-    compare_ip(cmp.ip, packet.ip)
-    protocol = cmp.ip.nexthdr
+    compare_ip(cmp_packet.ip, packet.ip)
+    protocol = cmp_packet.ip.nexthdr
   end
   if protocol == IPPROTO_UDP then
-    if type(cmp.udp) ~= "table" then
+    if type(cmp_packet.udp) ~= "table" then
       fail("comparision packet missing udp table")
     end
     if type(packet.udp) ~= "table" then
       fail("dequeued packet missing udp table")
     end
-    compare_udp(cmp.udp, packet.udp)
+    update_sequence(cmp_packet, packet_nr)
+    compare_udp(cmp_packet.udp, packet.udp)
   end
+end
+
+function dequeue_cmp(cmp_packet, packet_nr)
+  local packet, retval = dequeue()
+  cmp(packet, cmp_packet, packet_nr)
   return packet, retval
 end
 
+function udp_payload_enumerator(packet, packet_nr)
+  local payload
+  local nr_str
+  if type(packet_nr) ~= "number" then
+    fail("The packet sequence number must be a number")
+  end
+  if type(packet.udp.payload) ~= 'string' then
+    fail("'packet.udp.payload' must be a string")
+  end
+  payload = packet.udp.payload
+  nr_str = string.pack("L", packet_nr)
+  if (#payload > 0 and #payload < #nr_str) then
+    print("Warning: payload is smaller than the udp enumerator")
+  end
+  packet.udp.payload = nr_str .. payload:sub(#nr_str + 1)
+end
+
 function create_payload(len)
-    if type(len) ~= 'number' then
-      fail("parameter must be a number")
-    end
-    if len < 0 then
-      fail("length parameter can't be a negative value")
-    end
+  if type(len) ~= 'number' then
+    fail("parameter must be a number")
+  end
+  if len < 0 then
+    fail("length parameter can't be a negative value")
+  end
   return string.rep("A", len)
 end
 
-function dump(o)
-    if type(o) == 'table' then
-        local s = '{\n'
-        for k,v in pairs(o) do
-                if type(k) ~= 'number' then k = '"'..k..'"' end
-                s = s .. '\t['..k..'] = ' .. dump(v) .. ',\n'
-        end
-        return s .. '}\n'
-    else
-        return tostring(o)
+function dump_rep(o, rep)
+  if type(o) == 'table' then
+    local indent = string.rep("    ", rep)
+    local s = '{\n'
+    for k, v in pairs(o) do
+      if k == 'payload' then
+        v = trim_hex(hex_dump(v))
+      end
+      k = '"' .. k .. '"'
+      s = s .. indent ..  k .. ': ' .. dump_rep(v, rep + 1) .. ',\n'
     end
+    indent = string.rep('    ', rep - 1)
+    s = s:gsub(',\n$', '\n')
+    return s .. indent .. '}'
+  else
+    if type(o) ~= 'number' then
+      o = '"' .. tostring(o) .. '"'
+    end
+    return tostring(o)
+  end
+end
+
+function dump(o)
+  return dump_rep(o, 1)
 end
 
 function copy(obj)
-    if type(obj) ~= 'table' then return obj end
-    local res = {}
-    for k, v in pairs(obj) do res[copy(k)] = copy(v) end
-    return res
+  if type(obj) ~= 'table' then
+    return obj
+  end
+  local res = {}
+  for k, v in pairs(obj) do
+    res[copy(k)] = copy(v)
+  end
+  return res
 end
 
 Udp = {
 }
 
 function Udp:new()
-  -- meta = {}
-  -- meta.__index = function (table, key)
-  --   return config.defaultUdp[key]
-  -- end
-  obj = copy(config.defaultUdp)
-  -- setmetatable(obj, meta)
-  return obj
+  return copy(config.defaultUdp)
 end

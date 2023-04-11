@@ -130,7 +130,7 @@ void *dequeue_prog(struct dequeue_ctx *ctx)
 		goto err;
 	}
 	sojourn_time = meta->time_ns;
-	bpf_printk("Frey: Sojourn_time: %ull", sojourn_time);
+	bpf_printk("Frey: Sojourn_time: %llu", sojourn_time);
 	return pkt;
 
 err:

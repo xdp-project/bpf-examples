@@ -1,29 +1,30 @@
 -- SPDX-License-Identifier: GPL-2.0
 -- Copyright (c) 2022 Freysteinn Alfredsson <freysteinn@freysteinn.com>
 
--- FIFO scheduler
+-- Test metadata
 config.bpf.file = "./sched_test.bpf.o"
 
 -- Setup flows
-packet_flow1 = Udp:new()
-packet_flow1.udp.dest = 8080
+adjust_meta(8)
+flow1 = Udp:new()
+flow1.udp.dest = 8080
+flow1.udp.payload = create_payload(4)
 
-packet_flow2 = Udp:new()
-packet_flow2.udp.dest = 8081
-
-packet_flow3 = Udp:new()
-packet_flow3.udp.dest = 8082
-
+flow2 = Udp:new()
+flow2.udp.dest = 8081
+flow2.udp.payload = create_payload(10)
 
 -- Test scheduler
+function test()
+  enqueue(flow1, 1)
+  dequeue_cmp(flow1, 1)
 
-enqueue(packet_flow1)
-dequeue_cmp(packet_flow1)
+  set_time_ns(100)
+  enqueue(flow2, 1)
+  packet = dequeue()
+  cmp(packet, flow2, 1)
+  print(dump(packet))
+  cmp(packet, flow1, 1)
+end
 
--- enqueue(packet_flow1)
--- enqueue(packet_flow2)
--- enqueue(packet_flow3)
---
--- dequeue_cmp(packet_flow1)
--- dequeue_cmp(packet_flow2)
--- dequeue_cmp(packet_flow3)
+test()

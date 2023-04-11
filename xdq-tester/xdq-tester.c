@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <libgen.h>
+#include <time.h>
 
 #include <arpa/inet.h>
 #include <netinet/ether.h>
@@ -106,8 +107,8 @@ void die(lua_State *L, const char *format, ...)
 {
 	struct xdq_state *state;
 	lua_Debug ar;
-	int line;
 	va_list args;
+	int level = 0;
 
 	lua_getglobal(L, "_xdq");
 	if (!lua_isuserdata(L, -1)) {
@@ -116,13 +117,19 @@ void die(lua_State *L, const char *format, ...)
 	}
 	state = lua_touserdata(L, -1);
 
-	if (lua_getstack(L, 1, &ar)) {
+	fprintf(stderr, "Stacktrace:\n");
+	while (lua_getstack(L, level, &ar)) {
 		lua_getinfo(L, "nSl", &ar);
-		line = ar.currentline;
-		fprintf(stderr, "%s:%s:%d: ", state->prog_name, ar.short_src, line);
-	} else {
-		fprintf(stderr, "%s: ", state->prog_name);
+		if (!strcmp(ar.short_src, "[C]"))
+			fprintf(stderr, "  [%d] %s: %s [%s]\n", level, state->prog_name,
+				ar.name, ar.what);
+		else
+			fprintf(stderr, "  [%d] %s:%d:%s [%s]\n",
+				level, ar.short_src, ar.currentline,
+				(ar.name ? ar.name : ""), ar.what);
+		++level;
 	}
+	fprintf(stderr, "  Error: ");
 
 	va_start(args, format);
 	vfprintf(stderr, format, args);
@@ -698,9 +705,15 @@ static struct udphdr *parse_udp_to_lua(lua_State *L, struct packet *pkt)
 
 static void parse_packet_to_lua(lua_State *L, struct packet *pkt)
 {
+	struct xdq_state *state = get_xdq_state(L);
 	struct ethhdr *eth = NULL;
 	struct ipv6hdr *iph = NULL;
 	int proto = -1;
+
+	// Handle metadata
+	if (pkt->cur + state->metadata_size > pkt->data_end)
+		die(L, "Metadata section larger than packet!");
+	pkt->cur += state->metadata_size;
 
 	// Packet table
 	lua_createtable(L, -1, 0);
@@ -797,6 +810,24 @@ int normalize_ipv6_address(lua_State *L)
 
 	lua_pushstring(L, inet_ntop(AF_INET6, &ip, ip_str, sizeof(ip_str)));
 	return 1;
+}
+
+int adjust_meta(lua_State *L)
+{
+	struct xdq_state *state = get_xdq_state(L);
+	int metadata_size = 0;
+
+	if (lua_gettop(L) != 1)
+		die(L, "Incorrect number of arguments");
+	if (!lua_isstring(L, 1))
+		die(L, "Argument must be an integer");
+	metadata_size += lua_tointeger(L, 1);
+
+	if (metadata_size < 0)
+		die(L, "Metadata can not be less than zero");
+
+	state->metadata_size = metadata_size;
+	return 0;
 }
 
 int fail_xdq(lua_State *L)
@@ -913,6 +944,15 @@ int get_time_ns(lua_State *L)
 /* End of Scheduler specific helpers */
 
 
+int get_clock(lua_State *L)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	lua_pushnumber(L, (int64_t)t.tv_sec * (int64_t)1000000000UL + (int64_t)t.tv_nsec);
+	return 1;
+}
+
+
 static void initLuaFunctions(lua_State *L, char *prog_name)
 {
 	struct xdq_state *state = lua_newuserdatauv(L, sizeof(struct xdq_state), 0);
@@ -923,16 +963,19 @@ static void initLuaFunctions(lua_State *L, char *prog_name)
 	lua_setglobal(L, "_xdq");
 
 	lua_pushcfunction(L, enqueue);
-	lua_setglobal(L, "enqueue");
+	lua_setglobal(L, "xdq_enqueue");
 
 	lua_pushcfunction(L, dequeue);
-	lua_setglobal(L, "dequeue");
+	lua_setglobal(L, "xdq_dequeue");
 
 	lua_pushcfunction(L, load_xdq_file);
 	lua_setglobal(L, "load_xdq_file");
 
 	lua_pushcfunction(L, normalize_ipv6_address);
 	lua_setglobal(L, "normalize_ipv6_address");
+
+	lua_pushcfunction(L, adjust_meta);
+	lua_setglobal(L, "adjust_meta");
 
 	lua_pushcfunction(L, fail_xdq);
 	lua_setglobal(L, "fail");
@@ -949,6 +992,23 @@ static void initLuaFunctions(lua_State *L, char *prog_name)
 
 	lua_pushcfunction(L, show_flow_map);
 	lua_setglobal(L, "show_flow_map");
+
+	lua_pushcfunction(L, get_clock);
+	lua_setglobal(L, "get_clock");
+}
+
+static void run_lua_file(lua_State *L, char *fullpath, char *filename)
+{
+	if (!realpath("/proc/self/exe", fullpath))
+		die(L, "Program location not found");
+	dirname(fullpath);
+	if (strlen(fullpath) + strlen(filename + 1) >= PATH_MAX)
+		die(L, "Path to '%s' too long\nPath: '%s'", filename, fullpath);
+	strncat(fullpath, "/", PATH_MAX);
+	strncat(fullpath, filename, PATH_MAX);
+
+	if (luaL_dofile(L, fullpath) != LUA_OK)
+		die(L, "Failed to load LUA file: %s\n", fullpath);
 }
 
 static void usage(char *prog_name)
@@ -956,9 +1016,9 @@ static void usage(char *prog_name)
 	printf("Usage: %s [OPTIONS] <xdq_object_file>\n", prog_name);
 	fputs("\nTest XDP and DEQUEUE BPF hooks.\n", stdout);
 	fputs("Mandatory arguments to long options are mandatory for short options too.\n", stdout);
-	fputs("\
-  -v, --verbose             output BPF diagnostic\n\
-  -h, --help                display this help and exit\n", stdout);
+	fputs("\n", stdout);
+	fputs("-v, --verbose         output BPF diagnostic\n", stdout);
+	fputs("-h, --help            display this help and exit\n", stdout);
 }
 
 int main(int argc, char *argv[])
@@ -966,6 +1026,7 @@ int main(int argc, char *argv[])
 	lua_State *L;
 	struct xdq_state *state;
 	char lib_file[PATH_MAX + 1] = {0};
+	char config_file[PATH_MAX + 1] = {0};
 	char *sched_file = NULL;
 	int opt;
 
@@ -973,18 +1034,10 @@ int main(int argc, char *argv[])
 	L = luaL_newstate();
 	luaL_openlibs(L);
 	initLuaFunctions(L, argv[0]);
+	state = get_xdq_state(L);
 
-	if (!realpath("/proc/self/exe", lib_file))
-		die(L, "Program location not found");
-	dirname(lib_file);
-	if (strlen(lib_file) + strlen(XDQ_LIBRARY + 1) >= PATH_MAX)
-		die(L, "Path to library '%s' too long\nPath: '%s'", XDQ_LIBRARY, lib_file);
-	strncat(lib_file, "/", PATH_MAX);
-	strncat(lib_file, XDQ_LIBRARY, PATH_MAX);
-
-	if (luaL_dofile(L, lib_file) != LUA_OK)
-		die(L, "Failed to load LUA library\n");
-
+	run_lua_file(L, lib_file, XDQ_LIBRARY);
+	run_lua_file(L, config_file, XDQ_CONFIG);
 
 	while ((opt = getopt_long(argc, argv, "f:vh", long_options, NULL)) != -1) {
 		switch (opt) {
@@ -992,7 +1045,6 @@ int main(int argc, char *argv[])
 			sched_file = optarg;
 			break;
 		case 'v':
-			state = get_xdq_state(L);
 			set_log_level(LOG_VERBOSE);
 			break;
 		case 'h':
@@ -1014,7 +1066,6 @@ int main(int argc, char *argv[])
 	if (luaL_dofile(L, sched_file) != LUA_OK) {
 		die(L, "%s", lua_tostring(L, -1));
 	}
-	state = get_xdq_state(L);
 	free(state->xdq_script);
 	lua_close(L);
 	return EXIT_SUCCESS;

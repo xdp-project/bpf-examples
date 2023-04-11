@@ -7,15 +7,17 @@ config.bpf.file = "./sched_fq_codel.bpf.o"
 
 -- Setup flows
 -- We use this flow to test sparse flow handling
-packet_sparse_flow_tester = Udp:new()
-packet_sparse_flow_tester.udp.dest = 8000
+adjust_meta(8)
+
+flow = Udp:new()
+flow.udp.dest = 8000
 
 -- The background stream flow increments the time bytes
 -- so that we can test our sparse flow tester when time has passed
-packet_flow_background_stream = Udp:new()
-packet_flow_background_stream.udp.dest = 8001
--- Make the packet the size of full a quantom (1522 - 62)
-packet_flow_background_stream.udp.payload = create_payload(1460)
+bg_flow = Udp:new()
+bg_flow.udp.dest = 8001
+-- Make the packet the size of full a quantom (1514 - 62) -- 1514
+bg_flow.udp.payload = create_payload(1452)
 
 set_time_ns(1000)
 
@@ -33,12 +35,12 @@ function make_sparse(flow)
   -- The background flow needs two packets to be a stream:
   -- * The first packet will be sparse.
   -- * The second packet exceeds the sparse quantom.
-  flow.udp.payload = create_payload(1460)
-  enqueue(flow) -- Sparse
-  enqueue(flow) -- Stream
-  dequeue_cmp(flow) -- Dequeue sparse
-  dequeue_cmp(flow) -- Dequeue sparse
-  -- Note that the type_bytes has not advanced at this point but will after the
+  flow.udp.payload = create_payload(1444)
+  enqueue(flow, 10001) -- Sparse
+  enqueue(flow, 10002) -- Stream
+  dequeue_cmp(flow, 10001) -- Dequeue sparse
+  dequeue_cmp(flow, 10002) -- Dequeue sparse
+  -- Note that the time_bytes has not advanced at this point but will after the
   -- next dequeued packet.
 end
 
@@ -51,34 +53,34 @@ function fq_codel_sparse_test1()
   -- 4. Advance time_bytes and expire the new sparse flow.
   -- In steps two and four the test confirms that the sparse flows
   -- were still sparse.
-  make_sparse(packet_flow_background_stream)
+  make_sparse(bg_flow)
 
   -- Prime the background stream so it can update the time_bytes variable later.
-  enqueue(packet_flow_background_stream) -- Prime for updating time_bytes
-  enqueue(packet_flow_background_stream) -- Make sure the flow is not recycled after update
+  enqueue(bg_flow, 11) -- Prime for updating time_bytes
+  enqueue(bg_flow, 12) -- Make sure the flow is not recycled after update
 
   -- Make the packet the size of half a quantom (1522/2 - 62)
   -- The flow will cease being a sparse flow after two packets.
-  packet_sparse_flow_tester.udp.payload = create_payload(699)
+  flow.udp.payload = create_payload(695)
 
   -- The sparse flow gets a full quantom of packets.
-  enqueue(packet_sparse_flow_tester) -- Sparse 1
-  enqueue(packet_sparse_flow_tester) -- Sparse 2
+  enqueue(flow, 11) -- Sparse 1
+  enqueue(flow, 12) -- Sparse 2
 
   -- Remove all sparse packets.
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue sparse
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue sparse
+  dequeue_cmp(flow, 11) -- Dequeue sparse
+  dequeue_cmp(flow, 12) -- Dequeue sparse
 
   -- Advance time_bytes
-  dequeue_cmp(packet_flow_background_stream) -- Advances time_bytes one quantom
-  -- Our FQ-CoDel algorithm should have expired the sparse_flow_tester
+  dequeue_cmp(bg_flow, 11) -- Advances time_bytes one quantom
+  -- Our FQ-CoDel algorithm should have expired the flow
   -- flow at this point, but not the background stream.
 
-  -- Test that the sparse_flow_tester is indeed expired.
-  enqueue(packet_sparse_flow_tester) -- Add sparse packet with a higher priority
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue the sparse packet
-  dequeue_cmp(packet_flow_background_stream) -- Advances time_bytes one quantom
-  -- Our FQ-CoDel algorithm should have expired both the sparse_flow_tester
+  -- Test that the flow is indeed expired.
+  enqueue(flow, 13) -- Add sparse packet with a higher priority
+  dequeue_cmp(flow, 13) -- Dequeue the sparse packet
+  dequeue_cmp(bg_flow, 12) -- Advances time_bytes one quantom
+  -- Our FQ-CoDel algorithm should have expired both the flow
   -- flow and the background stream at this point.
 end
 
@@ -90,38 +92,38 @@ function fq_codel_sparse_test2()
   -- 3. Adds a couple of packets to the sparse flow.
   -- In steps one and three the test confirms that the sparse flow
   -- is still sparse.
-  make_sparse(packet_flow_background_stream)
+  make_sparse(bg_flow)
 
   -- Make the packet the size of half a quantom (1522/2 - 62)
-  packet_flow_background_stream.udp.payload = create_payload(699)
+  bg_flow.udp.payload = create_payload(691)
 
   -- Make each packet 50 bytes for our sparse flow
-  packet_sparse_flow_tester.udp.payload = create_payload(38)
+  flow.udp.payload = create_payload(30)
 
   -- Keep in mind that the last background packet ends at a full quantom. Therefore,
   -- if we want to update the time_bytes by a half a quantom, we will need to enqueue
   -- and deqeueu a half a quantom packet.
-  enqueue(packet_flow_background_stream) -- Used to advance time_bytes by half a quantom
-  enqueue(packet_flow_background_stream) -- Used to advance time_bytes by half a quantom
-  enqueue(packet_flow_background_stream) -- Make sure the flow is not recycled after update
-  dequeue_cmp(packet_flow_background_stream) -- Advances time_bytes by a half a quantom
+  enqueue(bg_flow, 21) -- Used to advance time_bytes by half a quantom
+  enqueue(bg_flow, 22) -- Used to advance time_bytes by half a quantom
+  enqueue(bg_flow, 23) -- Make sure the flow is not recycled after update
+  dequeue_cmp(bg_flow, 21) -- Advances time_bytes by a half a quantom
 
   -- Confirm that the sparse flow has a higher priority than the background stream.
-  enqueue(packet_sparse_flow_tester) -- Add a sparse packet
-  enqueue(packet_sparse_flow_tester) -- Add a sparse packet
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue the sparse packet
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue the sparse packet
+  enqueue(flow, 21) -- Add a sparse packet
+  enqueue(flow, 22) -- Add a sparse packet
+  dequeue_cmp(flow, 21) -- Dequeue the sparse packet
+  dequeue_cmp(flow, 22) -- Dequeue the sparse packet
 
-  dequeue_cmp(packet_flow_background_stream) -- Advances time_bytes by a half a quantom
+  dequeue_cmp(bg_flow, 22) -- Advances time_bytes by a half a quantom
 
   -- Confirm that the sparse flow has a higher priority than the stream.
-  enqueue(packet_sparse_flow_tester) -- Add a sparse packet
-  enqueue(packet_sparse_flow_tester) -- Add a sparse packet
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue the sparse packet
-  dequeue_cmp(packet_sparse_flow_tester) -- Dequeue the sparse packet
+  enqueue(flow, 23) -- Add a sparse packet
+  enqueue(flow, 24) -- Add a sparse packet
+  dequeue_cmp(flow, 23) -- Dequeue the sparse packet
+  dequeue_cmp(flow, 24) -- Dequeue the sparse packet
 
   -- Recycle both flows.
-  dequeue_cmp(packet_flow_background_stream) -- Recycle both flows
+  dequeue_cmp(bg_flow, 23) -- Recycle both flows
 end
 
 -- 1.3 Test a flow that becomes a stream.
@@ -132,37 +134,37 @@ function fq_codel_sparse_test3()
   -- 3. Advances time_bytes by a half a quantom.
   -- 4. Adds packets to the stream
   -- In steps two and four the test confirms that the flow is a stream.
-  make_sparse(packet_flow_background_stream)
+  make_sparse(bg_flow)
 
-  -- Make the packet the size of half a quantom (1522/2 - 62)
-  packet_sparse_flow_tester.udp.payload = create_payload(699)
+  -- Make the packet the size of half a quantom (1514/2 - 62)
+  flow.udp.payload = create_payload(695)
 
-  -- Make the packet the size of half a quantom (1522/2 - 62)
-  packet_flow_background_stream.udp.payload = create_payload(699)
+  -- Make the packet the size of half a quantom (1514/2 - 62)
+  bg_flow.udp.payload = create_payload(695)
 
   -- Keep in mind that the last background packet ends at a full quantom. Therefore,
   -- if we want to update the time_bytes by a half a quantom, we will need to enqueue
   -- and deqeueu a half a quantom packet.
-  enqueue(packet_flow_background_stream) -- Used to advance time_bytes by half a quantom
-  enqueue(packet_flow_background_stream) -- Used to advance time_bytes by half a quantom
-  enqueue(packet_flow_background_stream) -- Make sure the flow is not recycled after update
-  dequeue_cmp(packet_flow_background_stream) -- Advances time_bytes by a half a quantom
+  enqueue(bg_flow, 31) -- Used to advance time_bytes by half a quantom
+  enqueue(bg_flow, 32) -- Used to advance time_bytes by half a quantom
+  enqueue(bg_flow, 33) -- Make sure the flow is not recycled after update
+  dequeue_cmp(bg_flow, 31) -- Advances time_bytes by a half a quantom
 
-  -- Make the sparse_flow_tester flow a stream.
-  enqueue(packet_sparse_flow_tester) -- Add sparse packet
-  enqueue(packet_sparse_flow_tester) -- Add sparse packet
-  enqueue(packet_sparse_flow_tester) -- Make the flow a stream
-  enqueue(packet_sparse_flow_tester) -- Add stream packet
+  -- Make the flow flow a stream.
+  enqueue(flow, 31) -- Add sparse packet
+  enqueue(flow, 32) -- Add sparse packet
+  enqueue(flow, 33) -- Make the flow a stream
+  enqueue(flow, 34) -- Add stream packet
 
   --  Dequeue the sparse flow packets.
-  dequeue_cmp(packet_sparse_flow_tester)
-  dequeue_cmp(packet_sparse_flow_tester)
+  dequeue_cmp(flow, 31)
+  dequeue_cmp(flow, 32)
 
   -- Confirm that both flows are streams with equal priority.
-  dequeue_cmp(packet_sparse_flow_tester)
-  dequeue_cmp(packet_flow_background_stream)
-  dequeue_cmp(packet_sparse_flow_tester)
-  dequeue_cmp(packet_flow_background_stream)
+  dequeue_cmp(flow, 33)
+  dequeue_cmp(bg_flow, 32)
+  dequeue_cmp(flow, 34)
+  dequeue_cmp(bg_flow, 33)
 end
 
 --
@@ -172,8 +174,8 @@ end
 
 
 -- Run tests
-fq_codel_sparse_test1()
---fq_codel_sparse_test2()
---fq_codel_sparse_test3()
+-- fq_codel_sparse_test1()
+-- fq_codel_sparse_test2()
+fq_codel_sparse_test3()
 --
---fq_codel_codel_test1()
+-- fq_codel_codel_test1()

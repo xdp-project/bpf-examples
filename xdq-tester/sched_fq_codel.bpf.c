@@ -32,12 +32,11 @@ struct {
 	__uint(max_entries, 1);
 } xdq_time_ns SEC(".maps");
 
-const __u32 quantom = 1522;
-__u64 time_bytes = quantom;
+const __u32 quantum = 1514;
+__u64 time_bytes = quantum;
 
 struct xdq_meta {
         __u64 time_ns;
-        __u32 btf_id;
 } __attribute__((aligned(4))) __attribute__((packed));
 
 static __always_inline __u64 get_time_ns()
@@ -81,8 +80,6 @@ static __always_inline int xdq_meta_add(struct xdp_md *ctx)
                 return -2;
 
         meta->time_ns = get_time_ns();
-        /* Userspace can identify struct used by BTF id */
-        meta->btf_id = bpf_core_type_id_local(struct xdq_meta);
         return 0;
 }
 
@@ -92,11 +89,7 @@ static __always_inline int schedule_packet(struct parsing_context *pctx)
 	struct network_tuple nt = {0};
 	struct fq_codel_flow_state *flow;
 	struct fq_codel_flow_state new_flow = {0};
-	__u32 flow_time_bytes = time_bytes; // Used to offset sparse flows
-	__u32 packet_start_time_bytes;
 	__u32 prio = 0;
-
-	char flow_type = 'd';
 
 	/* Get flow */
 	if (parse_packet(pctx, &p_info) < 0)
@@ -108,31 +101,22 @@ static __always_inline int schedule_packet(struct parsing_context *pctx)
 	if (!flow)
 		goto err;
 
+	prio = flow->finish_bytes;
+
 	/* Handle Sparse flows */
-	if (flow->pkts == 0 && flow_time_bytes >= flow->grace_period) { // New flow
-		flow_type = 'S';
-		flow->pkts = 0;
-		flow->total_bytes = (pctx->data_end - pctx->data);
-		flow->finish_bytes = 0;
-		flow->grace_period = flow_time_bytes + quantom;
-
-		flow_time_bytes -= quantom; // Give sparse flows a negative quantom priority;
-	} else if (flow->total_bytes < quantom) {
-		flow_type = 's';
-		flow->total_bytes += (pctx->data_end - pctx->data);
-		flow_time_bytes -= quantom; // Give sparse flows a negative quantom priority;
+	if (flow->pkts == 0 && time_bytes >= flow->grace_period) { // New flow
+		flow->total_bytes = 0;
+		prio = time_bytes - quantum;
 	}
-	flow->pkts++;
 
-	/* Calculate scheduling priority */
-	packet_start_time_bytes = bpf_max(flow_time_bytes, flow->finish_bytes);
-	flow->finish_bytes = packet_start_time_bytes + pctx->pkt_len;
-	prio = packet_start_time_bytes;
+	flow->pkts++;
+	flow->finish_bytes = prio + pctx->pkt_len;
+	flow->total_bytes += pctx->pkt_len;
+	flow->grace_period = time_bytes + quantum;
 
 	if (bpf_map_update_elem(&flow_states, &nt, flow, BPF_ANY))
 		goto err;
 
-	bpf_printk("ENQUEUE: port: %d -> prio: %6d -> time_bytes: %6d -> pkt: %6d -> end: %6d type: %c ", (int) bpf_ntohs(nt.daddr.port), prio, time_bytes, flow->pkts, flow->finish_bytes, flow_type);
 	return bpf_redirect_map(&pifo_map, prio, 0);
 err:
 	bpf_printk("XDP DROP");

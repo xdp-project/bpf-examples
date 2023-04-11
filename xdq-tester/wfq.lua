@@ -6,96 +6,96 @@ config.bpf.file = "./sched_wfq.bpf.o"
 
 
 -- Setup flows
-packet_flow1 = Udp:new()
-packet_flow1.udp.dest = 8000
-packet_flow1.udp.payload = create_payload(38)
+flow1 = Udp:new()
+flow1.udp.dest = 8000
+flow1.udp.payload = create_payload(38)
 
-packet_flow2 = Udp:new()
-packet_flow2.udp.dest = 8001
-packet_flow2.udp.payload = create_payload(138)
+flow2 = Udp:new()
+flow2.udp.dest = 8001
+flow2.udp.payload = create_payload(138)
 
-packet_flow3 = Udp:new()
-packet_flow3.udp.dest = 8002
-packet_flow3.udp.payload = create_payload(38)
+flow3 = Udp:new()
+flow3.udp.dest = 8002
+flow3.udp.payload = create_payload(38)
 
 -- Test scheduler
 
 -- 1. Enqueue two packets using the same flow.
 -- Tests that no flows remain after the PIFO is empty.
 function wfq_test1()
-  enqueue(packet_flow1)
-  dequeue_cmp(packet_flow1)
+  enqueue(flow1, 1)
+  dequeue_cmp(flow1, 1)
 end
 
 
 -- 2. Enqueue two flows
 function wfq_test2()
-  enqueue(packet_flow1)
-  enqueue(packet_flow1)
-  enqueue(packet_flow3)
+  enqueue(flow1, 1)
+  enqueue(flow1, 2)
+  enqueue(flow3, 1)
 
-  dequeue_cmp(packet_flow1)
-  dequeue_cmp(packet_flow3)
-  dequeue_cmp(packet_flow1)
+  dequeue_cmp(flow1, 1)
+  dequeue_cmp(flow3, 1)
+  dequeue_cmp(flow1, 2)
 end
 
 
 -- 3. Enqueue three flows where one flow has a larger packet size.
 function wfq_test3()
-  -- priority: flow(packet_number, flow_end_byte), flow(...), ...
-  enqueue(packet_flow1)
+  -- priority: flow(number, flow_end_byte), flow(...), ...
+  enqueue(flow1, 1)
   --   0: *f1(1, 100)
 
-  enqueue(packet_flow2)
+  enqueue(flow2, 1)
   --   0: *f2(1, 200), f1(1, 100)
 
-  enqueue(packet_flow1)
+  enqueue(flow1, 2)
   --   0: f2(1, 200), f1(1, 100)
   -- 100: *f1(2, 100)
 
-  enqueue(packet_flow2)
+  enqueue(flow2, 2)
   --   0: f2(1, 200), f1(1, 100)
   -- 100: f1(2, 100)
   -- 200: *f2(2, 400)
 
-  dequeue_cmp(packet_flow1)
+  dequeue_cmp(flow1, 1)
   --   0: f2(1, 200)    ---> *f1(1, 100)
   -- 100: f1(2, 100)
   -- 200: f2(2, 400)
 
-  enqueue(packet_flow1)
+  enqueue(flow1, 3)
   --   0: f2(1, 200)
   -- 100: f1(2, 100)
   -- 200: *f1(3, 300), f2(2, 400)
 
-  dequeue_cmp(packet_flow2)
+  dequeue_cmp(flow2, 1)
   --   0:    ---> *f2(1, 200)
   -- 100: f1(2, 100)
   -- 200: f1(3, 300), f2(2, 400)
 
-  dequeue_cmp(packet_flow1)
+  dequeue_cmp(flow1, 2)
   -- 100:    ---> *f1(2, 100)
   -- 200: f1(3, 300), f2(2, 400)
 
-  enqueue(packet_flow3)
+  enqueue(flow3, 1)
   -- 100: *f3(1, 200)
   -- 200: f1(3, 300), f2(2, 400)
 
-  enqueue(packet_flow3)
+  enqueue(flow3, 2)
   -- 100: f3(1, 200)
   -- 200: *f3(2, 300), f1(3, 300), f2(2, 400)
 
-  dequeue_cmp(packet_flow3)
+  dequeue_cmp(flow3, 1)
   -- 100:    ---> *f3(1, 200)
   -- 200: f3(2, 300), f1(3, 300), f2(2, 400)
 
-  dequeue_cmp(packet_flow2)
+  dequeue_cmp(flow2, 2)
   -- 200: f3(2, 300), f1(3, 300)    ---> *f2(2, 400)
 
-  dequeue_cmp(packet_flow1)
+  dequeue_cmp(flow1, 3)
   -- 200: f3(2, 300)    ---> *f1(3, 300)
 
-  dequeue_cmp(packet_flow3)
+  dequeue_cmp(flow3, 2)
   -- 200:    ---> *f3(2, 300)
 end
 
@@ -104,39 +104,40 @@ end
 function wfq_test4()
   for i = 0, 4095, 1
   do
-    enqueue(packet_flow1)
+    enqueue(flow1, i + 1)
   end
   for i = 0, 4095, 1
   do
-    dequeue_cmp(packet_flow1)
+    dequeue_cmp(flow1, i + 1)
   end
 end
 
 
 -- 5. Enqueue packets with weights
 function wfq_test5()
-  set_flow_weight(packet_flow1, 1024)
-  enqueue(packet_flow1)
-  enqueue(packet_flow1)
-  enqueue(packet_flow2)
-  enqueue(packet_flow2)
+  set_flow_weight(flow1, 1024)
+  enqueue(flow1, 1)
+  enqueue(flow1, 2)
+  enqueue(flow2, 1)
+  enqueue(flow2, 2)
 
-  dequeue_cmp(packet_flow1)
-  dequeue_cmp(packet_flow2)
-  dequeue_cmp(packet_flow2)
-  dequeue_cmp(packet_flow1)
+  dequeue_cmp(flow1, 1)
+  dequeue_cmp(flow2, 1)
+  dequeue_cmp(flow2, 2)
+  dequeue_cmp(flow1, 2)
 
-  set_flow_weight(packet_flow1, 256)
-  set_flow_weight(packet_flow2, 32)
-  enqueue(packet_flow1)
-  enqueue(packet_flow1)
-  enqueue(packet_flow2)
-  enqueue(packet_flow2)
+  set_flow_weight(flow1, 256)
+  set_flow_weight(flow2, 32)
 
-  dequeue_cmp(packet_flow1)
-  dequeue_cmp(packet_flow2)
-  dequeue_cmp(packet_flow2)
-  dequeue_cmp(packet_flow1)
+  enqueue(flow1, 3)
+  enqueue(flow1, 4)
+  enqueue(flow2, 3)
+  enqueue(flow2, 4)
+
+  dequeue_cmp(flow1, 3)
+  dequeue_cmp(flow2, 3)
+  dequeue_cmp(flow2, 4)
+  dequeue_cmp(flow1, 4)
 end
 
 

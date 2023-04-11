@@ -5,36 +5,36 @@
 config.bpf.file = "./sched_hpfq.bpf.o"
 
 -- Create flows
-packet_flow1 = Udp:new()
-packet_flow1.udp.dest = 4000
+flow1 = Udp:new()
+flow1.udp.dest = 4000
 
-packet_flow2 = Udp:new()
-packet_flow2.udp.dest = 8001
+flow2 = Udp:new()
+flow2.udp.dest = 8001
 
-packet_flow3 = Udp:new()
-packet_flow3.udp.dest = 8002
+flow3 = Udp:new()
+flow3.udp.dest = 8002
 
 
 function hpfq_test1()
-  enqueue(packet_flow1)
-  enqueue(packet_flow2)
-  enqueue(packet_flow3)
+  enqueue(flow1, 1)
+  enqueue(flow2, 1)
+  enqueue(flow3, 1)
 
-  dequeue_cmp(packet_flow3)
-  dequeue_cmp(packet_flow2)
-  dequeue_cmp(packet_flow1)
+  dequeue_cmp(flow3, 1)
+  dequeue_cmp(flow2, 1)
+  dequeue_cmp(flow1, 1)
 end
 
 function hpfq_debug()
-  enqueue(packet_flow1)
-  enqueue(packet_flow1)
-  dequeue_cmp(packet_flow1)
-  dequeue_cmp(packet_flow1)
+  enqueue(flow1, 1)
+  enqueue(flow1, 2)
+  dequeue_cmp(flow1, 1)
+  dequeue_cmp(flow1, 2)
 
-  enqueue(packet_flow1)
-  enqueue(packet_flow1)
-  dequeue_cmp(packet_flow1)
-  dequeue_cmp(packet_flow1)
+  enqueue(flow1, 2)
+  enqueue(flow1, 3)
+  dequeue_cmp(flow1, 2)
+  dequeue_cmp(flow1, 3)
 end
 
 -- hpfq_test1()
