@@ -36,7 +36,7 @@ static const char *__doc__ =
 #define PROG_INGRESS_XDP "pping_xdp_ingress"
 #define PROG_EGRESS_TC "pping_tc_egress"
 
-enum PPING_OUTPUT_FORMAT {
+enum pping_output_format {
 	PPING_OUTPUT_STANDARD,
 	PPING_OUTPUT_JSON,
 	PPING_OUTPUT_PPVIZ
@@ -85,7 +85,7 @@ struct pping_config {
 	int ingress_prog_id;
 	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
-	enum PPING_OUTPUT_FORMAT output_format;
+	enum pping_output_format output_format;
 	enum xdp_attach_mode xdp_mode;
 	bool force;
 	bool created_tc_hook;
@@ -317,7 +317,7 @@ const char *tracked_protocols_to_str(struct pping_config *config)
 	return tcp && icmp ? "TCP, ICMP" : tcp ? "TCP" : "ICMP";
 }
 
-const char *output_format_to_str(enum PPING_OUTPUT_FORMAT format)
+const char *output_format_to_str(enum pping_output_format format)
 {
 	switch (format) {
 	case PPING_OUTPUT_STANDARD:
