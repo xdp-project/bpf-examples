@@ -155,14 +155,22 @@ static int parse_bounded_double(double *res, const char *str, double low,
 				double high, const char *name)
 {
 	char *endptr;
+	errno = 0;
+
 	*res = strtod(str, &endptr);
-	if (strlen(str) != endptr - str) {
+	if (endptr == str || strlen(str) != endptr - str) {
 		fprintf(stderr, "%s %s is not a valid number\n", name, str);
 		return -EINVAL;
 	}
+
+	if (errno == ERANGE) {
+		fprintf(stderr, "%s %s overflowed\n", name, str);
+		return -ERANGE;
+	}
+
 	if (*res < low || *res > high) {
-		fprintf(stderr, "%s must in range [%g, %g]\n", name, low, high);
-		return -EINVAL;
+		fprintf(stderr, "%s must be in range [%g, %g]\n", name, low, high);
+		return -ERANGE;
 	}
 
 	return 0;
