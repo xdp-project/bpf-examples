@@ -230,6 +230,10 @@ union pping_event {
 
 struct aggregated_rtt_stats {
 	__u64 last_updated;
+	__u64 rx_packet_count;
+	__u64 tx_packet_count;
+	__u64 rx_byte_count;
+	__u64 tx_byte_count;
 	__u64 min;
 	__u64 max;
 	__u32 bins[RTT_AGG_NR_BINS];

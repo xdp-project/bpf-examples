@@ -1026,28 +1026,21 @@ lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv)
 	return bpf_map_lookup_elem(agg_map, &key);
 }
 
-static void aggregate_rtt(__u64 rtt, __u64 t, struct in6_addr *ip, __u8 ipv)
+static void aggregate_rtt(__u64 rtt, struct aggregated_rtt_stats *agg_stats)
 {
-	if (!config.agg_rtts)
+	if (!config.agg_rtts || !agg_stats)
 		return;
 
-	struct aggregated_rtt_stats *rtt_agg;
 	int bin_idx;
 
-	rtt_agg = lookup_or_create_aggregation_stats(ip, ipv);
-	if (!rtt_agg)
-		return;
-
-	rtt_agg->last_updated = t;
-
-	if (!rtt_agg->min || rtt < rtt_agg->min)
-		rtt_agg->min = rtt;
-	if (rtt > rtt_agg->max)
-		rtt_agg->max = rtt;
+	if (!agg_stats->min || rtt < agg_stats->min)
+		agg_stats->min = rtt;
+	if (rtt > agg_stats->max)
+		agg_stats->max = rtt;
 
 	bin_idx = rtt / RTT_AGG_BIN_WIDTH;
 	bin_idx = bin_idx >= RTT_AGG_NR_BINS ? RTT_AGG_NR_BINS - 1 : bin_idx;
-	rtt_agg->bins[bin_idx]++;
+	agg_stats->bins[bin_idx]++;
 }
 
 /*
@@ -1095,7 +1088,8 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
  * Attempt to match packet in p_info with a timestamp from flow in f_state
  */
 static void pping_match_packet(struct flow_state *f_state, void *ctx,
-			       struct packet_info *p_info)
+			       struct packet_info *p_info,
+			       struct aggregated_rtt_stats *agg_stats)
 {
 	__u64 rtt;
 	__u64 *p_ts;
@@ -1123,10 +1117,31 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	f_state->srtt = calculate_srtt(f_state->srtt, rtt);
 
 	send_rtt_event(ctx, rtt, f_state, p_info);
-	aggregate_rtt(rtt, p_info->time,
-		      config.agg_by_dst ? &p_info->pid.flow.daddr.ip :
-					  &p_info->pid.flow.saddr.ip,
-		      p_info->pid.flow.ipv);
+	aggregate_rtt(rtt, agg_stats);
+}
+
+static void update_aggregate_stats(struct aggregated_rtt_stats **src_stats,
+				   struct aggregated_rtt_stats **dst_stats,
+				   struct packet_info *p_info)
+{
+	if (!config.agg_rtts)
+		return;
+
+	*src_stats = lookup_or_create_aggregation_stats(
+		&p_info->pid.flow.saddr.ip, p_info->pid.flow.ipv);
+	if (*src_stats) {
+		(*src_stats)->last_updated = p_info->time;
+		(*src_stats)->tx_packet_count++;
+		(*src_stats)->tx_byte_count += p_info->pkt_len;
+	}
+
+	*dst_stats = lookup_or_create_aggregation_stats(
+		&p_info->pid.flow.daddr.ip, p_info->pid.flow.ipv);
+	if (*dst_stats) {
+		(*dst_stats)->last_updated = p_info->time;
+		(*dst_stats)->rx_packet_count++;
+		(*dst_stats)->rx_byte_count += p_info->pkt_len;
+	}
 }
 
 /*
@@ -1141,10 +1156,13 @@ static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
 {
 	struct dual_flow_state *df_state;
 	struct flow_state *fw_flow, *rev_flow;
+	struct aggregated_rtt_stats *src_stats = NULL, *dst_stats = NULL;
 
 	df_state = lookup_or_create_dualflow_state(ctx, p_info);
 	if (!df_state)
 		return;
+
+	update_aggregate_stats(&src_stats, &dst_stats, p_info);
 
 	fw_flow = get_flowstate_from_packet(df_state, p_info);
 	update_forward_flowstate(p_info, fw_flow);
@@ -1152,7 +1170,8 @@ static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
 
 	rev_flow = get_reverse_flowstate_from_packet(df_state, p_info);
 	update_reverse_flowstate(ctx, p_info, rev_flow);
-	pping_match_packet(rev_flow, ctx, p_info);
+	pping_match_packet(rev_flow, ctx, p_info,
+			   config.agg_by_dst ? dst_stats : src_stats);
 
 	close_and_delete_flows(ctx, p_info, fw_flow, rev_flow);
 }
