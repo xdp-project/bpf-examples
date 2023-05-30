@@ -43,6 +43,9 @@
 #define ICMP_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear any ICMP flows if they're inactive this long
 #define UNOPENED_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear out flows that have not seen a response after this long
 
+#define MAP_TIMESTAMP_SIZE 131072UL // 2^17, Maximum number of in-flight/unmatched timestamps we can keep track of
+#define MAP_FLOWSTATE_SIZE 131072UL // 2^17, Maximum number of concurrent flows that can be tracked
+
 #define MAX_MEMCMP_SIZE 128
 
 /*
@@ -131,14 +134,14 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct packet_id);
 	__type(value, __u64);
-	__uint(max_entries, 16384);
+	__uint(max_entries, MAP_TIMESTAMP_SIZE);
 } packet_ts SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct network_tuple);
 	__type(value, struct dual_flow_state);
-	__uint(max_entries, 16384);
+	__uint(max_entries, MAP_FLOWSTATE_SIZE);
 } flow_state SEC(".maps");
 
 struct {
