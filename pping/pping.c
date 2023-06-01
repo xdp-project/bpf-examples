@@ -1095,6 +1095,13 @@ static bool aggregated_rtt_stats_nortts(struct aggregated_rtt_stats *stats)
 	return stats->max == 0;
 }
 
+static __u64 aggregated_rtt_stats_maxbins(struct aggregated_rtt_stats *stats,
+					  __u64 bin_width, __u64 n_bins)
+{
+	return stats->max / bin_width < n_bins ? stats->max / bin_width + 1 :
+						 n_bins;
+}
+
 static void
 merge_percpu_aggreated_rtts(struct aggregated_rtt_stats *percpu_stats,
 			    struct aggregated_rtt_stats *merged_stats,
@@ -1141,7 +1148,8 @@ static void print_aggrtts_standard(FILE *stream, __u64 t, const char *prefixstr,
 				   struct aggregated_rtt_stats *rtt_stats,
 				   struct aggregation_config *agg_conf)
 {
-	__u64 nb = agg_conf->n_bins, bw = agg_conf->bin_width;
+	__u64 bw = agg_conf->bin_width;
+	__u64 nb = aggregated_rtt_stats_maxbins(rtt_stats, bw, agg_conf->n_bins);
 
 	print_ns_datetime(stream, t);
 	fprintf(stream,
@@ -1170,7 +1178,8 @@ static void print_aggrtts_json(json_writer_t *ctx, __u64 t,
 			       struct aggregated_rtt_stats *rtt_stats,
 			       struct aggregation_config *agg_conf)
 {
-	__u64 nb = agg_conf->n_bins, bw = agg_conf->bin_width;
+	__u64 bw = agg_conf->bin_width;
+	__u64 nb = aggregated_rtt_stats_maxbins(rtt_stats, bw, agg_conf->n_bins);
 	int i;
 
 	jsonw_start_object(ctx);
