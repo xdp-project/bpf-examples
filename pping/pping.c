@@ -20,12 +20,13 @@ static const char *__doc__ =
 #include <time.h>
 #include <pthread.h>
 #include <xdp/libxdp.h>
+#include <sys/signalfd.h>
+#include <sys/epoll.h>
 
 #include "json_writer.h"
 #include "pping.h" //common structs for user-space and BPF parts
 
 #define PERF_BUFFER_PAGES 64 // Related to the perf-buffer size?
-#define PERF_POLL_TIMEOUT_MS 100
 
 #define MAX_PATH_LEN 1024
 
@@ -35,6 +36,18 @@ static const char *__doc__ =
 #define PROG_INGRESS_TC "pping_tc_ingress"
 #define PROG_INGRESS_XDP "pping_xdp_ingress"
 #define PROG_EGRESS_TC "pping_tc_egress"
+
+#define EPOLL_TIMEOUT_MS 100
+#define MAX_EPOLL_EVENTS 64
+
+/* Used to pack both type of event and other arbitrary data in a  single
+ * epoll_event.data.u64 member. The topmost bits are used for the type of event,
+ * while the lower bits given by the PPING_EPEVENT_MASK can be used for another
+ * value */
+#define PPING_EPEVENT_TYPE_PERFBUF (1ULL << 63)
+#define PPING_EPEVENT_TYPE_SIGNAL (1ULL << 62)
+#define PPING_EPEVENT_MASK                                                     \
+	(~(PPING_EPEVENT_TYPE_PERFBUF | PPING_EPEVENT_TYPE_SIGNAL))
 
 enum pping_output_format {
 	PPING_OUTPUT_STANDARD,
@@ -338,7 +351,7 @@ const char *output_format_to_str(enum pping_output_format format)
 	}
 }
 
-void abort_program(int sig)
+void abort_program(void)
 {
 	keep_running = 0;
 }
@@ -594,7 +607,7 @@ static void *periodic_map_cleanup(void *args)
 			fprintf(stderr,
 				"Failed cleaning maps - aborting program\n");
 			argp->err = err1 ? err1 : err2;
-			abort_program(SIGUSR1);
+			abort_program();
 			break;
 		}
 
@@ -1046,12 +1059,170 @@ destroy_ts_link:
 	return err;
 }
 
+static int init_signalfd(void)
+{
+	sigset_t mask;
+	int fd, err;
+
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGTERM);
+
+	fd = signalfd(-1, &mask, 0);
+	if (fd < 0)
+		return -errno;
+
+	err = pthread_sigmask(SIG_BLOCK, &mask, NULL);
+	if (err) {
+		err = -errno;
+		close(fd);
+		return err;
+	}
+
+	return fd;
+}
+
+static int handle_signalfd(int sigfd)
+{
+	struct signalfd_siginfo siginfo;
+	int ret;
+
+	ret = read(sigfd, &siginfo, sizeof(siginfo));
+	if (ret != sizeof(siginfo)) {
+		fprintf(stderr, "Failed reading signalfd\n");
+		return -EBADFD;
+	}
+
+	if (siginfo.ssi_signo == SIGINT || siginfo.ssi_signo == SIGTERM) {
+		abort_program();
+	} else {
+		fprintf(stderr, "Unexpected signal %d\n", siginfo.ssi_signo);
+		return -EBADMSG;
+	}
+
+	return 0;
+}
+
+static int init_perfbuffer(struct bpf_object *obj, struct pping_config *config,
+			   struct perf_buffer **_pb)
+{
+	struct perf_buffer *pb;
+	int err;
+
+	pb = perf_buffer__new(
+		bpf_object__find_map_fd_by_name(obj, config->event_map),
+		PERF_BUFFER_PAGES, handle_event, handle_missed_events, NULL,
+		NULL);
+	err = libbpf_get_error(pb);
+	if (err) {
+		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
+			config->event_map, get_libbpf_strerror(err));
+		return err;
+	}
+
+	*_pb = pb;
+	return 0;
+}
+
+static int epoll_add_event_type(int epfd, int fd, __u64 event_type, __u64 value)
+{
+	struct epoll_event ev = {
+		.events = EPOLLIN,
+		.data = { .u64 = event_type | value },
+	};
+
+	if (value & ~PPING_EPEVENT_MASK)
+		return -EINVAL;
+
+	return epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) ? -errno : 0;
+}
+
+static int epoll_add_perf_buffer(int epfd, struct perf_buffer *pb)
+{
+	int fd, err;
+	__u64 cpu;
+
+	for (cpu = 0; cpu < perf_buffer__buffer_cnt(pb); cpu++) {
+		fd = perf_buffer__buffer_fd(pb, cpu);
+		if (fd < 0)
+			return fd;
+
+		err = epoll_add_event_type(epfd, fd, PPING_EPEVENT_TYPE_PERFBUF,
+					   cpu);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
+static int epoll_add_events(int epfd, struct perf_buffer *pb, int sigfd)
+{
+	int err;
+
+	err = epoll_add_event_type(epfd, sigfd, PPING_EPEVENT_TYPE_SIGNAL,
+				   sigfd);
+	if (err) {
+		fprintf(stderr, "Failed adding signalfd to epoll instace: %s\n",
+			get_libbpf_strerror(err));
+		return err;
+	}
+
+	err = epoll_add_perf_buffer(epfd, pb);
+	if (err) {
+		fprintf(stderr,
+			"Failed adding perf-buffer to epoll instance: %s\n",
+			get_libbpf_strerror(err));
+		return err;
+	}
+
+	return 0;
+}
+
+static int epoll_poll_events(int epfd, struct pping_config *config,
+			     struct perf_buffer *pb, int timeout_ms)
+{
+	struct epoll_event events[MAX_EPOLL_EVENTS];
+	int err = 0, nfds, i;
+
+	nfds = epoll_wait(epfd, events, MAX_EPOLL_EVENTS, timeout_ms);
+	if (nfds < 0) {
+		err = -errno;
+		fprintf(stderr, "epoll error: %s\n", get_libbpf_strerror(err));
+		return err;
+	}
+
+	for (i = 0; i < nfds; i++) {
+		switch (events[i].data.u64 & ~PPING_EPEVENT_MASK) {
+		case PPING_EPEVENT_TYPE_PERFBUF:
+			err = perf_buffer__consume_buffer(
+				pb, events[i].data.u64 & PPING_EPEVENT_MASK);
+			break;
+		case PPING_EPEVENT_TYPE_SIGNAL:
+			err = handle_signalfd(events[i].data.u64 &
+					      PPING_EPEVENT_MASK);
+			break;
+		default:
+			fprintf(stderr, "Warning: unexpected epoll data: %lu\n",
+				events[i].data.u64);
+			break;
+		}
+		if (err)
+			break;
+	}
+
+	if (err)
+		abort_program();
+	return err;
+}
+
 int main(int argc, char *argv[])
 {
-	int err = 0, detach_err;
+	int err = 0, detach_err = 0;
 	void *thread_err;
 	struct bpf_object *obj = NULL;
 	struct perf_buffer *pb = NULL;
+	int epfd, sigfd;
 
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_ingress_opts);
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_egress_opts);
@@ -1122,44 +1293,56 @@ int main(int argc, char *argv[])
 		output_format_to_str(config.output_format),
 		tracked_protocols_to_str(&config), config.ifname);
 
-	// Allow program to perform cleanup on Ctrl-C
-	signal(SIGINT, abort_program);
-	signal(SIGTERM, abort_program);
+	// Setup signalhandling (allow graceful shutdown on SIGINT/SIGTERM)
+	sigfd = init_signalfd();
+	if (sigfd < 0) {
+		fprintf(stderr, "Failed creating signalfd: %s\n",
+			get_libbpf_strerror(sigfd));
+		return EXIT_FAILURE;
+	}
 
 	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
 			config.object_path);
-		return EXIT_FAILURE;
-	}
-
-	// Set up perf buffer
-	pb = perf_buffer__new(bpf_object__find_map_fd_by_name(obj,
-							      config.event_map),
-			      PERF_BUFFER_PAGES, handle_event,
-			      handle_missed_events, NULL, NULL);
-	err = libbpf_get_error(pb);
-	if (err) {
-		fprintf(stderr, "Failed to open perf buffer %s: %s\n",
-			config.event_map, get_libbpf_strerror(err));
-		goto cleanup_attached_progs;
+		goto cleanup_sigfd;
 	}
 
 	err = setup_periodical_map_cleaning(obj, &config);
 	if (err) {
 		fprintf(stderr, "Failed setting up map cleaning: %s\n",
 			get_libbpf_strerror(err));
+		goto cleanup_attached_progs;
+	}
+
+	err = init_perfbuffer(obj, &config, &pb);
+	if (err) {
+		fprintf(stderr, "Failed setting up perf-buffer: %s\n",
+			get_libbpf_strerror(err));
+		goto cleanup_mapcleaning;
+	}
+
+	epfd = epoll_create1(EPOLL_CLOEXEC);
+	if (epfd < 0) {
+		fprintf(stderr, "Failed creating epoll instance: %s\n",
+			get_libbpf_strerror(err));
 		goto cleanup_perf_buffer;
+	}
+
+	err = epoll_add_events(epfd, pb, sigfd);
+	if (err) {
+		fprintf(stderr, "Failed adding events to epoll instace: %s\n",
+			get_libbpf_strerror(err));
+		goto cleanup_epfd;
 	}
 
 	// Main loop
 	while (keep_running) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0) {
-			if (keep_running) // Only print polling error if it wasn't caused by program termination
-				fprintf(stderr,
-					"Error polling perf buffer: %s\n",
-					get_libbpf_strerror(-err));
+		err = epoll_poll_events(epfd, &config, pb, EPOLL_TIMEOUT_MS);
+		if (err) {
+			fprintf(stderr, "Error polling events: %s\n",
+				get_libbpf_strerror(err));
 			break;
 		}
 	}
@@ -1170,6 +1353,13 @@ int main(int argc, char *argv[])
 		jsonw_destroy(&json_ctx);
 	}
 
+cleanup_epfd:
+	close(epfd);
+
+cleanup_perf_buffer:
+	perf_buffer__free(pb);
+
+cleanup_mapcleaning:
 	if (config.clean_args.valid_thread) {
 		pthread_cancel(config.clean_args.tid);
 		pthread_join(config.clean_args.tid, &thread_err);
@@ -1179,9 +1369,6 @@ int main(int argc, char *argv[])
 		bpf_link__destroy(config.clean_args.tsclean_link);
 		bpf_link__destroy(config.clean_args.flowclean_link);
 	}
-
-cleanup_perf_buffer:
-	perf_buffer__free(pb);
 
 cleanup_attached_progs:
 	if (config.xdp_prog)
@@ -1205,5 +1392,8 @@ cleanup_attached_progs:
 
 	bpf_object__close(obj);
 
-	return (err != 0 && keep_running) || detach_err != 0;
+cleanup_sigfd:
+	close(sigfd);
+
+	return err != 0 || detach_err != 0;
 }
