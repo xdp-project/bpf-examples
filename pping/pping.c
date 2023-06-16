@@ -1144,6 +1144,40 @@ static void clear_aggregated_rtts(struct aggregated_rtt_stats *stats)
 	stats->last_updated = last_updated;
 }
 
+static void print_aggmetadata_standard(FILE *stream,
+				       struct aggregation_config *agg_conf)
+{
+	fprintf(stream,
+		"Aggregating RTTs in histograms with %llu %.6g ms wide bins every %.9g seconds\n",
+		agg_conf->n_bins, (double)agg_conf->bin_width / NS_PER_MS,
+		(double)agg_conf->aggregation_interval / NS_PER_SECOND);
+}
+
+static void print_aggmetadata_json(json_writer_t *ctx,
+				   struct aggregation_config *agg_conf)
+{
+	jsonw_start_object(ctx);
+
+	jsonw_u64_field(ctx, "timestamp", get_time_ns(CLOCK_REALTIME));
+	jsonw_u64_field(ctx, "bins", agg_conf->n_bins);
+	jsonw_u64_field(ctx, "bin_width_ns", agg_conf->bin_width);
+	jsonw_u64_field(ctx, "aggregation_interval_ns",
+			agg_conf->aggregation_interval);
+	jsonw_u64_field(ctx, "timeout_interval_ns", agg_conf->timeout_interval);
+	jsonw_uint_field(ctx, "ipv4_prefix_len", agg_conf->ipv4_prefix_len);
+	jsonw_uint_field(ctx, "ipv6_prefix_len", agg_conf->ipv6_prefix_len);
+
+	jsonw_end_object(ctx);
+}
+
+static void print_aggmetadata(struct aggregation_config *agg_conf)
+{
+	if (agg_conf->format == PPING_OUTPUT_STANDARD)
+		print_aggmetadata_standard(stdout, agg_conf);
+	else
+		print_aggmetadata_json(json_ctx, agg_conf);
+}
+
 static void print_aggrtts_standard(FILE *stream, __u64 t, const char *prefixstr,
 				   struct aggregated_rtt_stats *rtt_stats,
 				   struct aggregation_config *agg_conf)
@@ -1203,7 +1237,6 @@ static void print_aggrtts_json(json_writer_t *ctx, __u64 t,
 	jsonw_float_field(ctx, "p95_rtt",
 			  lhist_percentile(rtt_stats->bins, 95, nb, bw, 0));
 	jsonw_u64_field(ctx, "max_rtt", rtt_stats->max);
-	jsonw_u64_field(ctx, "bin_width", bw);
 
 	jsonw_name(ctx, "histogram");
 	jsonw_start_array(ctx);
@@ -2025,12 +2058,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (config.bpf_config.agg_rtts)
-		fprintf(stderr,
-			"Aggregating RTTs in histograms with %llu %.6g ms wide bins every %.9g seconds\n",
-			config.agg_conf.n_bins,
-			(double)config.agg_conf.bin_width / NS_PER_MS,
-			(double)config.agg_conf.aggregation_interval /
-				NS_PER_SECOND);
+		print_aggmetadata(&config.agg_conf);
 
 	// Setup signalhandling (allow graceful shutdown on SIGINT/SIGTERM)
 	sigfd = init_signalfd();
