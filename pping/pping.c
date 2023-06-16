@@ -1013,11 +1013,6 @@ static void print_event_json(const union pping_event *e)
 	if (e->event_type != EVENT_TYPE_RTT && e->event_type != EVENT_TYPE_FLOW)
 		return;
 
-	if (!json_ctx) {
-		json_ctx = jsonw_new(stdout);
-		jsonw_start_array(json_ctx);
-	}
-
 	jsonw_start_object(json_ctx);
 	print_common_fields_json(json_ctx, e);
 	if (e->event_type == EVENT_TYPE_RTT)
@@ -1826,6 +1821,11 @@ int main(int argc, char *argv[])
 		output_format_to_str(config.output_format),
 		tracked_protocols_to_str(&config), config.ifname);
 
+	if (config.output_format == PPING_OUTPUT_JSON) {
+		json_ctx = jsonw_new(stdout);
+		jsonw_start_array(json_ctx);
+	}
+
 	if (config.bpf_config.agg_rtts)
 		fprintf(stderr,
 			"Aggregating RTTs in histograms with %llu %.6g ms wide bins every %.9g seconds\n",
@@ -1839,7 +1839,7 @@ int main(int argc, char *argv[])
 	if (sigfd < 0) {
 		fprintf(stderr, "Failed creating signalfd: %s\n",
 			get_libbpf_strerror(sigfd));
-		return EXIT_FAILURE;
+		goto cleanup_output;
 	}
 
 	err = load_attach_bpfprogs(&obj, &config);
@@ -1904,11 +1904,6 @@ int main(int argc, char *argv[])
 	}
 
 	// Cleanup
-	if (config.output_format == PPING_OUTPUT_JSON && json_ctx) {
-		jsonw_end_array(json_ctx);
-		jsonw_destroy(&json_ctx);
-	}
-
 cleanup_epfd:
 	close(epfd);
 
@@ -1956,6 +1951,12 @@ cleanup_attached_progs:
 
 cleanup_sigfd:
 	close(sigfd);
+
+cleanup_output:
+	if (config.output_format == PPING_OUTPUT_JSON && json_ctx) {
+		jsonw_end_array(json_ctx);
+		jsonw_destroy(&json_ctx);
+	}
 
 	return err != 0 || detach_err != 0;
 }
