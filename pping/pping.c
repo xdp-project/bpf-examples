@@ -1262,12 +1262,20 @@ static void report_aggregated_rtt_mapentry(
 	struct aggregation_config *agg_conf, bool *del_entry)
 {
 	struct aggregated_rtt_stats merged_stats;
+	struct ipprefix_key backup_key = { 0 };
 	int i;
+
+	// Report the backup keys as 0.0.0.0/0 or ::/0
+	if ((af == AF_INET && prefix->v4 == IPV4_BACKUP_KEY) ||
+	    (af == AF_INET6 && prefix->v6 == IPV6_BACKUP_KEY)) {
+		prefix = &backup_key;
+		prefix_len = 0;
+	}
 
 	merge_percpu_aggreated_rtts(percpu_stats, &merged_stats, n_cpus,
 				    agg_conf->n_bins);
 
-	if (prefix_len > 0 && // There's no point in deleting /0 entries (can only be one of them)
+	if (prefix_len > 0 && // Pointless deleting /0 entry, and ensures backup keys are never deleted
 	    agg_conf->timeout_interval > 0 &&
 	    merged_stats.last_updated < t_monotonic &&
 	    t_monotonic - merged_stats.last_updated >
@@ -1667,6 +1675,46 @@ int fetch_aggregation_map_fds(struct bpf_object *obj,
 	return 0;
 }
 
+static int init_agg_backup_entries(struct aggregation_maps *maps, bool ipv4,
+				   bool ipv6)
+{
+	struct aggregated_rtt_stats *empty_stats;
+	struct ipprefix_key key;
+	int instance, err = 0;
+
+	empty_stats = calloc(libbpf_num_possible_cpus(), sizeof(*empty_stats));
+	if (!empty_stats)
+		return -errno;
+
+	if (ipv4) {
+		key.v4 = IPV4_BACKUP_KEY;
+
+		for (instance = 0; instance < 2; instance++) {
+			err = bpf_map_update_elem(maps->map_v4_fd[instance],
+						  &key, empty_stats,
+						  BPF_NOEXIST);
+			if (err)
+				goto exit;
+		}
+	}
+
+	if (ipv6) {
+		key.v6 = IPV6_BACKUP_KEY;
+
+		for (instance = 0; instance < 2; instance++) {
+			err = bpf_map_update_elem(maps->map_v6_fd[instance],
+						  &key, empty_stats,
+						  BPF_NOEXIST);
+			if (err)
+				goto exit;
+		}
+	}
+
+exit:
+	free(empty_stats);
+	return err;
+}
+
 static int setup_timer(__u64 init_delay_ns, __u64 interval_ns)
 {
 	struct itimerspec timercfg = {
@@ -1700,6 +1748,16 @@ static int init_aggregation_timer(struct bpf_object *obj,
 	err = fetch_aggregation_map_fds(obj, &config->agg_maps);
 	if (err) {
 		fprintf(stderr, "Failed fetching aggregation maps: %s\n",
+			get_libbpf_strerror(err));
+		return err;
+	}
+
+	err = init_agg_backup_entries(&config->agg_maps,
+				      config->agg_conf.ipv4_prefix_len > 0,
+				      config->agg_conf.ipv6_prefix_len > 0);
+	if (err) {
+		fprintf(stderr,
+			"Failed initalized backup entries in aggregation maps: %s\n",
 			get_libbpf_strerror(err));
 		return err;
 	}

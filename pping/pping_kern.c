@@ -1020,8 +1020,13 @@ lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv)
 
 	// No existing entry, try to create new one
 	err = bpf_map_update_elem(agg_map, &key, &empty_stats, BPF_NOEXIST);
-	if (err && err != -EEXIST)
-		return NULL;
+	if (err && err != -EEXIST) {
+		// No space left in aggregation map - switch to backup entry
+		if (ipv == AF_INET)
+			key.v4 = IPV4_BACKUP_KEY;
+		else
+			key.v6 = IPV6_BACKUP_KEY;
+	}
 
 	return bpf_map_lookup_elem(agg_map, &key);
 }

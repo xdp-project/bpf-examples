@@ -5,6 +5,7 @@
 #include <linux/types.h>
 #include <linux/in6.h>
 #include <stdbool.h>
+#include <endian.h>
 
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
@@ -28,6 +29,22 @@ typedef __u64 fixpoint64;
 
 #define RTT_AGG_NR_BINS 1000UL
 #define RTT_AGG_BIN_WIDTH (1 * NS_PER_MS) // 1 ms
+
+/* Special IPv4/IPv6 prefixes used for backup entries
+ * To avoid them colliding with and actual traffic (causing the traffic to end
+ * up in the backup entry), use prefixes from blocks reserved for documentation.
+ * Specifically, the prefixes used are:
+ *  - IPv4: 192.0.2.255 (part of 192.0.2.0/24, RFC 5737)
+ *  - IPv6: 2001:db80:ffff:ffff::/64 (part of 2001:db8::/32, RFC 3849) */
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define IPV4_BACKUP_KEY 0xFF0200C0UL
+#define IPV6_BACKUP_KEY 0xFFFFFFFF80DB0120ULL
+#elif __BYTE_ORDER == __BIG_ENDIAN
+#define IPV4_BACKUP_KEY 0xC00002FFUL
+#define IPV6_BACKUP_KEY 0x2001DB80FFFFFFFFULL
+#else
+#error
+#endif
 
 enum __attribute__((__packed__)) flow_event_type {
 	FLOW_EVENT_NONE,
