@@ -11,6 +11,10 @@
 #define MS_PER_S 1000UL
 #define S_PER_DAY (24 * 3600UL)
 
+#define MAP_TIMESTAMP_SIZE 131072UL // 2^17, Maximum number of in-flight/unmatched timestamps we can keep track of
+#define MAP_FLOWSTATE_SIZE 131072UL // 2^17, Maximum number of concurrent flows that can be tracked
+#define MAP_AGGREGATION_SIZE 16384UL // 2^14, Maximum number of different IP-prefixes we can aggregate stats for
+
 typedef __u64 fixpoint64;
 #define FIXPOINT_SHIFT 16
 #define DOUBLE_TO_FIXPOINT(X) ((fixpoint64)((X) * (1UL << FIXPOINT_SHIFT)))
@@ -225,6 +229,7 @@ union pping_event {
 };
 
 struct aggregated_rtt_stats {
+	__u64 last_updated;
 	__u64 min;
 	__u64 max;
 	__u32 bins[RTT_AGG_NR_BINS];

@@ -44,10 +44,6 @@
 #define ICMP_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear any ICMP flows if they're inactive this long
 #define UNOPENED_FLOW_LIFETIME (30 * NS_PER_SECOND) // Clear out flows that have not seen a response after this long
 
-#define MAP_TIMESTAMP_SIZE 131072UL // 2^17, Maximum number of in-flight/unmatched timestamps we can keep track of
-#define MAP_FLOWSTATE_SIZE 131072UL // 2^17, Maximum number of concurrent flows that can be tracked
-#define MAP_AGGREGATION_SIZE 16384UL // 2^14, Maximum number of different IP-prefixes we can aggregate stats for
-
 #define MAX_MEMCMP_SIZE 128
 
 /*
@@ -1028,7 +1024,7 @@ lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv)
 	return bpf_map_lookup_elem(agg_map, &key);
 }
 
-static void aggregate_rtt(__u64 rtt, struct in6_addr *ip, __u8 ipv)
+static void aggregate_rtt(__u64 rtt, __u64 t, struct in6_addr *ip, __u8 ipv)
 {
 	if (!config.agg_rtts)
 		return;
@@ -1039,6 +1035,8 @@ static void aggregate_rtt(__u64 rtt, struct in6_addr *ip, __u8 ipv)
 	rtt_agg = lookup_or_create_aggregation_stats(ip, ipv);
 	if (!rtt_agg)
 		return;
+
+	rtt_agg->last_updated = t;
 
 	if (!rtt_agg->min || rtt < rtt_agg->min)
 		rtt_agg->min = rtt;
@@ -1123,7 +1121,7 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	f_state->srtt = calculate_srtt(f_state->srtt, rtt);
 
 	send_rtt_event(ctx, rtt, f_state, p_info);
-	aggregate_rtt(rtt,
+	aggregate_rtt(rtt, p_info->time,
 		      config.agg_by_dst ? &p_info->pid.flow.daddr.ip :
 					  &p_info->pid.flow.saddr.ip,
 		      p_info->pid.flow.ipv);
