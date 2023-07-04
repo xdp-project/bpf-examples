@@ -163,7 +163,15 @@ struct {
 	__type(value, struct aggregated_rtt_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} map_v4_agg SEC(".maps");
+} map_v4_agg1 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__type(key, __u32);
+	__type(value, struct aggregated_rtt_stats);
+	__uint(max_entries, MAP_AGGREGATION_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} map_v4_agg2 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -171,7 +179,22 @@ struct {
 	__type(value, struct aggregated_rtt_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} map_v6_agg SEC(".maps");
+} map_v6_agg1 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__type(key, __u64);
+	__type(value, struct aggregated_rtt_stats);
+	__uint(max_entries, MAP_AGGREGATION_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} map_v6_agg2 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u32);
+	__uint(max_entries, 1);
+} map_active_agg_instance SEC(".maps");
 
 
 // Help functions
@@ -974,16 +997,23 @@ lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv)
 {
 	struct aggregated_rtt_stats *agg;
 	struct ipprefix_key key;
+	__u32 *map_choice;
+	__u32 zero = 0;
 	void *agg_map;
 	int err;
 
+	map_choice = bpf_map_lookup_elem(&map_active_agg_instance, &zero);
+	if (!map_choice)
+		return NULL;
+
 	if (ipv == AF_INET) {
 		create_ipprefix_key_v4(&key.v4, ip);
-		agg_map = &map_v4_agg;
-
+		agg_map = *map_choice == 0 ? (void *)&map_v4_agg1 :
+					     (void *)&map_v4_agg2;
 	} else {
 		create_ipprefix_key_v6(&key.v6, ip);
-		agg_map = &map_v6_agg;
+		agg_map = *map_choice == 0 ? (void *)&map_v6_agg1 :
+					     (void *)&map_v6_agg2;
 	}
 
 	agg = bpf_map_lookup_elem(agg_map, &key);

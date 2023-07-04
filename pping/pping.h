@@ -227,7 +227,7 @@ union pping_event {
 struct aggregated_rtt_stats {
 	__u64 min;
 	__u64 max;
-	__u64 bins[RTT_AGG_NR_BINS];
+	__u32 bins[RTT_AGG_NR_BINS];
 };
 
 #endif
