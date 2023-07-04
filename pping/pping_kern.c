@@ -159,7 +159,6 @@ struct {
 	__type(key, __u32);
 	__type(value, struct aggregated_rtt_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
 } map_v4_agg1 SEC(".maps");
 
 struct {
@@ -167,7 +166,6 @@ struct {
 	__type(key, __u32);
 	__type(value, struct aggregated_rtt_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
 } map_v4_agg2 SEC(".maps");
 
 struct {
@@ -175,7 +173,6 @@ struct {
 	__type(key, __u64);
 	__type(value, struct aggregated_rtt_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
 } map_v6_agg1 SEC(".maps");
 
 struct {
@@ -183,7 +180,6 @@ struct {
 	__type(key, __u64);
 	__type(value, struct aggregated_rtt_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
 } map_v6_agg2 SEC(".maps");
 
 struct {

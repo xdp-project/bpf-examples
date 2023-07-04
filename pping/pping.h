@@ -27,8 +27,8 @@ typedef __u64 fixpoint64;
 #define EVENT_TYPE_MAP_FULL 3
 #define EVENT_TYPE_MAP_CLEAN 4
 
-#define RTT_AGG_NR_BINS 1000UL
-#define RTT_AGG_BIN_WIDTH (1 * NS_PER_MS) // 1 ms
+#define RTT_AGG_NR_BINS 250UL
+#define RTT_AGG_BIN_WIDTH (4 * NS_PER_MS)
 
 /* Special IPv4/IPv6 prefixes used for backup entries
  * To avoid them colliding with and actual traffic (causing the traffic to end
