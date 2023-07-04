@@ -1451,7 +1451,6 @@ exit:
 	return err;
 }
 
-
 static int report_aggregated_rtts(struct output_context *out_ctx,
 				  struct aggregation_maps *maps,
 				  struct aggregation_config *agg_conf)
@@ -1710,6 +1709,26 @@ static int close_output(struct output_context *out_ctx)
 	return err;
 }
 
+/* Will try to reopen *out_ctx
+ * If it is able to open the new output it will return 0, replace *out_ctx with
+ * the new output and close the old output_context. If it fails at opening a
+ * new output_context it will return a negative error code and *out_ctx will
+ * remain unchanged */
+static int reopen_output(struct output_context **out_ctx, const char *filename,
+			 struct aggregation_config *agg_conf)
+{
+	struct output_context *new_out;
+
+	new_out = open_output(filename, (*out_ctx)->format, agg_conf);
+	if (!new_out)
+		return -errno;
+
+	close_output(*out_ctx);
+
+	*out_ctx = new_out;
+	return 0;
+}
+
 static int init_signalfd(void)
 {
 	sigset_t mask;
@@ -1718,6 +1737,7 @@ static int init_signalfd(void)
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGINT);
 	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGHUP);
 
 	fd = signalfd(-1, &mask, 0);
 	if (fd < 0)
@@ -1733,12 +1753,14 @@ static int init_signalfd(void)
 	return fd;
 }
 
-/* Returns PPING_ABORT to indicate the program should be halted or a negative
- * error code */
-static int handle_signalfd(int sigfd)
+/* Returns 0 if signal was successfully handled, PPING_ABORT if signal
+ * indicates program should be halted or a negative error code on failure. */
+static int handle_signalfd(int sigfd, struct output_context **out_ctx,
+			   const char *filename,
+			   struct aggregation_config *agg_conf)
 {
 	struct signalfd_siginfo siginfo;
-	int ret;
+	int ret, err;
 
 	ret = read(sigfd, &siginfo, sizeof(siginfo));
 	if (ret != sizeof(siginfo)) {
@@ -1746,12 +1768,23 @@ static int handle_signalfd(int sigfd)
 		return -EBADFD;
 	}
 
-	if (siginfo.ssi_signo == SIGINT || siginfo.ssi_signo == SIGTERM) {
+	if (siginfo.ssi_signo == SIGHUP) {
+		if (filename) {
+			err = reopen_output(out_ctx, filename, agg_conf);
+			if (err)
+				fprintf(stderr,
+					"Warning: failed reopening %s: %s\n",
+					filename, get_libbpf_strerror(err));
+		} // If not writing to file, simply ignore the SIGHUP
+	} else if (siginfo.ssi_signo == SIGINT ||
+		   siginfo.ssi_signo == SIGTERM) {
 		return PPING_ABORT;
 	} else {
 		fprintf(stderr, "Unexpected signal %d\n", siginfo.ssi_signo);
 		return -EBADMSG;
 	}
+
+	return 0;
 }
 
 static int init_perfbuffer(struct bpf_object *obj, struct pping_config *config,
@@ -2050,8 +2083,13 @@ static int epoll_poll_events(int epfd, struct pping_config *config,
 				&config->agg_conf);
 			break;
 		case PPING_EPEVENT_TYPE_SIGNAL:
-			err = handle_signalfd(events[i].data.u64 &
-					      PPING_EPEVENT_MASK);
+			err = handle_signalfd(
+				events[i].data.u64 & PPING_EPEVENT_MASK,
+				&config->out_ctx,
+				config->write_to_file ? config->filename : NULL,
+				config->bpf_config.agg_rtts ?
+					&config->agg_conf :
+					NULL);
 			break;
 		case PPING_EPEVENT_TYPE_PIPE:
 			err = handle_pipefd(events[i].data.u64 &
@@ -2156,7 +2194,7 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	// Setup signalhandling (allow graceful shutdown on SIGINT/SIGTERM)
+	// Setup signalhandling (allow graceful shutdown on SIGINT/SIGTERM, reopen on SIGHUP)
 	sigfd = init_signalfd();
 	if (sigfd < 0) {
 		fprintf(stderr, "Failed creating signalfd: %s\n",
