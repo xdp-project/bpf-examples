@@ -37,7 +37,6 @@ static const char *__doc__ =
 #define PROG_INGRESS_XDP "pping_xdp_ingress"
 #define PROG_EGRESS_TC "pping_tc_egress"
 
-#define EPOLL_TIMEOUT_MS 100
 #define MAX_EPOLL_EVENTS 64
 
 /* Used to pack both type of event and other arbitrary data in a  single
@@ -46,8 +45,16 @@ static const char *__doc__ =
  * value */
 #define PPING_EPEVENT_TYPE_PERFBUF (1ULL << 63)
 #define PPING_EPEVENT_TYPE_SIGNAL (1ULL << 62)
+#define PPING_EPEVENT_TYPE_PIPE (1ULL << 61)
 #define PPING_EPEVENT_MASK                                                     \
-	(~(PPING_EPEVENT_TYPE_PERFBUF | PPING_EPEVENT_TYPE_SIGNAL))
+	(~(PPING_EPEVENT_TYPE_PERFBUF | PPING_EPEVENT_TYPE_SIGNAL |            \
+	   PPING_EPEVENT_TYPE_PIPE))
+
+/* Value that can be returned by functions to indicate the program should abort
+ * Should ideally not collide with any error codes (including libbpf ones), but
+ * can also be seperated by returning as positive (as error codes are generally
+ * returned as negative values). */
+#define PPING_ABORT 5555
 
 enum pping_output_format {
 	PPING_OUTPUT_STANDARD,
@@ -75,6 +82,8 @@ struct map_cleanup_args {
 	struct bpf_link *tsclean_link;
 	struct bpf_link *flowclean_link;
 	__u64 cleanup_interval;
+	int pipe_wfd;
+	int pipe_rfd;
 	int err;
 	bool valid_thread;
 };
@@ -104,7 +113,6 @@ struct pping_config {
 	bool created_tc_hook;
 };
 
-static volatile sig_atomic_t keep_running = 1;
 static json_writer_t *json_ctx = NULL;
 static void (*print_event_func)(const union pping_event *) = NULL;
 
@@ -351,11 +359,6 @@ const char *output_format_to_str(enum pping_output_format format)
 	}
 }
 
-void abort_program(void)
-{
-	keep_running = 0;
-}
-
 static int set_rlimit(long int lim)
 {
 	struct rlimit rlim = {
@@ -576,6 +579,15 @@ static __u64 get_time_ns(clockid_t clockid)
 	return (__u64)t.tv_sec * NS_PER_SECOND + (__u64)t.tv_nsec;
 }
 
+static void abort_main_thread(int pipe_wfd, int err)
+{
+	int ret = write(pipe_wfd, &err, sizeof(err));
+	if (ret != sizeof(err)) {
+		fprintf(stderr,
+			"!!!WARNING!!! - Unable to abort main thread:\n");
+	}
+}
+
 static void *periodic_map_cleanup(void *args)
 {
 	struct map_cleanup_args *argp = args;
@@ -586,7 +598,7 @@ static void *periodic_map_cleanup(void *args)
 	int err1, err2;
 
 	argp->err = 0;
-	while (keep_running) {
+	while (true) {
 		err1 = iter_map_execute(argp->tsclean_link);
 		if (err1) {
 			// Running in separate thread so can't use get_libbpf_strerror
@@ -607,7 +619,7 @@ static void *periodic_map_cleanup(void *args)
 			fprintf(stderr,
 				"Failed cleaning maps - aborting program\n");
 			argp->err = err1 ? err1 : err2;
-			abort_program();
+			abort_main_thread(argp->pipe_wfd, argp->err);
 			break;
 		}
 
@@ -1008,6 +1020,7 @@ ingress_err:
 static int setup_periodical_map_cleaning(struct bpf_object *obj,
 					 struct pping_config *config)
 {
+	int pipefds[2];
 	int err;
 	config->clean_args.err = 0;
 
@@ -1016,6 +1029,16 @@ static int setup_periodical_map_cleaning(struct bpf_object *obj,
 			"There already exists a thread for the map cleanup\n");
 		return -EINVAL;
 	}
+
+	err = pipe(pipefds);
+	if (err) {
+		err = -errno;
+		fprintf(stderr, "Failed creating pipe: %s\n",
+			get_libbpf_strerror(err));
+		return err;
+	}
+	config->clean_args.pipe_rfd = pipefds[0];
+	config->clean_args.pipe_wfd = pipefds[1];
 
 	if (!config->clean_args.cleanup_interval) {
 		fprintf(stderr, "Periodic map cleanup disabled\n");
@@ -1082,6 +1105,8 @@ static int init_signalfd(void)
 	return fd;
 }
 
+/* Returns PPING_ABORT to indicate the program should be halted or a negative
+ * error code */
 static int handle_signalfd(int sigfd)
 {
 	struct signalfd_siginfo siginfo;
@@ -1094,13 +1119,11 @@ static int handle_signalfd(int sigfd)
 	}
 
 	if (siginfo.ssi_signo == SIGINT || siginfo.ssi_signo == SIGTERM) {
-		abort_program();
+		return PPING_ABORT;
 	} else {
 		fprintf(stderr, "Unexpected signal %d\n", siginfo.ssi_signo);
 		return -EBADMSG;
 	}
-
-	return 0;
 }
 
 static int init_perfbuffer(struct bpf_object *obj, struct pping_config *config,
@@ -1122,6 +1145,23 @@ static int init_perfbuffer(struct bpf_object *obj, struct pping_config *config,
 
 	*_pb = pb;
 	return 0;
+}
+
+/* Returns PPING_ABORT to signal the program should be halted or a negative
+ * error code. */
+static int handle_pipefd(int pipe_rfd)
+{
+	int ret, remote_err;
+
+	ret = read(pipe_rfd, &remote_err, sizeof(remote_err));
+	if (ret != sizeof(remote_err)) {
+		fprintf(stderr, "Failed reading remote error from pipe\n");
+		return -EBADFD;
+	}
+
+	fprintf(stderr, "Program aborted - error: %s\n",
+		get_libbpf_strerror(remote_err));
+	return PPING_ABORT;
 }
 
 static int epoll_add_event_type(int epfd, int fd, __u64 event_type, __u64 value)
@@ -1156,7 +1196,8 @@ static int epoll_add_perf_buffer(int epfd, struct perf_buffer *pb)
 	return 0;
 }
 
-static int epoll_add_events(int epfd, struct perf_buffer *pb, int sigfd)
+static int epoll_add_events(int epfd, struct perf_buffer *pb, int sigfd,
+			    int pipe_rfd)
 {
 	int err;
 
@@ -1164,6 +1205,14 @@ static int epoll_add_events(int epfd, struct perf_buffer *pb, int sigfd)
 				   sigfd);
 	if (err) {
 		fprintf(stderr, "Failed adding signalfd to epoll instace: %s\n",
+			get_libbpf_strerror(err));
+		return err;
+	}
+
+	err = epoll_add_event_type(epfd, pipe_rfd, PPING_EPEVENT_TYPE_PIPE,
+				   pipe_rfd);
+	if (err) {
+		fprintf(stderr, "Failed adding pipe fd to epoll instance: %s\n",
 			get_libbpf_strerror(err));
 		return err;
 	}
@@ -1202,6 +1251,10 @@ static int epoll_poll_events(int epfd, struct pping_config *config,
 			err = handle_signalfd(events[i].data.u64 &
 					      PPING_EPEVENT_MASK);
 			break;
+		case PPING_EPEVENT_TYPE_PIPE:
+			err = handle_pipefd(events[i].data.u64 &
+					    PPING_EPEVENT_MASK);
+			break;
 		default:
 			fprintf(stderr, "Warning: unexpected epoll data: %lu\n",
 				events[i].data.u64);
@@ -1211,8 +1264,6 @@ static int epoll_poll_events(int epfd, struct pping_config *config,
 			break;
 	}
 
-	if (err)
-		abort_program();
 	return err;
 }
 
@@ -1330,7 +1381,7 @@ int main(int argc, char *argv[])
 		goto cleanup_perf_buffer;
 	}
 
-	err = epoll_add_events(epfd, pb, sigfd);
+	err = epoll_add_events(epfd, pb, sigfd, config.clean_args.pipe_rfd);
 	if (err) {
 		fprintf(stderr, "Failed adding events to epoll instace: %s\n",
 			get_libbpf_strerror(err));
@@ -1338,11 +1389,14 @@ int main(int argc, char *argv[])
 	}
 
 	// Main loop
-	while (keep_running) {
-		err = epoll_poll_events(epfd, &config, pb, EPOLL_TIMEOUT_MS);
+	while (true) {
+		err = epoll_poll_events(epfd, &config, pb, -1);
 		if (err) {
-			fprintf(stderr, "Error polling events: %s\n",
-				get_libbpf_strerror(err));
+			if (err == PPING_ABORT)
+				err = 0;
+			else
+				fprintf(stderr, "Error polling events: %s\n",
+					get_libbpf_strerror(err));
 			break;
 		}
 	}
@@ -1369,6 +1423,8 @@ cleanup_mapcleaning:
 		bpf_link__destroy(config.clean_args.tsclean_link);
 		bpf_link__destroy(config.clean_args.flowclean_link);
 	}
+	close(config.clean_args.pipe_rfd);
+	close(config.clean_args.pipe_wfd);
 
 cleanup_attached_progs:
 	if (config.xdp_prog)
