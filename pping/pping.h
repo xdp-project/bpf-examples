@@ -22,6 +22,9 @@ typedef __u64 fixpoint64;
 #define EVENT_TYPE_MAP_FULL 3
 #define EVENT_TYPE_MAP_CLEAN 4
 
+#define RTT_AGG_NR_BINS 1000UL
+#define RTT_AGG_BIN_WIDTH (1 * NS_PER_MS) // 1 ms
+
 enum __attribute__((__packed__)) flow_event_type {
 	FLOW_EVENT_NONE,
 	FLOW_EVENT_OPENING,
@@ -60,12 +63,23 @@ enum __attribute__((__packed__)) connection_state {
 struct bpf_config {
 	__u64 rate_limit;
 	fixpoint64 rtt_rate;
+	__u64 ipv6_prefix_mask;
+	__u32 ipv4_prefix_mask;
 	bool use_srtt;
 	bool track_tcp;
 	bool track_icmp;
 	bool localfilt;
 	bool skip_syn;
-	__u8 reserved[3];
+	bool push_individual_events;
+	bool agg_rtts;
+	__u8 reserved;
+};
+
+struct ipprefix_key {
+	union {
+		__u32 v4;
+		__u64 v6;
+	};
 };
 
 /*
@@ -81,9 +95,9 @@ struct flow_address {
 
 /*
  * Struct to hold a full network tuple
- * The ipv member is technically not necessary, but makes it easier to 
+ * The ipv member is technically not necessary, but makes it easier to
  * determine if saddr/daddr are IPv4 or IPv6 address (don't need to look at the
- * first 12 bytes of address). The proto memeber is not currently used, but 
+ * first 12 bytes of address). The proto memeber is not currently used, but
  * could be useful once pping is extended to work for other protocols than TCP.
  */
 struct network_tuple {
@@ -208,6 +222,12 @@ union pping_event {
 	struct flow_event flow_event;
 	struct map_full_event map_event;
 	struct map_clean_event map_clean_event;
+};
+
+struct aggregated_rtt_stats {
+	__u64 min;
+	__u64 max;
+	__u64 bins[RTT_AGG_NR_BINS];
 };
 
 #endif
