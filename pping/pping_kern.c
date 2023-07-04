@@ -1123,7 +1123,10 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	f_state->srtt = calculate_srtt(f_state->srtt, rtt);
 
 	send_rtt_event(ctx, rtt, f_state, p_info);
-	aggregate_rtt(rtt, &p_info->pid.flow.saddr.ip, p_info->pid.flow.ipv);
+	aggregate_rtt(rtt,
+		      config.agg_by_dst ? &p_info->pid.flow.daddr.ip :
+					  &p_info->pid.flow.saddr.ip,
+		      p_info->pid.flow.ipv);
 }
 
 /*
