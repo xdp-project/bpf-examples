@@ -5,11 +5,16 @@
 #include <linux/types.h>
 #include <linux/in6.h>
 #include <stdbool.h>
+#include <endian.h>
 
 #define NS_PER_SECOND 1000000000UL
 #define NS_PER_MS 1000000UL
 #define MS_PER_S 1000UL
 #define S_PER_DAY (24 * 3600UL)
+
+#define MAP_TIMESTAMP_SIZE 131072UL // 2^17, Maximum number of in-flight/unmatched timestamps we can keep track of
+#define MAP_FLOWSTATE_SIZE 131072UL // 2^17, Maximum number of concurrent flows that can be tracked
+#define MAP_AGGREGATION_SIZE 16384UL // 2^14, Maximum number of different IP-prefixes we can aggregate stats for
 
 typedef __u64 fixpoint64;
 #define FIXPOINT_SHIFT 16
@@ -21,6 +26,25 @@ typedef __u64 fixpoint64;
 #define EVENT_TYPE_RTT 2
 #define EVENT_TYPE_MAP_FULL 3
 #define EVENT_TYPE_MAP_CLEAN 4
+
+#define RTT_AGG_NR_BINS 250UL
+#define RTT_AGG_BIN_WIDTH (4 * NS_PER_MS)
+
+/* Special IPv4/IPv6 prefixes used for backup entries
+ * To avoid them colliding with and actual traffic (causing the traffic to end
+ * up in the backup entry), use prefixes from blocks reserved for documentation.
+ * Specifically, the prefixes used are:
+ *  - IPv4: 192.0.2.255 (part of 192.0.2.0/24, RFC 5737)
+ *  - IPv6: 2001:db80:ffff:ffff::/64 (part of 2001:db8::/32, RFC 3849) */
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define IPV4_BACKUP_KEY 0xFF0200C0UL
+#define IPV6_BACKUP_KEY 0xFFFFFFFF80DB0120ULL
+#elif __BYTE_ORDER == __BIG_ENDIAN
+#define IPV4_BACKUP_KEY 0xC00002FFUL
+#define IPV6_BACKUP_KEY 0x2001DB80FFFFFFFFULL
+#else
+#error
+#endif
 
 enum __attribute__((__packed__)) flow_event_type {
 	FLOW_EVENT_NONE,
@@ -60,12 +84,23 @@ enum __attribute__((__packed__)) connection_state {
 struct bpf_config {
 	__u64 rate_limit;
 	fixpoint64 rtt_rate;
+	__u64 ipv6_prefix_mask;
+	__u32 ipv4_prefix_mask;
 	bool use_srtt;
 	bool track_tcp;
 	bool track_icmp;
 	bool localfilt;
 	bool skip_syn;
-	__u8 reserved[3];
+	bool push_individual_events;
+	bool agg_rtts;
+	bool agg_by_dst; // dst of reply packet
+};
+
+struct ipprefix_key {
+	union {
+		__u32 v4;
+		__u64 v6;
+	};
 };
 
 /*
@@ -81,9 +116,9 @@ struct flow_address {
 
 /*
  * Struct to hold a full network tuple
- * The ipv member is technically not necessary, but makes it easier to 
+ * The ipv member is technically not necessary, but makes it easier to
  * determine if saddr/daddr are IPv4 or IPv6 address (don't need to look at the
- * first 12 bytes of address). The proto memeber is not currently used, but 
+ * first 12 bytes of address). The proto memeber is not currently used, but
  * could be useful once pping is extended to work for other protocols than TCP.
  */
 struct network_tuple {
@@ -208,6 +243,17 @@ union pping_event {
 	struct flow_event flow_event;
 	struct map_full_event map_event;
 	struct map_clean_event map_clean_event;
+};
+
+struct aggregated_rtt_stats {
+	__u64 last_updated;
+	__u64 rx_packet_count;
+	__u64 tx_packet_count;
+	__u64 rx_byte_count;
+	__u64 tx_byte_count;
+	__u64 min;
+	__u64 max;
+	__u32 bins[RTT_AGG_NR_BINS];
 };
 
 #endif
