@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotates the output file from ePPing on %i (pping@%i.service)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bpf-examples/pping/scripts/rotate-pping-output.sh /var/log/pping/%i/pping.%i.json %i

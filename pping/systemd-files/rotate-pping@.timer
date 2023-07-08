@@ -1,0 +1,11 @@
+[Unit]
+Description=Rotate ePPing output for %i periodically
+PartOf=pping@%i.service
+
+[Timer]
+Unit=rotate-pping@%i.service
+
+# Rotate ePPing output every X seconds
+OnActiveSec=60
+OnUnitActiveSec=60
+AccuracySec=1us
