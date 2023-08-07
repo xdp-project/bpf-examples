@@ -1,0 +1,31 @@
+[Unit]
+Description=ePPing - Passive monitoring of network RTTs on %i
+After=network.service
+Wants=rotate-pping@%i.timer
+
+# Uncomment below if running with LibreQoS
+# After=lqosd.service
+
+[Service]
+# Ensure folder for saving output to exists
+ExecStartPre=/usr/bin/mkdir -p /var/log/pping/%i
+
+# Rotate any old output first to ensure ePPing can start writing to its intended file
+ExecStartPre=/opt/bpf-examples/pping/scripts/rotate-pping-output.sh /var/log/pping/%i/pping.%i.json
+
+WorkingDirectory=/opt/bpf-examples/pping
+ExecStart=/opt/bpf-examples/pping/pping -i %i -l -r 10 -a 10 -F json -w /var/log/pping/%i/pping.%i.json
+
+# On systemctl reload, send a SIGHUP to ePPing which causes it to reopen its output file
+ExecReload=kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=60
+
+# Set to whatever maximum memory footprint you can tolerate
+# Note, hard-kills the ePPing process without allowing it to clean up. Consider
+# running /scripts/cleanup-tc-progs after.
+MemoryMax=4G
+
+[Install]
+WantedBy=default.target
