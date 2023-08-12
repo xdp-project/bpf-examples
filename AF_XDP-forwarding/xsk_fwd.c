@@ -141,6 +141,21 @@ bpool_init(struct bpool_params *params,
 		return NULL;
 
 	/* bpool internals dimensioning. */
+
+	/*
+	n_slabs = (64*1024 + 4095)/4096 = 16
+	n_slabs_reserved = 16*2 = 32
+	n_buffers = 16*4096 = 65536
+	n_buffers_reserved = 32*4096 = 131072
+	
+	---------------------memmory layout-----------------------------------
+	| struct bpool | slabs | slabs_reserved | buffers | buffers_reserved |
+	|--------------| 16*8B |     32*8B      | 65536*8B|    131072*8B     |
+	|              |pointer|    pointer     |  index  |      index       |
+	----------------------------------------------------------------------
+	
+	*/
+
 	n_slabs = (params->n_buffers + params->n_buffers_per_slab - 1) /
 		params->n_buffers_per_slab;
 	n_slabs_reserved = params->n_users_max * 2;

@@ -109,16 +109,17 @@ struct bpf_object *load_bpf_object_file(const char *filename, int ifindex)
 	 * hardware offloading XDP programs (note this sets libbpf
 	 * bpf_program->prog_ifindex and foreach bpf_map->map_ifindex).
 	 */
-	struct bpf_prog_load_attr prog_load_attr = {
-		.prog_type = BPF_PROG_TYPE_XDP,
-		.ifindex   = ifindex,
-	};
-	prog_load_attr.file = filename;
+	// struct bpf_prog_load_attr prog_load_attr = {
+	// 	.prog_type = BPF_PROG_TYPE_XDP,
+	// 	.ifindex   = ifindex,
+	// };
+	// prog_load_attr.file = filename;
 
 	/* Use libbpf for extracting BPF byte-code from BPF-ELF object, and
 	 * loading this into the kernel via bpf-syscall
 	 */
-	err = bpf_prog_load_xattr(&prog_load_attr, &obj, &first_prog_fd);
+	// err = bpf_prog_load_xattr(&prog_load_attr, &obj, &first_prog_fd);
+
 	if (err) {
 		fprintf(stderr, "ERR: loading BPF-OBJ file(%s) (%d): %s\n",
 			filename, err, strerror(-err));
@@ -136,12 +137,15 @@ static struct bpf_object *open_bpf_object(const char *file, int ifindex)
 	struct bpf_map *map;
 	struct bpf_program *prog, *first_prog = NULL;
 
-	struct bpf_object_open_attr open_attr = {
-		.file = file,
-		.prog_type = BPF_PROG_TYPE_XDP,
-	};
+	// struct bpf_object_open_attr open_attr = {
+	// 	.file = file,
+	// 	.prog_type = BPF_PROG_TYPE_XDP,
+	// };
 
-	obj = bpf_object__open_xattr(&open_attr);
+	// obj = bpf_object__open_xattr(&open_attr);
+
+	obj = bpf_object__open_file(file, NULL);
+
 	if (IS_ERR_OR_NULL(obj)) {
 		err = -PTR_ERR(obj);
 		fprintf(stderr, "ERR: opening BPF-OBJ file(%s) (%d): %s\n",
@@ -265,10 +269,10 @@ struct bpf_object *load_bpf_and_xdp_attach(struct config *cfg)
 
 	if (cfg->progsec[0])
 		/* Find a matching BPF prog section name */
-		bpf_prog = bpf_object__find_program_by_title(bpf_obj, cfg->progsec);
+		bpf_prog = bpf_object__find_program_by_name(bpf_obj, cfg->progsec);
 	else
 		/* Find the first program */
-		bpf_prog = bpf_program__next(NULL, bpf_obj);
+		bpf_prog = bpf_object__next_program(bpf_obj, NULL);
 
 	if (!bpf_prog) {
 		fprintf(stderr, "ERR: couldn't find a program in ELF section '%s'\n", cfg->progsec);

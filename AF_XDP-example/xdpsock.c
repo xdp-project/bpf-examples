@@ -110,10 +110,10 @@ static u32 opt_pkt_fill_pattern = 0x12345678;
 static bool opt_vlan_tag;
 static u16 opt_pkt_vlan_id = VLAN_VID__DEFAULT;
 static u16 opt_pkt_vlan_pri = VLAN_PRI__DEFAULT;
-static struct ether_addr opt_txdmac = {{ 0x3c, 0xfd, 0xfe,
-					 0x9e, 0x7f, 0x71 }};
-static struct ether_addr opt_txsmac = {{ 0xec, 0xb1, 0xd7,
-					 0x98, 0x3a, 0xc0 }};
+static struct ether_addr opt_txdmac = {{ 0xb8, 0xce, 0xf6,
+					 0x0a, 0x10, 0xdc }};
+static struct ether_addr opt_txsmac = {{ 0xb8, 0xce, 0xf6,
+					 0x0a, 0x3d, 0x78 }};
 static bool opt_extra_stats;
 static bool opt_quiet;
 static bool opt_app_stats;
