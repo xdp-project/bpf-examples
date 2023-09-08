@@ -11,4 +11,7 @@ typedef __u64 u64;
 
 typedef s64 ktime_t;
 
+typedef u32 uint32_t;
+
+
 #endif /* __VMLINUX_TYPES_H__ */
