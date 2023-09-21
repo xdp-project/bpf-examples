@@ -163,7 +163,9 @@ struct pktgen_hdr {
 };
 
 struct xsk_ring_stats {
+	unsigned long rx_frags;
 	unsigned long rx_npkts;
+	unsigned long tx_frags;
 	unsigned long tx_npkts;
 	unsigned long rx_dropped_npkts;
 	unsigned long rx_invalid_npkts;
@@ -171,7 +173,9 @@ struct xsk_ring_stats {
 	unsigned long rx_full_npkts;
 	unsigned long rx_fill_empty_npkts;
 	unsigned long tx_empty_npkts;
+	unsigned long prev_rx_frags;
 	unsigned long prev_rx_npkts;
+	unsigned long prev_tx_frags;
 	unsigned long prev_tx_npkts;
 	unsigned long prev_rx_dropped_npkts;
 	unsigned long prev_rx_invalid_npkts;
@@ -493,10 +497,28 @@ static void dump_stats(void)
 		print_benchmark(false);
 		printf("\n");
 
-		printf("%-18s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
-		       dt / 1000000000.);
-		printf(fmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts);
-		printf(fmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts);
+		if (opt_frags) {
+			u64 rx_frags = xsks[i]->ring_stats.rx_frags;
+			u64 tx_frags = xsks[i]->ring_stats.tx_frags;
+			double rx_fps = (rx_frags - xsks[i]->ring_stats.prev_rx_frags) *
+				1000000000. / dt;
+			double tx_fps = (tx_frags - xsks[i]->ring_stats.prev_tx_frags) *
+				1000000000. / dt;
+			char *ffmt = "%-18s %'-14.0f %'-14lu %'-14.0f %'-14lu\n";
+
+			printf("%-18s %-14s %-14s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
+					"fps", "frags", dt / 1000000000.);
+			printf(ffmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts, rx_fps, rx_frags);
+			printf(ffmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts, tx_fps, tx_frags);
+			xsks[i]->ring_stats.prev_rx_frags = rx_frags;
+			xsks[i]->ring_stats.prev_tx_frags = tx_frags;
+		} else {
+
+			printf("%-18s %-14s %-14s %-14.2f\n", "", "pps", "pkts",
+					dt / 1000000000.);
+			printf(fmt, "rx", rx_pps, xsks[i]->ring_stats.rx_npkts);
+			printf(fmt, "tx", tx_pps, xsks[i]->ring_stats.tx_npkts);
+		}
 
 		xsks[i]->ring_stats.prev_rx_npkts = xsks[i]->ring_stats.rx_npkts;
 		xsks[i]->ring_stats.prev_tx_npkts = xsks[i]->ring_stats.tx_npkts;
@@ -1152,7 +1174,7 @@ static void usage(const char *prog)
 		"\n";
 	fprintf(stderr, str, prog, XSK_UMEM__DEFAULT_FRAME_SIZE,
 		opt_batch_size, MIN_PKT_SIZE, MIN_PKT_SIZE,
-		XSK_UMEM__DEFAULT_FRAME_SIZE, opt_pkt_fill_pattern,
+		MAX_PKT_SIZE, opt_pkt_fill_pattern,
 		VLAN_VID__DEFAULT, VLAN_PRI__DEFAULT,
 		SCHED_PRI__DEFAULT);
 
@@ -1358,6 +1380,7 @@ static void kick_tx(struct xsk_socket_info *xsk)
 {
 	int ret;
 	ret = sendto(xsk_socket__fd(xsk->xsk), NULL, 0, MSG_DONTWAIT, NULL, 0);
+
 	if (ret >= 0 || errno == ENOBUFS || errno == EAGAIN ||
 	    errno == EBUSY || errno == ENETDOWN)
 		return;
@@ -1479,6 +1502,7 @@ static void rx_drop(struct xsk_socket_info *xsk)
 	xsk_ring_prod__submit(&xsk->umem->fq, rcvd);
 	xsk_ring_cons__release(&xsk->rx, rcvd);
 	xsk->ring_stats.rx_npkts += eop_cnt;
+	xsk->ring_stats.rx_frags += rcvd;
 }
 
 static void rx_drop_all(void)
@@ -1564,6 +1588,7 @@ static int tx_only(struct xsk_socket_info *xsk, u32 *frame_nb,
 
 	xsk_ring_prod__submit(&xsk->tx, batch_size);
 	xsk->outstanding_tx += batch_size;
+	xsk->ring_stats.tx_frags += batch_size;
 	complete_tx_only(xsk, batch_size);
 
 	return batch_size / frames_per_pkt;
@@ -1753,6 +1778,8 @@ static void l2fwd(struct xsk_socket_info *xsk)
 
 	xsk->ring_stats.rx_npkts += eop_cnt;
 	xsk->ring_stats.tx_npkts += eop_cnt;
+	xsk->ring_stats.rx_frags += rcvd;
+	xsk->ring_stats.tx_frags += rcvd;
 	xsk->outstanding_tx += frags_done;
 }
 
@@ -1807,7 +1834,6 @@ static void load_xdp_program(void)
 		fprintf(stderr, "ERROR: attaching program failed: %s\n", errmsg);
 		exit(EXIT_FAILURE);
 	}
-
 }
 
 static int lookup_bpf_map(int prog_fd)
@@ -1858,7 +1884,6 @@ static int lookup_bpf_map(int prog_fd)
 
 		close(fd);
 	}
-
 
 	free(map_ids);
 	return xsks_map_fd;
