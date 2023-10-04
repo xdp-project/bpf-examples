@@ -1,0 +1,29 @@
+#+Title: XDP SYNPROXY sample application
+
+This is a sample application for XDP SYNPROXY. It was cloned from
+the Linux source code tree under tools/testing/selftests/bpf and called
+xdp_synproxy. main purpose of it is to demonstrate capabilities of
+XDP accelerating SYN Proxying for SYN flood DDOS protection. It is
+a real practical example for user to use. For an overview of accelerating
+SYNPROXY WITH XDP, Please refer to this paper
+(https://netdevconf.info/0x15/slides/30/Netdev%200x15%20Accelerating%20synproxy%20with%20XDP.pdf)
+
+Note XDP SYNPROXY requires netfilter connection tracking and here are the
+sysctl knobs and iptables rules preparation for XDP SYNPROXY:
+#+BEGIN_SRC sh
+  sudo sysctl -w net.ipv4.tcp_syncookies=2
+  sudo sysctl -w net.ipv4.tcp_timestamps=1
+  sudo sysctl -w net.netfilter.nf_conntrack_tcp_loose=0
+  sudo iptables -t raw -I PREROUTING  -i <interface> -p tcp -m tcp --syn --dport <port> -j CT --notrack
+  sudo iptables -t filter -A INPUT -i <interface> -p tcp -m tcp --dport <port> -m state --state INVALID,UNTRACKED -j SYNPROXY --sack-perm --timestamp --wscale 7 --mss 1460
+  sudo iptables -t filter -A INPUT -i <interface> -m state --state INVALID -j DROP
+#+END_SRC
+
+Here is how to start the XDP SYNPROXY application:
+#+BEGIN_SRC sh
+  sudo xdp_synproxy --iface <interface> --file <path-to-xdp_synproxy_kern.o> --mss4 1460 --mss6 1440 --wscale 7 --ttl 254 --ports <port1>,<port2>
+#+END_SRC
+
+XDP SYNPROXY can coexist with other XDP programs since we use libxdp
+to attach the XDP SYNPROXY program, meaning you could build chain of
+XDP programs and attach them to same network interface.

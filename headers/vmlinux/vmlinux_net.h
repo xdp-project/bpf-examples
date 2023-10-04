@@ -135,4 +135,13 @@ struct sk_buff {
 	struct skb_ext *extensions;
 };
 
+struct nf_conn {
+	unsigned long status;
+};
+
+enum ip_conntrack_status {
+	/* Connection is confirmed: originating packet has left box */
+	IPS_CONFIRMED_BIT = 3,
+};
+
 #endif /* __VMLINUX_NET_H__ */
