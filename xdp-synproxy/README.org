@@ -8,6 +8,8 @@ a real practical example for user to use. For an overview of accelerating
 SYNPROXY WITH XDP, Please refer to this paper
 (https://netdevconf.info/0x15/slides/30/Netdev%200x15%20Accelerating%20synproxy%20with%20XDP.pdf)
 
+This sample application is tested with Ubuntu 22.04 with 6.2 kernel.
+
 Note XDP SYNPROXY requires netfilter connection tracking and here are the
 sysctl knobs and iptables rules preparation for XDP SYNPROXY:
 #+BEGIN_SRC sh
@@ -21,9 +23,39 @@ sysctl knobs and iptables rules preparation for XDP SYNPROXY:
 
 Here is how to start the XDP SYNPROXY application:
 #+BEGIN_SRC sh
-  sudo xdp_synproxy --iface <interface> --file <path-to-xdp_synproxy_kern.o> --mss4 1460 --mss6 1440 --wscale 7 --ttl 254 --ports <port1>,<port2>
+  sudo xdp_synproxy --iface <interface> --mss4 1460 --mss6 1440 --wscale 7 --ttl 64 --ports <port1>,<port2>
+#+END_SRC
+
+XDP SYNPROXY could be built in in container and run by docker
+#+BEGIN_SRC sh
+  sudo docker build . -t xdp-synproxy:0.1
+  sudo docker run -it -h xdp-synproxy --network=host --privileged xdp-synproxy:0.1
+#+END_SRC
+
+XDP SYNPROXY could be deployed in Kubernetes cluster as DaemonSet, Please see
+(https://youtu.be/nIrp0Lv-e0g?si=g-pXl4agVQM6_FYW)
+#+BEGIN_SRC sh
+  sudo kubectl apply -f xdp-synproxy-daemonset.yaml
+  sudo kubectl get po  -o wide -l app=xdp-synproxy
+
+  NAME                 READY   STATUS    RESTARTS   AGE    IP              NODE                     NOMINATED NODE   READINESS GATES
+  xdp-synproxy-6x29j   1/1     Running   0          5d2h   10.169.72.239   cilium-dev               <none>           <none>
+  xdp-synproxy-xj98j   1/1     Running   0          5d2h   10.169.72.233   centos-dev.localdomain   <none>           <none>
 #+END_SRC
 
 XDP SYNPROXY can coexist with other XDP programs since we use libxdp
 to attach the XDP SYNPROXY program, meaning you could build chain of
-XDP programs and attach them to same network interface.
+XDP programs and attach them to same network interface. Note xdp-loader
+could be built statically and shipped with xdp-synproxy container.
+
+#+BEGIN_SRC sh
+  sudo kubectl exec -it xdp-synproxy-6x29j  -- xdp-loader status
+
+  CURRENT XDP PROGRAM STATUS:
+
+  Interface        Prio  Program name      Mode     ID   Tag               Chain actions
+  --------------------------------------------------------------------------------------
+  ens192                 xdp_dispatcher    native   899  90f686eb86991928
+  =>               50    syncookie_xdp              908  6c6615566a2e0419  XDP_PASS
+#+END_SRC
+
