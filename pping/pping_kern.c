@@ -190,6 +190,12 @@ struct {
 	__uint(max_entries, 1);
 } map_active_agg_instance SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
+	__type(value, struct packet_info);
+	__uint(max_entries, 1);
+} map_packet_info SEC(".maps");
 
 // Help functions
 
@@ -537,6 +543,7 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 		struct icmp6hdr *icmp6h;
 	} transporth_ptr;
 
+	__builtin_memset(p_info, 0, sizeof(*p_info));
 	p_info->time = bpf_ktime_get_ns();
 	p_info->pkt_len = pctx->pkt_len;
 	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
@@ -1229,28 +1236,38 @@ static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
  */
 static void pping_tc(struct __sk_buff *ctx, bool is_ingress)
 {
-	struct packet_info p_info = { 0 };
+	struct packet_info *p_info;
+	__u32 key = 0;
 
-	if (parse_packet_identifer_tc(ctx, &p_info) < 0)
+	p_info = bpf_map_lookup_elem(&map_packet_info, &key);
+	if (!p_info)
 		return;
 
-	p_info.is_ingress = is_ingress;
-	p_info.ingress_ifindex = is_ingress ? ctx->ingress_ifindex : 0;
+	if (parse_packet_identifer_tc(ctx, p_info) < 0)
+		return;
 
-	pping_parsed_packet(ctx, &p_info);
+	p_info->is_ingress = is_ingress;
+	p_info->ingress_ifindex = is_ingress ? ctx->ingress_ifindex : 0;
+
+	pping_parsed_packet(ctx, p_info);
 }
 
 static void pping_xdp(struct xdp_md *ctx)
 {
-	struct packet_info p_info = { 0 };
+	struct packet_info *p_info;
+	__u32 key = 0;
 
-	if (parse_packet_identifer_xdp(ctx, &p_info) < 0)
+	p_info = bpf_map_lookup_elem(&map_packet_info, &key);
+	if (!p_info)
 		return;
 
-	p_info.is_ingress = true;
-	p_info.ingress_ifindex = ctx->ingress_ifindex;
+	if (parse_packet_identifer_xdp(ctx, p_info) < 0)
+		return;
 
-	pping_parsed_packet(ctx, &p_info);
+	p_info->is_ingress = true;
+	p_info->ingress_ifindex = ctx->ingress_ifindex;
+
+	pping_parsed_packet(ctx, p_info);
 }
 
 static bool is_flow_old(struct network_tuple *flow, struct flow_state *f_state,
