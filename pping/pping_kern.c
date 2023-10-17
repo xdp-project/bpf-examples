@@ -193,6 +193,13 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, __u32);
+	__type(value, struct global_counters);
+	__uint(max_entries, 1);
+} map_global_counters SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
 	__type(value, struct packet_info);
 	__uint(max_entries, 1);
 } map_packet_info SEC(".maps");
@@ -312,6 +319,44 @@ get_dualflow_key_from_packet(struct packet_info *p_info)
 {
 	return p_info->pid_flow_is_dfkey ? &p_info->pid.flow :
 						 &p_info->reply_pid.flow;
+}
+
+static void update_global_counters(__u8 ipproto, __u32 pkt_len)
+{
+	if (!config.agg_rtts)
+		return;
+
+	struct global_counters *counters;
+	__u32 key = 0;
+
+	counters = bpf_map_lookup_elem(&map_global_counters, &key);
+	if (!counters) // Should never happen
+		return;
+
+	switch (ipproto) {
+	case 0: // Used to represent non-IP instead of IPv6 hop-by-hop
+		counters->nonip_pkts++;
+		counters->nonip_bytes += pkt_len;
+		break;
+	case IPPROTO_TCP:
+		counters->tcp_pkts++;
+		counters->tcp_bytes += pkt_len;
+		break;
+	case IPPROTO_UDP:
+		counters->udp_pkts++;
+		counters->udp_bytes += pkt_len;
+		break;
+	case IPPROTO_ICMP:
+		counters->icmp_pkts++;
+		counters->icmp_bytes += pkt_len;
+		break;
+	case IPPROTO_ICMPV6:
+		counters->icmp6_pkts++;
+		counters->icmp6_bytes += pkt_len;
+		break;
+	default:
+		counters->other_ipprotos[ipproto]++;
+	}
 }
 
 /*
@@ -556,10 +601,10 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 		p_info->pid.flow.ipv = AF_INET6;
 		proto = parse_ip6hdr(&pctx->nh, pctx->data_end, &iph_ptr.ip6h);
 	} else {
-		return -1;
+		goto err_not_ip;
 	}
 	if (proto < 0)
-		return -1;
+		goto err_not_ip;
 
 	// IP-header was parsed sucessfully, fill in IP address
 	p_info->pid.flow.proto = proto;
@@ -577,6 +622,7 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 		p_info->ip_tos.ipv6_tos =
 			*(__be32 *)iph_ptr.ip6h & IPV6_FLOWINFO_MASK;
 	}
+	update_global_counters(proto, p_info->pkt_len);
 
 	// Parse identifer from suitable protocol
 	err = -1;
@@ -621,6 +667,10 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	}
 
 	return 0;
+
+err_not_ip:
+	update_global_counters(0, p_info->pkt_len);
+	return -1;
 }
 
 /*

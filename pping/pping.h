@@ -30,6 +30,8 @@ typedef __u64 fixpoint64;
 #define RTT_AGG_NR_BINS 250UL
 #define RTT_AGG_BIN_WIDTH (4 * NS_PER_MS)
 
+#define N_IPPROTOS 256
+
 /* Special IPv4/IPv6 prefixes used for backup entries
  * To avoid them colliding with and actual traffic (causing the traffic to end
  * up in the backup entry), use prefixes from blocks reserved for documentation.
@@ -261,6 +263,20 @@ struct aggregated_stats {
 	__u64 rtt_min;
 	__u64 rtt_max;
 	__u32 rtt_bins[RTT_AGG_NR_BINS];
+};
+
+struct global_counters {
+	__u64 nonip_pkts;
+	__u64 nonip_bytes;
+	__u64 tcp_pkts;
+	__u64 tcp_bytes;
+	__u64 udp_pkts;
+	__u64 udp_bytes;
+	__u64 icmp_pkts;
+	__u64 icmp_bytes;
+	__u64 icmp6_pkts;
+	__u64 icmp6_bytes;
+	__u32 other_ipprotos[N_IPPROTOS];
 };
 
 #endif
