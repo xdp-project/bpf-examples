@@ -1136,9 +1136,29 @@ static void handle_missed_events(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "Lost %llu events on CPU %d\n", lost_cnt, cpu);
 }
 
+static __u64 sum_trafficcounts_pkts(const struct traffic_counters *counters)
+{
+	return counters->tcp_ts_pkts + counters->tcp_nots_pkts +
+	       counters->other_pkts;
+}
+
+static __u64 sum_trafficcounts_bytes(const struct traffic_counters *counters)
+{
+	return counters->tcp_ts_bytes + counters->tcp_nots_bytes +
+	       counters->other_bytes;
+}
+
+static bool trafficcounts_empty(const struct traffic_counters *counters)
+{
+	static const struct traffic_counters empty = { 0 };
+
+	return memcmp(counters, &empty, sizeof(empty)) == 0;
+}
+
 static bool aggregated_stats_empty(struct aggregated_stats *stats)
 {
-	return stats->tx_packet_count == 0 && stats->rx_packet_count == 0;
+	return trafficcounts_empty(&stats->rx_stats) &&
+	       trafficcounts_empty(&stats->tx_stats);
 }
 
 static bool aggregated_stats_nortts(struct aggregated_stats *stats)
@@ -1154,39 +1174,51 @@ static __u64 aggregated_stats_maxbins(struct aggregated_stats *stats,
 		       n_bins;
 }
 
+static void add_trafficcounts(struct traffic_counters *to,
+			      const struct traffic_counters *from)
+{
+	to->tcp_ts_pkts += from->tcp_ts_pkts;
+	to->tcp_ts_bytes += from->tcp_ts_bytes;
+	to->tcp_nots_pkts += from->tcp_nots_pkts;
+	to->tcp_nots_bytes += from->tcp_nots_bytes;
+	to->other_pkts += from->other_pkts;
+	to->other_bytes += from->other_bytes;
+}
+
+static void update_aggregated_stats(struct aggregated_stats *to_stats,
+				    struct aggregated_stats *from_stats,
+				    int n_bins)
+{
+	int bin;
+
+	if (from_stats->last_updated > to_stats->last_updated)
+		to_stats->last_updated = from_stats->last_updated;
+
+	add_trafficcounts(&to_stats->rx_stats, &from_stats->rx_stats);
+	add_trafficcounts(&to_stats->tx_stats, &from_stats->tx_stats);
+
+	if (aggregated_stats_nortts(from_stats))
+		return;
+
+	if (from_stats->rtt_max > to_stats->rtt_max)
+		to_stats->rtt_max = from_stats->rtt_max;
+	if (to_stats->rtt_min == 0 || from_stats->rtt_min < to_stats->rtt_min)
+		to_stats->rtt_min = from_stats->rtt_min;
+
+	for (bin = 0; bin < n_bins; bin++)
+		to_stats->rtt_bins[bin] += from_stats->rtt_bins[bin];
+}
+
 static void merge_percpu_aggreated_stats(struct aggregated_stats *percpu_stats,
 					 struct aggregated_stats *merged_stats,
 					 int n_cpus, int n_bins)
 {
-	int i, bin;
+	int i;
 
 	memset(merged_stats, 0, sizeof(*merged_stats));
 
-	for (i = 0; i < n_cpus; i++) {
-		if (percpu_stats[i].last_updated > merged_stats->last_updated)
-			merged_stats->last_updated =
-				percpu_stats[i].last_updated;
-
-		merged_stats->rx_packet_count +=
-			percpu_stats[i].rx_packet_count;
-		merged_stats->tx_packet_count +=
-			percpu_stats[i].tx_packet_count;
-		merged_stats->rx_byte_count += percpu_stats[i].rx_byte_count;
-		merged_stats->tx_byte_count += percpu_stats[i].tx_byte_count;
-
-		if (aggregated_stats_nortts(&percpu_stats[i]))
-			continue;
-
-		if (percpu_stats[i].rtt_max > merged_stats->rtt_max)
-			merged_stats->rtt_max = percpu_stats[i].rtt_max;
-		if (merged_stats->rtt_min == 0 ||
-		    percpu_stats[i].rtt_min < merged_stats->rtt_min)
-			merged_stats->rtt_min = percpu_stats[i].rtt_min;
-
-		for (bin = 0; bin < n_bins; bin++)
-			merged_stats->rtt_bins[bin] +=
-				percpu_stats[i].rtt_bins[bin];
-	}
+	for (i = 0; i < n_cpus; i++)
+		update_aggregated_stats(merged_stats, &percpu_stats[i], n_bins);
 }
 
 static void clear_aggregated_stats(struct aggregated_stats *stats)
@@ -1245,8 +1277,10 @@ static void print_aggstats_standard(FILE *stream, __u64 t,
 	print_ns_datetime(stream, t);
 	fprintf(stream,
 		": %s -> rxpkts=%llu, rxbytes=%llu, txpkts=%llu, txbytes=%llu",
-		prefixstr, stats->rx_packet_count, stats->rx_byte_count,
-		stats->tx_packet_count, stats->tx_byte_count);
+		prefixstr, sum_trafficcounts_pkts(&stats->rx_stats),
+		sum_trafficcounts_bytes(&stats->rx_stats),
+		sum_trafficcounts_pkts(&stats->tx_stats),
+		sum_trafficcounts_bytes(&stats->tx_stats));
 
 	if (aggregated_stats_nortts(stats))
 		goto exit;
@@ -1264,6 +1298,35 @@ exit:
 	fprintf(stream, "\n");
 }
 
+static void print_pktbytes_tuple_json(json_writer_t *jctx,
+				      const char *tuple_name, __u64 pkts,
+				      __u64 bytes)
+{
+	// Don't include empty pkt/byte tuples
+	if (pkts == 0)
+		return;
+
+	jsonw_name(jctx, tuple_name);
+	jsonw_start_object(jctx);
+	jsonw_u64_field(jctx, "packets", pkts);
+	jsonw_u64_field(jctx, "bytes", bytes);
+	jsonw_end_object(jctx);
+}
+
+static void print_trafficcount_json(json_writer_t *jctx,
+				    const struct traffic_counters *counters)
+{
+	jsonw_start_object(jctx);
+
+	print_pktbytes_tuple_json(jctx, "TCP_TS", counters->tcp_ts_pkts,
+				  counters->tcp_ts_bytes);
+	print_pktbytes_tuple_json(jctx, "TCP_noTS", counters->tcp_nots_pkts,
+				  counters->tcp_nots_bytes);
+	print_pktbytes_tuple_json(jctx, "other", counters->other_pkts,
+				  counters->other_bytes);
+	jsonw_end_object(jctx);
+}
+
 static void print_aggstats_json(json_writer_t *ctx, __u64 t,
 				const char *prefixstr,
 				struct aggregated_stats *stats,
@@ -1277,10 +1340,10 @@ static void print_aggstats_json(json_writer_t *ctx, __u64 t,
 	jsonw_u64_field(ctx, "timestamp", convert_monotonic_to_realtime(t));
 	jsonw_string_field(ctx, "ip_prefix", prefixstr);
 
-	jsonw_u64_field(ctx, "rx_packets", stats->rx_packet_count);
-	jsonw_u64_field(ctx, "tx_packets", stats->tx_packet_count);
-	jsonw_u64_field(ctx, "rx_bytes", stats->rx_byte_count);
-	jsonw_u64_field(ctx, "tx_bytes", stats->tx_byte_count);
+	jsonw_name(ctx, "rx_stats");
+	print_trafficcount_json(ctx, &stats->rx_stats);
+	jsonw_name(ctx, "tx_stats");
+	print_trafficcount_json(ctx, &stats->tx_stats);
 
 	if (aggregated_stats_nortts(stats))
 		goto exit;
@@ -1390,7 +1453,7 @@ static void report_aggregated_stats_mapentry(
 	else
 		*del_entry = false;
 
-	// Only print and clear prefixes which have RTT samples
+	// Only print and clear prefixes which have seen traffic
 	if (!aggregated_stats_empty(&merged_stats)) {
 		print_aggregated_stats(out_ctx, t_monotonic, prefix, af,
 				       prefix_len, &merged_stats, agg_conf);

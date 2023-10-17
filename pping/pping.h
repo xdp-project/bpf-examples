@@ -245,12 +245,19 @@ union pping_event {
 	struct map_clean_event map_clean_event;
 };
 
+struct traffic_counters {
+	__u64 tcp_ts_pkts;
+	__u64 tcp_ts_bytes;
+	__u64 tcp_nots_pkts;
+	__u64 tcp_nots_bytes;
+	__u64 other_pkts;
+	__u64 other_bytes;
+};
+
 struct aggregated_stats {
 	__u64 last_updated;
-	__u64 rx_packet_count;
-	__u64 tx_packet_count;
-	__u64 rx_byte_count;
-	__u64 tx_byte_count;
+	struct traffic_counters rx_stats;
+	struct traffic_counters tx_stats;
 	__u64 rtt_min;
 	__u64 rtt_max;
 	__u32 rtt_bins[RTT_AGG_NR_BINS];
