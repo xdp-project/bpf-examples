@@ -1132,16 +1132,16 @@ static void update_aggregate_stats(struct aggregated_stats **src_stats,
 		&p_info->pid.flow.saddr.ip, p_info->pid.flow.ipv);
 	if (*src_stats) {
 		(*src_stats)->last_updated = p_info->time;
-		(*src_stats)->tx_packet_count++;
-		(*src_stats)->tx_byte_count += p_info->pkt_len;
+		(*src_stats)->rx_packet_count++;
+		(*src_stats)->rx_byte_count += p_info->pkt_len;
 	}
 
 	*dst_stats = lookup_or_create_aggregation_stats(
 		&p_info->pid.flow.daddr.ip, p_info->pid.flow.ipv);
 	if (*dst_stats) {
 		(*dst_stats)->last_updated = p_info->time;
-		(*dst_stats)->rx_packet_count++;
-		(*dst_stats)->rx_byte_count += p_info->pkt_len;
+		(*dst_stats)->tx_packet_count++;
+		(*dst_stats)->tx_byte_count += p_info->pkt_len;
 	}
 }
 
