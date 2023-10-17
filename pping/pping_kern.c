@@ -127,10 +127,10 @@ char _license[] SEC("license") = "GPL";
 static volatile const struct bpf_config config = {};
 static volatile __u64 last_warn_time[2] = { 0 };
 
-// Keep an empty aggregated_rtt_stats as a global variable to use as a template
+// Keep an empty aggregated_stats as a global variable to use as a template
 // when creating new entries. That way, it won't have to be allocated on stack
 // (where it won't fit anyways) and initialized each time during run time.
-static struct aggregated_rtt_stats empty_stats = { 0 };
+static struct aggregated_stats empty_stats = { 0 };
 
 
 // Map definitions
@@ -157,28 +157,28 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
 	__type(key, __u32);
-	__type(value, struct aggregated_rtt_stats);
+	__type(value, struct aggregated_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
 } map_v4_agg1 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
 	__type(key, __u32);
-	__type(value, struct aggregated_rtt_stats);
+	__type(value, struct aggregated_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
 } map_v4_agg2 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
 	__type(key, __u64);
-	__type(value, struct aggregated_rtt_stats);
+	__type(value, struct aggregated_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
 } map_v6_agg1 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
 	__type(key, __u64);
-	__type(value, struct aggregated_rtt_stats);
+	__type(value, struct aggregated_stats);
 	__uint(max_entries, MAP_AGGREGATION_SIZE);
 } map_v6_agg2 SEC(".maps");
 
@@ -986,10 +986,10 @@ static void create_ipprefix_key_v6(__u64 *prefix_key, struct in6_addr *ip)
 	// *prefix_key = *(__u64 *)ip & config.ipv6_prefix_mask; // gives verifier rejection "misaligned stack access off"
 }
 
-static struct aggregated_rtt_stats *
+static struct aggregated_stats *
 lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv)
 {
-	struct aggregated_rtt_stats *agg;
+	struct aggregated_stats *agg;
 	struct ipprefix_key key;
 	__u32 *map_choice;
 	__u32 zero = 0;
@@ -1027,21 +1027,21 @@ lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv)
 	return bpf_map_lookup_elem(agg_map, &key);
 }
 
-static void aggregate_rtt(__u64 rtt, struct aggregated_rtt_stats *agg_stats)
+static void aggregate_rtt(__u64 rtt, struct aggregated_stats *agg_stats)
 {
 	if (!config.agg_rtts || !agg_stats)
 		return;
 
 	int bin_idx;
 
-	if (!agg_stats->min || rtt < agg_stats->min)
-		agg_stats->min = rtt;
-	if (rtt > agg_stats->max)
-		agg_stats->max = rtt;
+	if (!agg_stats->rtt_min || rtt < agg_stats->rtt_min)
+		agg_stats->rtt_min = rtt;
+	if (rtt > agg_stats->rtt_max)
+		agg_stats->rtt_max = rtt;
 
 	bin_idx = rtt / RTT_AGG_BIN_WIDTH;
 	bin_idx = bin_idx >= RTT_AGG_NR_BINS ? RTT_AGG_NR_BINS - 1 : bin_idx;
-	agg_stats->bins[bin_idx]++;
+	agg_stats->rtt_bins[bin_idx]++;
 }
 
 /*
@@ -1090,7 +1090,7 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
  */
 static void pping_match_packet(struct flow_state *f_state, void *ctx,
 			       struct packet_info *p_info,
-			       struct aggregated_rtt_stats *agg_stats)
+			       struct aggregated_stats *agg_stats)
 {
 	__u64 rtt;
 	__u64 *p_ts;
@@ -1121,8 +1121,8 @@ static void pping_match_packet(struct flow_state *f_state, void *ctx,
 	aggregate_rtt(rtt, agg_stats);
 }
 
-static void update_aggregate_stats(struct aggregated_rtt_stats **src_stats,
-				   struct aggregated_rtt_stats **dst_stats,
+static void update_aggregate_stats(struct aggregated_stats **src_stats,
+				   struct aggregated_stats **dst_stats,
 				   struct packet_info *p_info)
 {
 	if (!config.agg_rtts)
@@ -1157,7 +1157,7 @@ static void pping_parsed_packet(void *ctx, struct packet_info *p_info)
 {
 	struct dual_flow_state *df_state;
 	struct flow_state *fw_flow, *rev_flow;
-	struct aggregated_rtt_stats *src_stats = NULL, *dst_stats = NULL;
+	struct aggregated_stats *src_stats = NULL, *dst_stats = NULL;
 
 	df_state = lookup_or_create_dualflow_state(ctx, p_info);
 	if (!df_state)
