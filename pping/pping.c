@@ -869,21 +869,30 @@ static int format_ipprefix(char *buf, size_t size, int af,
 	return err;
 }
 
-static const char *proto_to_str(__u16 proto)
+static char *ipproto_to_str(char *buf, size_t size, __u8 proto)
 {
-	static char buf[8];
+	/* Rather than doing additional checks to ensure we return a null
+           terminated truncated string, just outright fail if passed buffer
+           is too small to fit largest possible string */
+	if (size < 7)
+		return NULL;
 
 	switch (proto) {
 	case IPPROTO_TCP:
-		return "TCP";
+		strcpy(buf, "TCP");
+		break;
 	case IPPROTO_ICMP:
-		return "ICMP";
+		strcpy(buf, "ICMP");
+		break;
 	case IPPROTO_ICMPV6:
-		return "ICMPv6";
+		strcpy(buf, "ICMPv6");
+		break;
 	default:
-		snprintf(buf, sizeof(buf), "%d", proto);
-		return buf;
+		snprintf(buf, size, "%d", proto);
+		break;
 	}
+
+	return buf;
 }
 
 static const char *flowevent_to_str(enum flow_event_type fe)
@@ -961,17 +970,22 @@ static void print_ns_datetime(FILE *stream, __u64 monotonic_ns)
 
 static void print_event_standard(FILE *stream, const union pping_event *e)
 {
+	char protostr[16];
+
 	if (e->event_type == EVENT_TYPE_RTT) {
 		print_ns_datetime(stream, e->rtt_event.timestamp);
 		fprintf(stream, " %.6g ms %.6g ms %s ",
 			(double)e->rtt_event.rtt / NS_PER_MS,
 			(double)e->rtt_event.min_rtt / NS_PER_MS,
-			proto_to_str(e->rtt_event.flow.proto));
+			ipproto_to_str(protostr, sizeof(protostr),
+				       e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stream, &e->rtt_event.flow);
 		fprintf(stream, "\n");
 	} else if (e->event_type == EVENT_TYPE_FLOW) {
 		print_ns_datetime(stream, e->flow_event.timestamp);
-		fprintf(stream, " %s ", proto_to_str(e->rtt_event.flow.proto));
+		fprintf(stream, " %s ",
+			ipproto_to_str(protostr, sizeof(protostr),
+				       e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stream, &e->flow_event.flow);
 		fprintf(stream, " %s due to %s from %s\n",
 			flowevent_to_str(e->flow_event.flow_event_type),
@@ -1002,6 +1016,7 @@ static void print_common_fields_json(json_writer_t *ctx,
 	const struct network_tuple *flow = &e->rtt_event.flow;
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
+	char protostr[16];
 
 	format_ip_address(saddr, sizeof(saddr), flow->ipv, &flow->saddr.ip);
 	format_ip_address(daddr, sizeof(daddr), flow->ipv, &flow->daddr.ip);
@@ -1012,7 +1027,9 @@ static void print_common_fields_json(json_writer_t *ctx,
 	jsonw_hu_field(ctx, "src_port", ntohs(flow->saddr.port));
 	jsonw_string_field(ctx, "dest_ip", daddr);
 	jsonw_hu_field(ctx, "dest_port", ntohs(flow->daddr.port));
-	jsonw_string_field(ctx, "protocol", proto_to_str(flow->proto));
+	jsonw_string_field(ctx, "protocol",
+			   ipproto_to_str(protostr, sizeof(protostr),
+					  flow->proto));
 }
 
 static void print_rttevent_fields_json(json_writer_t *ctx,
