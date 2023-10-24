@@ -1149,6 +1149,12 @@ static bool ecncounters_empty(const struct ecn_counters *counters)
 	return memcmp(counters, &empty, sizeof(empty)) == 0;
 }
 
+static bool pping_errors_empty(const struct pping_error_counters *errors)
+{
+	static const struct pping_error_counters empty = { 0 };
+
+	return memcmp(errors, &empty, sizeof(empty)) == 0;
+}
 
 static void print_counter_standard(FILE *stream, const char *name, __u64 val,
 				   bool *first)
@@ -1198,6 +1204,22 @@ static void print_ecncounters_standard(FILE *stream,
 }
 
 static void
+print_ppingerrors_standard(FILE *stream,
+			   const struct pping_error_counters *errors)
+{
+	bool first = true;
+
+	fprintf(stream, "errors=(");
+	print_counter_standard(stream, "store-packet-ts", errors->pktts_store,
+			       &first);
+	print_counter_standard(stream, "create-flow-state", errors->flow_create,
+			       &first);
+	print_counter_standard(stream, "create-agg-subnet-state",
+			       errors->agg_subnet_create, &first);
+	fprintf(stream, ")");
+}
+
+static void
 print_globalcounters_standard(FILE *stream, __u64 t_monotonic,
 			      const struct global_counters *counters)
 {
@@ -1236,6 +1258,11 @@ print_globalcounters_standard(FILE *stream, __u64 t_monotonic,
 		print_ecncounters_standard(stream, &counters->ecn);
 	}
 
+	if (!pping_errors_empty(&counters->err)) {
+		fprintf(stream, ", ");
+		print_ppingerrors_standard(stream, &counters->err);
+	}
+
 	fprintf(stream, "\n");
 }
 
@@ -1268,6 +1295,17 @@ static void print_ecncounters_json(json_writer_t *jctx,
 	print_counter_json(jctx, "ECT1", counters->ect1);
 	print_counter_json(jctx, "ECT0", counters->ect0);
 	print_counter_json(jctx, "CE", counters->ce);
+	jsonw_end_object(jctx);
+}
+
+static void print_ppingerrors_json(json_writer_t *jctx,
+				   const struct pping_error_counters *errors)
+{
+	jsonw_start_object(jctx);
+	print_counter_json(jctx, "store_packet_ts", errors->pktts_store);
+	print_counter_json(jctx, "create_flow_state", errors->flow_create);
+	print_counter_json(jctx, "create_agg_subnet_state",
+			   errors->agg_subnet_create);
 	jsonw_end_object(jctx);
 }
 
@@ -1309,6 +1347,9 @@ static void print_globalcounters_json(json_writer_t *jctx, __u64 t_monotonic,
 	jsonw_name(jctx, "ecn_counters");
 	print_ecncounters_json(jctx, &counters->ecn);
 
+	jsonw_name(jctx, "errors");
+	print_ppingerrors_json(jctx, &counters->err);
+
 	jsonw_end_object(jctx);
 }
 
@@ -1332,6 +1373,14 @@ static void update_ecncounters(struct ecn_counters *to,
 	to->ce += from->ce;
 }
 
+static void update_pping_errors(struct pping_error_counters *to,
+				const struct pping_error_counters *from)
+{
+	to->pktts_store += from->pktts_store;
+	to->flow_create += from->flow_create;
+	to->agg_subnet_create += from->agg_subnet_create;
+}
+
 static void update_globalcounters(struct global_counters *to,
 				  const struct global_counters *from)
 {
@@ -1353,6 +1402,7 @@ static void update_globalcounters(struct global_counters *to,
 	}
 
 	update_ecncounters(&to->ecn, &from->ecn);
+	update_pping_errors(&to->err, &from->err);
 }
 
 static void merge_percpu_globalcounters(struct global_counters *merged,
@@ -1378,6 +1428,16 @@ static void diff_ecncounters(struct ecn_counters *diff,
 	diff->ce = next->ce - prev->ce;
 }
 
+static void diff_pping_errors(struct pping_error_counters *diff,
+			      const struct pping_error_counters *prev,
+			      const struct pping_error_counters *next)
+{
+	diff->pktts_store = next->pktts_store - prev->pktts_store;
+	diff->flow_create = next->flow_create - prev->flow_create;
+	diff->agg_subnet_create =
+		next->agg_subnet_create - prev->agg_subnet_create;
+}
+
 static void diff_globalcounters(struct global_counters *diff,
 				const struct global_counters *prev,
 				const struct global_counters *next)
@@ -1401,6 +1461,7 @@ static void diff_globalcounters(struct global_counters *diff,
 	}
 
 	diff_ecncounters(&diff->ecn, &prev->ecn, &next->ecn);
+	diff_pping_errors(&diff->err, &prev->err, &next->err);
 }
 
 static int report_globalcounters(struct output_context *out_ctx,

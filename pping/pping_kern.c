@@ -321,6 +321,31 @@ get_dualflow_key_from_packet(struct packet_info *p_info)
 						 &p_info->reply_pid.flow;
 }
 
+static void update_pping_error(enum pping_error err)
+{
+	if (!config.agg_rtts)
+		return;
+
+	struct global_counters *counters;
+	__u32 key = 0;
+
+	counters = bpf_map_lookup_elem(&map_global_counters, &key);
+	if (!counters)
+		return;
+
+	switch (err) {
+	case PPING_ERR_PKTTS_STORE:
+		counters->err.pktts_store++;
+		break;
+	case PPING_ERR_FLOW_CREATE:
+		counters->err.flow_create++;
+		break;
+	case PPING_ERR_AGGSUBNET_CREATE:
+		counters->err.agg_subnet_create++;
+		break;
+	}
+}
+
 static void update_ecn_counters(struct ecn_counters *counters, __u8 ecn)
 {
 	switch (ecn) {
@@ -929,6 +954,7 @@ create_dualflow_state(void *ctx, struct packet_info *p_info)
 
 	if (bpf_map_update_elem(&flow_state, key, &new_state, BPF_NOEXIST) !=
 	    0) {
+		update_pping_error(PPING_ERR_FLOW_CREATE);
 		send_map_full_event(ctx, p_info, PPING_MAP_FLOWSTATE);
 		return NULL;
 	}
@@ -1123,6 +1149,9 @@ lookup_or_create_aggregation_stats(struct in6_addr *ip, __u8 ipv, bool create)
 					  BPF_NOEXIST);
         // Cannot create new entry, switch to backup entry
 	if (!create || (err && err != -EEXIST)) {
+		if (create)
+			update_pping_error(PPING_ERR_AGGSUBNET_CREATE);
+
 		if (ipv == AF_INET)
 			key.v4 = IPV4_BACKUP_KEY;
 		else
@@ -1184,10 +1213,12 @@ static void pping_timestamp_packet(struct flow_state *f_state, void *ctx,
 	f_state->last_timestamp = p_info->time;
 
 	if (bpf_map_update_elem(&packet_ts, &p_info->pid, &p_info->time,
-				BPF_NOEXIST) == 0)
+				BPF_NOEXIST) == 0) {
 		__sync_fetch_and_add(&f_state->outstanding_timestamps, 1);
-	else
+	} else {
+		update_pping_error(PPING_ERR_PKTTS_STORE);
 		send_map_full_event(ctx, p_info, PPING_MAP_PACKETTS);
+	}
 }
 
 /*

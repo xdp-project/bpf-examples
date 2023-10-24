@@ -83,6 +83,12 @@ enum __attribute__((__packed__)) connection_state {
         CONNECTION_STATE_CLOSED
 };
 
+enum pping_error {
+	PPING_ERR_PKTTS_STORE,
+	PPING_ERR_FLOW_CREATE,
+	PPING_ERR_AGGSUBNET_CREATE
+};
+
 struct bpf_config {
 	__u64 rate_limit;
 	fixpoint64 rtt_rate;
@@ -272,8 +278,15 @@ struct ecn_counters {
 	__u64 ce;
 };
 
+struct pping_error_counters {
+	__u64 pktts_store;
+	__u64 flow_create;
+	__u64 agg_subnet_create;
+};
+
 struct global_counters {
 	struct ecn_counters ecn;
+	struct pping_error_counters err;
 	__u64 nonip_pkts;
 	__u64 nonip_bytes;
 	__u64 tcp_pkts;
