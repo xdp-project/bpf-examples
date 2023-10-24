@@ -1142,6 +1142,14 @@ static void handle_missed_events(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "Lost %llu events on CPU %d\n", lost_cnt, cpu);
 }
 
+static bool ecncounters_empty(const struct ecn_counters *counters)
+{
+	static const struct ecn_counters empty = { 0 };
+
+	return memcmp(counters, &empty, sizeof(empty)) == 0;
+}
+
+
 static void print_counter_standard(FILE *stream, const char *name, __u64 val,
 				   bool *first)
 {
@@ -1173,6 +1181,19 @@ static void print_pktbytes_tuple_standard(FILE *stream, const char *tuple_name,
 	fprintf(stream, "%s=(", tuple_name);
 	print_counter_standard(stream, "pkts", pkts, &first);
 	print_counter_standard(stream, "bytes", bytes, &first);
+	fprintf(stream, ")");
+}
+
+static void print_ecncounters_standard(FILE *stream,
+				       const struct ecn_counters *counters)
+{
+	bool first = true;
+
+	fprintf(stream, "ECN=(");
+	print_counter_standard(stream, "Not-ECT", counters->no_ect, &first);
+	print_counter_standard(stream, "ECT1", counters->ect1, &first);
+	print_counter_standard(stream, "ECT0", counters->ect0, &first);
+	print_counter_standard(stream, "CE", counters->ce, &first);
 	fprintf(stream, ")");
 }
 
@@ -1210,6 +1231,11 @@ print_globalcounters_standard(FILE *stream, __u64 t_monotonic,
 	if (first) // Global counters are empty
 		fprintf(stream, "pkts=0, bytes=0");
 
+	if (!ecncounters_empty(&counters->ecn)) {
+		fprintf(stream, ", ");
+		print_ecncounters_standard(stream, &counters->ecn);
+	}
+
 	fprintf(stream, "\n");
 }
 
@@ -1231,6 +1257,17 @@ static void print_pktbytes_tuple_json(json_writer_t *jctx,
 	jsonw_start_object(jctx);
 	print_counter_json(jctx, "packets", pkts);
 	print_counter_json(jctx, "bytes", bytes);
+	jsonw_end_object(jctx);
+}
+
+static void print_ecncounters_json(json_writer_t *jctx,
+				   const struct ecn_counters *counters)
+{
+	jsonw_start_object(jctx);
+	print_counter_json(jctx, "no_ECT", counters->no_ect);
+	print_counter_json(jctx, "ECT1", counters->ect1);
+	print_counter_json(jctx, "ECT0", counters->ect0);
+	print_counter_json(jctx, "CE", counters->ce);
 	jsonw_end_object(jctx);
 }
 
@@ -1269,6 +1306,9 @@ static void print_globalcounters_json(json_writer_t *jctx, __u64 t_monotonic,
 
 	jsonw_end_object(jctx);
 
+	jsonw_name(jctx, "ecn_counters");
+	print_ecncounters_json(jctx, &counters->ecn);
+
 	jsonw_end_object(jctx);
 }
 
@@ -1281,6 +1321,15 @@ static void print_globalcounters(struct output_context *out_ctx,
 					      counters);
 	else if (out_ctx->jctx)
 		print_globalcounters_json(out_ctx->jctx, t_monotonic, counters);
+}
+
+static void update_ecncounters(struct ecn_counters *to,
+			       const struct ecn_counters *from)
+{
+	to->no_ect += from->no_ect;
+	to->ect1 += from->ect1;
+	to->ect0 += from->ect0;
+	to->ce += from->ce;
 }
 
 static void update_globalcounters(struct global_counters *to,
@@ -1302,6 +1351,8 @@ static void update_globalcounters(struct global_counters *to,
 	for (proto = 0; proto < N_IPPROTOS; proto++) {
 		to->other_ipprotos[proto] += from->other_ipprotos[proto];
 	}
+
+	update_ecncounters(&to->ecn, &from->ecn);
 }
 
 static void merge_percpu_globalcounters(struct global_counters *merged,
@@ -1315,6 +1366,16 @@ static void merge_percpu_globalcounters(struct global_counters *merged,
 	for (cpu = 0; cpu < n_cpus; cpu++) {
 		update_globalcounters(merged, &percpu[cpu]);
 	}
+}
+
+static void diff_ecncounters(struct ecn_counters *diff,
+			     const struct ecn_counters *prev,
+			     const struct ecn_counters *next)
+{
+	diff->no_ect = next->no_ect - prev->no_ect;
+	diff->ect1 = next->ect1 - prev->ect1;
+	diff->ect0 = next->ect0 - prev->ect0;
+	diff->ce = next->ce - prev->ce;
 }
 
 static void diff_globalcounters(struct global_counters *diff,
@@ -1338,6 +1399,8 @@ static void diff_globalcounters(struct global_counters *diff,
 		diff->other_ipprotos[proto] = next->other_ipprotos[proto] -
 					      prev->other_ipprotos[proto];
 	}
+
+	diff_ecncounters(&diff->ecn, &prev->ecn, &next->ecn);
 }
 
 static int report_globalcounters(struct output_context *out_ctx,

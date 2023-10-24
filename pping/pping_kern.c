@@ -321,7 +321,25 @@ get_dualflow_key_from_packet(struct packet_info *p_info)
 						 &p_info->reply_pid.flow;
 }
 
-static void update_global_counters(__u8 ipproto, __u32 pkt_len)
+static void update_ecn_counters(struct ecn_counters *counters, __u8 ecn)
+{
+	switch (ecn) {
+	case 0x0:
+		counters->no_ect++;
+		break;
+	case 0x1:
+		counters->ect1++;
+		break;
+	case 0x2:
+		counters->ect0++;
+		break;
+	case 0x3:
+		counters->ce++;
+		break;
+	}
+}
+
+static void update_global_counters(__u8 ipproto, __u32 pkt_len, __u8 ecn)
 {
 	if (!config.agg_rtts)
 		return;
@@ -357,6 +375,19 @@ static void update_global_counters(__u8 ipproto, __u32 pkt_len)
 	default:
 		counters->other_ipprotos[ipproto]++;
 	}
+
+	if (ipproto > 0) // ECN not valid for non-IP traffic
+		update_ecn_counters(&counters->ecn, ecn);
+}
+
+static __u8 parse_ip_ecn(struct iphdr *iph)
+{
+	return iph->tos & 0x3;
+}
+
+static __u8 parse_ipv6_ecn(struct ipv6hdr *iph6)
+{
+	return (iph6->flow_lbl[0] >> 4) & 0x3;
 }
 
 /*
@@ -587,6 +618,8 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 		struct icmphdr *icmph;
 		struct icmp6hdr *icmp6h;
 	} transporth_ptr;
+	__u8 ecn;
+
 
 	__builtin_memset(p_info, 0, sizeof(*p_info));
 	p_info->time = bpf_ktime_get_ns();
@@ -615,14 +648,16 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 				 iph_ptr.iph->daddr);
 		p_info->ip_len = bpf_ntohs(iph_ptr.iph->tot_len);
 		p_info->ip_tos.ipv4_tos = iph_ptr.iph->tos;
+		ecn = parse_ip_ecn(iph_ptr.iph);
 	} else { // IPv6
 		p_info->pid.flow.saddr.ip = iph_ptr.ip6h->saddr;
 		p_info->pid.flow.daddr.ip = iph_ptr.ip6h->daddr;
 		p_info->ip_len = bpf_ntohs(iph_ptr.ip6h->payload_len);
 		p_info->ip_tos.ipv6_tos =
 			*(__be32 *)iph_ptr.ip6h & IPV6_FLOWINFO_MASK;
+		ecn = parse_ipv6_ecn(iph_ptr.ip6h);
 	}
-	update_global_counters(proto, p_info->pkt_len);
+	update_global_counters(proto, p_info->pkt_len, ecn);
 
 	// Parse identifer from suitable protocol
 	err = -1;
@@ -669,7 +704,7 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	return 0;
 
 err_not_ip:
-	update_global_counters(0, p_info->pkt_len);
+	update_global_counters(0, p_info->pkt_len, 0);
 	return -1;
 }
 

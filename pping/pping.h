@@ -265,7 +265,15 @@ struct aggregated_stats {
 	__u32 rtt_bins[RTT_AGG_NR_BINS];
 };
 
+struct ecn_counters {
+	__u64 no_ect;
+	__u64 ect1;
+	__u64 ect0;
+	__u64 ce;
+};
+
 struct global_counters {
+	struct ecn_counters ecn;
 	__u64 nonip_pkts;
 	__u64 nonip_bytes;
 	__u64 tcp_pkts;
