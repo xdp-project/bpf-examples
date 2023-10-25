@@ -30,6 +30,8 @@ typedef __u64 fixpoint64;
 #define RTT_AGG_NR_BINS 250UL
 #define RTT_AGG_BIN_WIDTH (4 * NS_PER_MS)
 
+#define N_IPPROTOS 256
+
 /* Special IPv4/IPv6 prefixes used for backup entries
  * To avoid them colliding with and actual traffic (causing the traffic to end
  * up in the backup entry), use prefixes from blocks reserved for documentation.
@@ -79,6 +81,12 @@ enum __attribute__((__packed__)) connection_state {
         CONNECTION_STATE_WAITOPEN,
         CONNECTION_STATE_OPEN,
         CONNECTION_STATE_CLOSED
+};
+
+enum pping_error {
+	PPING_ERR_PKTTS_STORE,
+	PPING_ERR_FLOW_CREATE,
+	PPING_ERR_AGGSUBNET_CREATE
 };
 
 struct bpf_config {
@@ -245,15 +253,51 @@ union pping_event {
 	struct map_clean_event map_clean_event;
 };
 
-struct aggregated_rtt_stats {
+struct traffic_counters {
+	__u64 tcp_ts_pkts;
+	__u64 tcp_ts_bytes;
+	__u64 tcp_nots_pkts;
+	__u64 tcp_nots_bytes;
+	__u64 other_pkts;
+	__u64 other_bytes;
+};
+
+struct aggregated_stats {
 	__u64 last_updated;
-	__u64 rx_packet_count;
-	__u64 tx_packet_count;
-	__u64 rx_byte_count;
-	__u64 tx_byte_count;
-	__u64 min;
-	__u64 max;
-	__u32 bins[RTT_AGG_NR_BINS];
+	struct traffic_counters rx_stats;
+	struct traffic_counters tx_stats;
+	__u64 rtt_min;
+	__u64 rtt_max;
+	__u32 rtt_bins[RTT_AGG_NR_BINS];
+};
+
+struct ecn_counters {
+	__u64 no_ect;
+	__u64 ect1;
+	__u64 ect0;
+	__u64 ce;
+};
+
+struct pping_error_counters {
+	__u64 pktts_store;
+	__u64 flow_create;
+	__u64 agg_subnet_create;
+};
+
+struct global_counters {
+	struct ecn_counters ecn;
+	struct pping_error_counters err;
+	__u64 nonip_pkts;
+	__u64 nonip_bytes;
+	__u64 tcp_pkts;
+	__u64 tcp_bytes;
+	__u64 udp_pkts;
+	__u64 udp_bytes;
+	__u64 icmp_pkts;
+	__u64 icmp_bytes;
+	__u64 icmp6_pkts;
+	__u64 icmp6_bytes;
+	__u32 other_ipprotos[N_IPPROTOS];
 };
 
 #endif

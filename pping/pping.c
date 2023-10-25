@@ -121,6 +121,12 @@ struct aggregation_maps {
 	int map_active_fd;
 	int map_v4_fd[2];
 	int map_v6_fd[2];
+	int map_globcnt_fd;
+};
+
+struct aggregation_context {
+	struct aggregation_maps maps;
+	struct global_counters prev_counters;
 };
 
 // Store configuration values in struct to easily pass around
@@ -130,7 +136,7 @@ struct pping_config {
 	struct bpf_tc_opts tc_egress_opts;
 	struct map_cleanup_args clean_args;
 	struct aggregation_config agg_conf;
-	struct aggregation_maps agg_maps;
+	struct aggregation_context agg_ctx;
 	struct output_context *out_ctx;
 	char *object_path;
 	char *ingress_prog;
@@ -869,21 +875,30 @@ static int format_ipprefix(char *buf, size_t size, int af,
 	return err;
 }
 
-static const char *proto_to_str(__u16 proto)
+static char *ipproto_to_str(char *buf, size_t size, __u8 proto)
 {
-	static char buf[8];
+	/* Rather than doing additional checks to ensure we return a null
+           terminated truncated string, just outright fail if passed buffer
+           is too small to fit largest possible string */
+	if (size < 7)
+		return NULL;
 
 	switch (proto) {
 	case IPPROTO_TCP:
-		return "TCP";
+		strcpy(buf, "TCP");
+		break;
 	case IPPROTO_ICMP:
-		return "ICMP";
+		strcpy(buf, "ICMP");
+		break;
 	case IPPROTO_ICMPV6:
-		return "ICMPv6";
+		strcpy(buf, "ICMPv6");
+		break;
 	default:
-		snprintf(buf, sizeof(buf), "%d", proto);
-		return buf;
+		snprintf(buf, size, "%d", proto);
+		break;
 	}
+
+	return buf;
 }
 
 static const char *flowevent_to_str(enum flow_event_type fe)
@@ -961,17 +976,22 @@ static void print_ns_datetime(FILE *stream, __u64 monotonic_ns)
 
 static void print_event_standard(FILE *stream, const union pping_event *e)
 {
+	char protostr[16];
+
 	if (e->event_type == EVENT_TYPE_RTT) {
 		print_ns_datetime(stream, e->rtt_event.timestamp);
 		fprintf(stream, " %.6g ms %.6g ms %s ",
 			(double)e->rtt_event.rtt / NS_PER_MS,
 			(double)e->rtt_event.min_rtt / NS_PER_MS,
-			proto_to_str(e->rtt_event.flow.proto));
+			ipproto_to_str(protostr, sizeof(protostr),
+				       e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stream, &e->rtt_event.flow);
 		fprintf(stream, "\n");
 	} else if (e->event_type == EVENT_TYPE_FLOW) {
 		print_ns_datetime(stream, e->flow_event.timestamp);
-		fprintf(stream, " %s ", proto_to_str(e->rtt_event.flow.proto));
+		fprintf(stream, " %s ",
+			ipproto_to_str(protostr, sizeof(protostr),
+				       e->rtt_event.flow.proto));
 		print_flow_ppvizformat(stream, &e->flow_event.flow);
 		fprintf(stream, " %s due to %s from %s\n",
 			flowevent_to_str(e->flow_event.flow_event_type),
@@ -1002,6 +1022,7 @@ static void print_common_fields_json(json_writer_t *ctx,
 	const struct network_tuple *flow = &e->rtt_event.flow;
 	char saddr[INET6_ADDRSTRLEN];
 	char daddr[INET6_ADDRSTRLEN];
+	char protostr[16];
 
 	format_ip_address(saddr, sizeof(saddr), flow->ipv, &flow->saddr.ip);
 	format_ip_address(daddr, sizeof(daddr), flow->ipv, &flow->daddr.ip);
@@ -1012,7 +1033,9 @@ static void print_common_fields_json(json_writer_t *ctx,
 	jsonw_hu_field(ctx, "src_port", ntohs(flow->saddr.port));
 	jsonw_string_field(ctx, "dest_ip", daddr);
 	jsonw_hu_field(ctx, "dest_port", ntohs(flow->daddr.port));
-	jsonw_string_field(ctx, "protocol", proto_to_str(flow->proto));
+	jsonw_string_field(ctx, "protocol",
+			   ipproto_to_str(protostr, sizeof(protostr),
+					  flow->proto));
 }
 
 static void print_rttevent_fields_json(json_writer_t *ctx,
@@ -1119,59 +1142,443 @@ static void handle_missed_events(void *ctx, int cpu, __u64 lost_cnt)
 	fprintf(stderr, "Lost %llu events on CPU %d\n", lost_cnt, cpu);
 }
 
-static bool aggregated_rtt_stats_empty(struct aggregated_rtt_stats *stats)
+static bool ecncounters_empty(const struct ecn_counters *counters)
 {
-	return stats->tx_packet_count == 0 && stats->rx_packet_count == 0;
+	static const struct ecn_counters empty = { 0 };
+
+	return memcmp(counters, &empty, sizeof(empty)) == 0;
 }
 
-static bool aggregated_rtt_stats_nortts(struct aggregated_rtt_stats *stats)
+static bool pping_errors_empty(const struct pping_error_counters *errors)
 {
-	return stats->max == 0;
+	static const struct pping_error_counters empty = { 0 };
+
+	return memcmp(errors, &empty, sizeof(empty)) == 0;
 }
 
-static __u64 aggregated_rtt_stats_maxbins(struct aggregated_rtt_stats *stats,
-					  __u64 bin_width, __u64 n_bins)
+static void print_counter_standard(FILE *stream, const char *name, __u64 val,
+				   bool *first)
 {
-	return stats->max / bin_width < n_bins ? stats->max / bin_width + 1 :
-						 n_bins;
+	if (val == 0)
+		return;
+
+	if (*first)
+		*first = false;
+	else
+		fprintf(stream, ", ");
+
+	fprintf(stream, "%s=%llu", name, val);
+}
+
+static void print_pktbytes_tuple_standard(FILE *stream, const char *tuple_name,
+					  __u64 pkts, __u64 bytes,
+					  bool *first_tuple)
+{
+	bool first = true;
+
+	if (pkts == 0)
+		return;
+
+	if (*first_tuple)
+		*first_tuple = false;
+	else
+		fprintf(stream, ", ");
+
+	fprintf(stream, "%s=(", tuple_name);
+	print_counter_standard(stream, "pkts", pkts, &first);
+	print_counter_standard(stream, "bytes", bytes, &first);
+	fprintf(stream, ")");
+}
+
+static void print_ecncounters_standard(FILE *stream,
+				       const struct ecn_counters *counters)
+{
+	bool first = true;
+
+	fprintf(stream, "ECN=(");
+	print_counter_standard(stream, "Not-ECT", counters->no_ect, &first);
+	print_counter_standard(stream, "ECT1", counters->ect1, &first);
+	print_counter_standard(stream, "ECT0", counters->ect0, &first);
+	print_counter_standard(stream, "CE", counters->ce, &first);
+	fprintf(stream, ")");
 }
 
 static void
-merge_percpu_aggreated_rtts(struct aggregated_rtt_stats *percpu_stats,
-			    struct aggregated_rtt_stats *merged_stats,
-			    int n_cpus, int n_bins)
+print_ppingerrors_standard(FILE *stream,
+			   const struct pping_error_counters *errors)
 {
-	int i, bin;
+	bool first = true;
 
-	memset(merged_stats, 0, sizeof(*merged_stats));
+	fprintf(stream, "errors=(");
+	print_counter_standard(stream, "store-packet-ts", errors->pktts_store,
+			       &first);
+	print_counter_standard(stream, "create-flow-state", errors->flow_create,
+			       &first);
+	print_counter_standard(stream, "create-agg-subnet-state",
+			       errors->agg_subnet_create, &first);
+	fprintf(stream, ")");
+}
 
-	for (i = 0; i < n_cpus; i++) {
-		if (percpu_stats[i].last_updated > merged_stats->last_updated)
-			merged_stats->last_updated =
-				percpu_stats[i].last_updated;
+static void
+print_globalcounters_standard(FILE *stream, __u64 t_monotonic,
+			      const struct global_counters *counters)
+{
+	char protostr[16];
+	bool first = true;
+	int proto;
 
-		merged_stats->rx_packet_count +=
-			percpu_stats[i].rx_packet_count;
-		merged_stats->tx_packet_count +=
-			percpu_stats[i].tx_packet_count;
-		merged_stats->rx_byte_count += percpu_stats[i].rx_byte_count;
-		merged_stats->tx_byte_count += percpu_stats[i].tx_byte_count;
+	print_ns_datetime(stream, t_monotonic);
+	fprintf(stream, ": ");
 
-		if (aggregated_rtt_stats_nortts(&percpu_stats[i]))
-			continue;
+	print_pktbytes_tuple_standard(stream, "non-IP", counters->nonip_pkts,
+				      counters->nonip_bytes, &first);
+	print_pktbytes_tuple_standard(stream, "TCP", counters->tcp_pkts,
+				      counters->tcp_bytes, &first);
+	print_pktbytes_tuple_standard(stream, "UDP", counters->udp_pkts,
+				      counters->udp_bytes, &first);
+	print_pktbytes_tuple_standard(stream, "ICMP", counters->icmp_pkts,
+				      counters->icmp_bytes, &first);
+	print_pktbytes_tuple_standard(stream, "ICMPv6", counters->icmp6_pkts,
+				      counters->icmp6_bytes, &first);
 
-		if (percpu_stats[i].max > merged_stats->max)
-			merged_stats->max = percpu_stats[i].max;
-		if (merged_stats->min == 0 ||
-		    percpu_stats[i].min < merged_stats->min)
-			merged_stats->min = percpu_stats[i].min;
+	for (proto = 0; proto < N_IPPROTOS; proto++) {
+		if (counters->other_ipprotos[proto] > 0) { // Check to avoid uncecessary ipproto_to_str
+			ipproto_to_str(protostr, sizeof(protostr), proto);
+			print_pktbytes_tuple_standard(
+				stream, protostr,
+				counters->other_ipprotos[proto], 0, &first);
+		}
+	}
 
-		for (bin = 0; bin < n_bins; bin++)
-			merged_stats->bins[bin] += percpu_stats[i].bins[bin];
+	if (first) // Global counters are empty
+		fprintf(stream, "pkts=0, bytes=0");
+
+	if (!ecncounters_empty(&counters->ecn)) {
+		fprintf(stream, ", ");
+		print_ecncounters_standard(stream, &counters->ecn);
+	}
+
+	if (!pping_errors_empty(&counters->err)) {
+		fprintf(stream, ", ");
+		print_ppingerrors_standard(stream, &counters->err);
+	}
+
+	fprintf(stream, "\n");
+}
+
+static void print_counter_json(json_writer_t *jctx, const char *name, __u64 val)
+{
+	if (val > 0)
+		jsonw_u64_field(jctx, name, val);
+}
+
+static void print_pktbytes_tuple_json(json_writer_t *jctx,
+				      const char *tuple_name, __u64 pkts,
+				      __u64 bytes)
+{
+	// Don't include empty pkt/byte tuples
+	if (pkts == 0)
+		return;
+
+	jsonw_name(jctx, tuple_name);
+	jsonw_start_object(jctx);
+	print_counter_json(jctx, "packets", pkts);
+	print_counter_json(jctx, "bytes", bytes);
+	jsonw_end_object(jctx);
+}
+
+static void print_ecncounters_json(json_writer_t *jctx,
+				   const struct ecn_counters *counters)
+{
+	jsonw_start_object(jctx);
+	print_counter_json(jctx, "no_ECT", counters->no_ect);
+	print_counter_json(jctx, "ECT1", counters->ect1);
+	print_counter_json(jctx, "ECT0", counters->ect0);
+	print_counter_json(jctx, "CE", counters->ce);
+	jsonw_end_object(jctx);
+}
+
+static void print_ppingerrors_json(json_writer_t *jctx,
+				   const struct pping_error_counters *errors)
+{
+	jsonw_start_object(jctx);
+	print_counter_json(jctx, "store_packet_ts", errors->pktts_store);
+	print_counter_json(jctx, "create_flow_state", errors->flow_create);
+	print_counter_json(jctx, "create_agg_subnet_state",
+			   errors->agg_subnet_create);
+	jsonw_end_object(jctx);
+}
+
+static void print_globalcounters_json(json_writer_t *jctx, __u64 t_monotonic,
+				      const struct global_counters *counters)
+{
+	char protostr[16];
+	int proto;
+
+	jsonw_start_object(jctx);
+	jsonw_u64_field(jctx, "timestamp",
+			convert_monotonic_to_realtime(t_monotonic));
+
+	jsonw_name(jctx, "protocol_counters");
+	jsonw_start_object(jctx);
+
+	print_pktbytes_tuple_json(jctx, "non_IP", counters->nonip_pkts,
+				  counters->nonip_bytes);
+	print_pktbytes_tuple_json(jctx, "TCP", counters->tcp_pkts,
+				  counters->tcp_bytes);
+	print_pktbytes_tuple_json(jctx, "UDP", counters->udp_pkts,
+				  counters->udp_bytes);
+	print_pktbytes_tuple_json(jctx, "ICMP", counters->icmp_pkts,
+				  counters->icmp_bytes);
+	print_pktbytes_tuple_json(jctx, "ICMPv6", counters->icmp6_pkts,
+				  counters->icmp6_bytes);
+
+	for (proto = 0; proto < N_IPPROTOS; proto++) {
+		if (counters->other_ipprotos[proto] > 0) {
+			ipproto_to_str(protostr, sizeof(protostr), proto);
+			print_pktbytes_tuple_json(
+				jctx, protostr, counters->other_ipprotos[proto],
+				0);
+		}
+	}
+
+	jsonw_end_object(jctx);
+
+	jsonw_name(jctx, "ecn_counters");
+	print_ecncounters_json(jctx, &counters->ecn);
+
+	jsonw_name(jctx, "errors");
+	print_ppingerrors_json(jctx, &counters->err);
+
+	jsonw_end_object(jctx);
+}
+
+static void print_globalcounters(struct output_context *out_ctx,
+				 __u64 t_monotonic,
+				 const struct global_counters *counters)
+{
+	if (out_ctx->format == PPING_OUTPUT_STANDARD)
+		print_globalcounters_standard(out_ctx->stream, t_monotonic,
+					      counters);
+	else if (out_ctx->jctx)
+		print_globalcounters_json(out_ctx->jctx, t_monotonic, counters);
+}
+
+static void update_ecncounters(struct ecn_counters *to,
+			       const struct ecn_counters *from)
+{
+	to->no_ect += from->no_ect;
+	to->ect1 += from->ect1;
+	to->ect0 += from->ect0;
+	to->ce += from->ce;
+}
+
+static void update_pping_errors(struct pping_error_counters *to,
+				const struct pping_error_counters *from)
+{
+	to->pktts_store += from->pktts_store;
+	to->flow_create += from->flow_create;
+	to->agg_subnet_create += from->agg_subnet_create;
+}
+
+static void update_globalcounters(struct global_counters *to,
+				  const struct global_counters *from)
+{
+	int proto;
+
+	to->nonip_pkts += from->nonip_pkts;
+	to->nonip_bytes += from->nonip_bytes;
+	to->tcp_pkts += from->tcp_pkts;
+	to->tcp_bytes += from->tcp_bytes;
+	to->udp_pkts += from->udp_pkts;
+	to->udp_bytes += from->udp_bytes;
+	to->icmp_pkts += from->icmp_pkts;
+	to->icmp_bytes += from->icmp_bytes;
+	to->icmp6_pkts += from->icmp6_pkts;
+	to->icmp6_bytes += from->icmp6_bytes;
+
+	for (proto = 0; proto < N_IPPROTOS; proto++) {
+		to->other_ipprotos[proto] += from->other_ipprotos[proto];
+	}
+
+	update_ecncounters(&to->ecn, &from->ecn);
+	update_pping_errors(&to->err, &from->err);
+}
+
+static void merge_percpu_globalcounters(struct global_counters *merged,
+					const struct global_counters *percpu,
+					int n_cpus)
+{
+	int cpu;
+
+	memset(merged, 0, sizeof(*merged));
+
+	for (cpu = 0; cpu < n_cpus; cpu++) {
+		update_globalcounters(merged, &percpu[cpu]);
 	}
 }
 
-static void clear_aggregated_rtts(struct aggregated_rtt_stats *stats)
+static void diff_ecncounters(struct ecn_counters *diff,
+			     const struct ecn_counters *prev,
+			     const struct ecn_counters *next)
+{
+	diff->no_ect = next->no_ect - prev->no_ect;
+	diff->ect1 = next->ect1 - prev->ect1;
+	diff->ect0 = next->ect0 - prev->ect0;
+	diff->ce = next->ce - prev->ce;
+}
+
+static void diff_pping_errors(struct pping_error_counters *diff,
+			      const struct pping_error_counters *prev,
+			      const struct pping_error_counters *next)
+{
+	diff->pktts_store = next->pktts_store - prev->pktts_store;
+	diff->flow_create = next->flow_create - prev->flow_create;
+	diff->agg_subnet_create =
+		next->agg_subnet_create - prev->agg_subnet_create;
+}
+
+static void diff_globalcounters(struct global_counters *diff,
+				const struct global_counters *prev,
+				const struct global_counters *next)
+{
+	int proto;
+
+	diff->nonip_pkts = next->nonip_pkts - prev->nonip_pkts;
+	diff->nonip_bytes = next->nonip_bytes - prev->nonip_bytes;
+	diff->tcp_pkts = next->tcp_pkts - prev->tcp_pkts;
+	diff->tcp_bytes = next->tcp_bytes - prev->tcp_bytes;
+	diff->udp_pkts = next->udp_pkts - prev->udp_pkts;
+	diff->udp_bytes = next->udp_bytes - prev->udp_bytes;
+	diff->icmp_pkts = next->icmp_pkts - prev->icmp_pkts;
+	diff->icmp_bytes = next->icmp_bytes - prev->icmp_bytes;
+	diff->icmp6_pkts = next->icmp6_pkts - prev->icmp6_pkts;
+	diff->icmp6_bytes = next->icmp6_bytes - prev->icmp6_bytes;
+
+	for (proto = 0; proto < N_IPPROTOS; proto++) {
+		diff->other_ipprotos[proto] = next->other_ipprotos[proto] -
+					      prev->other_ipprotos[proto];
+	}
+
+	diff_ecncounters(&diff->ecn, &prev->ecn, &next->ecn);
+	diff_pping_errors(&diff->err, &prev->err, &next->err);
+}
+
+static int report_globalcounters(struct output_context *out_ctx,
+				 struct aggregation_context *agg_ctx)
+{
+	int n_cpus = libbpf_num_possible_cpus();
+	__u64 t = get_time_ns(CLOCK_MONOTONIC);
+	struct global_counters tot_cnt, diff;
+	struct global_counters *cpu_cnt;
+	__u32 key = 0;
+	int err;
+
+	cpu_cnt = calloc(n_cpus, sizeof(*cpu_cnt));
+	if (!cpu_cnt)
+		return -errno;
+
+	err = bpf_map_lookup_elem(agg_ctx->maps.map_globcnt_fd, &key, cpu_cnt);
+	if (err)
+		goto exit;
+
+	merge_percpu_globalcounters(&tot_cnt, cpu_cnt, n_cpus);
+	diff_globalcounters(&diff, &agg_ctx->prev_counters, &tot_cnt);
+	agg_ctx->prev_counters = tot_cnt;
+
+	print_globalcounters(out_ctx, t, &diff);
+
+exit:
+	free(cpu_cnt);
+	return err;
+}
+
+static __u64 sum_trafficcounts_pkts(const struct traffic_counters *counters)
+{
+	return counters->tcp_ts_pkts + counters->tcp_nots_pkts +
+	       counters->other_pkts;
+}
+
+static __u64 sum_trafficcounts_bytes(const struct traffic_counters *counters)
+{
+	return counters->tcp_ts_bytes + counters->tcp_nots_bytes +
+	       counters->other_bytes;
+}
+
+static bool trafficcounts_empty(const struct traffic_counters *counters)
+{
+	static const struct traffic_counters empty = { 0 };
+
+	return memcmp(counters, &empty, sizeof(empty)) == 0;
+}
+
+static bool aggregated_stats_empty(struct aggregated_stats *stats)
+{
+	return trafficcounts_empty(&stats->rx_stats) &&
+	       trafficcounts_empty(&stats->tx_stats);
+}
+
+static bool aggregated_stats_nortts(struct aggregated_stats *stats)
+{
+	return stats->rtt_max == 0;
+}
+
+static __u64 aggregated_stats_maxbins(struct aggregated_stats *stats,
+				      __u64 bin_width, __u64 n_bins)
+{
+	return stats->rtt_max / bin_width < n_bins ?
+		       stats->rtt_max / bin_width + 1 :
+		       n_bins;
+}
+
+static void add_trafficcounts(struct traffic_counters *to,
+			      const struct traffic_counters *from)
+{
+	to->tcp_ts_pkts += from->tcp_ts_pkts;
+	to->tcp_ts_bytes += from->tcp_ts_bytes;
+	to->tcp_nots_pkts += from->tcp_nots_pkts;
+	to->tcp_nots_bytes += from->tcp_nots_bytes;
+	to->other_pkts += from->other_pkts;
+	to->other_bytes += from->other_bytes;
+}
+
+static void update_aggregated_stats(struct aggregated_stats *to_stats,
+				    struct aggregated_stats *from_stats,
+				    int n_bins)
+{
+	int bin;
+
+	if (from_stats->last_updated > to_stats->last_updated)
+		to_stats->last_updated = from_stats->last_updated;
+
+	add_trafficcounts(&to_stats->rx_stats, &from_stats->rx_stats);
+	add_trafficcounts(&to_stats->tx_stats, &from_stats->tx_stats);
+
+	if (aggregated_stats_nortts(from_stats))
+		return;
+
+	if (from_stats->rtt_max > to_stats->rtt_max)
+		to_stats->rtt_max = from_stats->rtt_max;
+	if (to_stats->rtt_min == 0 || from_stats->rtt_min < to_stats->rtt_min)
+		to_stats->rtt_min = from_stats->rtt_min;
+
+	for (bin = 0; bin < n_bins; bin++)
+		to_stats->rtt_bins[bin] += from_stats->rtt_bins[bin];
+}
+
+static void merge_percpu_aggreated_stats(struct aggregated_stats *percpu_stats,
+					 struct aggregated_stats *merged_stats,
+					 int n_cpus, int n_bins)
+{
+	int i;
+
+	memset(merged_stats, 0, sizeof(*merged_stats));
+
+	for (i = 0; i < n_cpus; i++)
+		update_aggregated_stats(merged_stats, &percpu_stats[i], n_bins);
+}
+
+static void clear_aggregated_stats(struct aggregated_stats *stats)
 {
 	__u64 last_updated = stats->last_updated;
 	memset(stats, 0, sizeof(*stats));
@@ -1216,81 +1623,98 @@ static void print_aggmetadata(struct output_context *out_ctx,
 		print_aggmetadata_json(out_ctx->jctx, agg_conf);
 }
 
-static void print_aggrtts_standard(FILE *stream, __u64 t, const char *prefixstr,
-				   struct aggregated_rtt_stats *rtt_stats,
-				   struct aggregation_config *agg_conf)
+static void print_aggstats_standard(FILE *stream, __u64 t,
+				    const char *prefixstr,
+				    struct aggregated_stats *stats,
+				    struct aggregation_config *agg_conf)
 {
 	__u64 bw = agg_conf->bin_width;
-	__u64 nb = aggregated_rtt_stats_maxbins(rtt_stats, bw, agg_conf->n_bins);
+	__u64 nb = aggregated_stats_maxbins(stats, bw, agg_conf->n_bins);
 
 	print_ns_datetime(stream, t);
 	fprintf(stream,
 		": %s -> rxpkts=%llu, rxbytes=%llu, txpkts=%llu, txbytes=%llu",
-		prefixstr, rtt_stats->rx_packet_count, rtt_stats->rx_byte_count,
-		rtt_stats->tx_packet_count, rtt_stats->tx_byte_count);
+		prefixstr, sum_trafficcounts_pkts(&stats->rx_stats),
+		sum_trafficcounts_bytes(&stats->rx_stats),
+		sum_trafficcounts_pkts(&stats->tx_stats),
+		sum_trafficcounts_bytes(&stats->tx_stats));
 
-	if (aggregated_rtt_stats_nortts(rtt_stats))
+	if (aggregated_stats_nortts(stats))
 		goto exit;
 
 	fprintf(stream,
 		", rtt-count=%llu, min=%.6g ms, mean=%g ms, median=%g ms, p95=%g ms, max=%.6g ms",
-		lhist_count(rtt_stats->bins, nb),
-		(double)rtt_stats->min / NS_PER_MS,
-		lhist_mean(rtt_stats->bins, nb, bw, 0) / NS_PER_MS,
-		lhist_percentile(rtt_stats->bins, 50, nb, bw, 0) / NS_PER_MS,
-		lhist_percentile(rtt_stats->bins, 95, nb, bw, 0) / NS_PER_MS,
-		(double)rtt_stats->max / NS_PER_MS);
+		lhist_count(stats->rtt_bins, nb),
+		(double)stats->rtt_min / NS_PER_MS,
+		lhist_mean(stats->rtt_bins, nb, bw, 0) / NS_PER_MS,
+		lhist_percentile(stats->rtt_bins, 50, nb, bw, 0) / NS_PER_MS,
+		lhist_percentile(stats->rtt_bins, 95, nb, bw, 0) / NS_PER_MS,
+		(double)stats->rtt_max / NS_PER_MS);
 
 exit:
 	fprintf(stream, "\n");
 }
 
-static void print_aggrtts_json(json_writer_t *ctx, __u64 t,
-			       const char *prefixstr,
-			       struct aggregated_rtt_stats *rtt_stats,
-			       struct aggregation_config *agg_conf)
+static void print_trafficcount_json(json_writer_t *jctx,
+				    const struct traffic_counters *counters)
+{
+	jsonw_start_object(jctx);
+
+	print_pktbytes_tuple_json(jctx, "TCP_TS", counters->tcp_ts_pkts,
+				  counters->tcp_ts_bytes);
+	print_pktbytes_tuple_json(jctx, "TCP_noTS", counters->tcp_nots_pkts,
+				  counters->tcp_nots_bytes);
+	print_pktbytes_tuple_json(jctx, "other", counters->other_pkts,
+				  counters->other_bytes);
+	jsonw_end_object(jctx);
+}
+
+static void print_aggstats_json(json_writer_t *ctx, __u64 t,
+				const char *prefixstr,
+				struct aggregated_stats *stats,
+				struct aggregation_config *agg_conf)
 {
 	__u64 bw = agg_conf->bin_width;
-	__u64 nb = aggregated_rtt_stats_maxbins(rtt_stats, bw, agg_conf->n_bins);
+	__u64 nb = aggregated_stats_maxbins(stats, bw, agg_conf->n_bins);
 	int i;
 
 	jsonw_start_object(ctx);
 	jsonw_u64_field(ctx, "timestamp", convert_monotonic_to_realtime(t));
 	jsonw_string_field(ctx, "ip_prefix", prefixstr);
 
-	jsonw_u64_field(ctx, "rx_packets", rtt_stats->rx_packet_count);
-	jsonw_u64_field(ctx, "tx_packets", rtt_stats->tx_packet_count);
-	jsonw_u64_field(ctx, "rx_bytes", rtt_stats->rx_byte_count);
-	jsonw_u64_field(ctx, "tx_bytes", rtt_stats->tx_byte_count);
+	jsonw_name(ctx, "rx_stats");
+	print_trafficcount_json(ctx, &stats->rx_stats);
+	jsonw_name(ctx, "tx_stats");
+	print_trafficcount_json(ctx, &stats->tx_stats);
 
-	if (aggregated_rtt_stats_nortts(rtt_stats))
+	if (aggregated_stats_nortts(stats))
 		goto exit;
 
-	jsonw_u64_field(ctx, "count_rtt", lhist_count(rtt_stats->bins, nb));
-	jsonw_u64_field(ctx, "min_rtt", rtt_stats->min);
+	jsonw_u64_field(ctx, "count_rtt", lhist_count(stats->rtt_bins, nb));
+	jsonw_u64_field(ctx, "min_rtt", stats->rtt_min);
 	jsonw_float_field(ctx, "mean_rtt",
-			  lhist_mean(rtt_stats->bins, nb, bw, 0));
+			  lhist_mean(stats->rtt_bins, nb, bw, 0));
 	jsonw_float_field(ctx, "median_rtt",
-			  lhist_percentile(rtt_stats->bins, 50, nb, bw, 0));
+			  lhist_percentile(stats->rtt_bins, 50, nb, bw, 0));
 	jsonw_float_field(ctx, "p95_rtt",
-			  lhist_percentile(rtt_stats->bins, 95, nb, bw, 0));
-	jsonw_u64_field(ctx, "max_rtt", rtt_stats->max);
+			  lhist_percentile(stats->rtt_bins, 95, nb, bw, 0));
+	jsonw_u64_field(ctx, "max_rtt", stats->rtt_max);
 
 	jsonw_name(ctx, "histogram");
 	jsonw_start_array(ctx);
 	for (i = 0; i < nb; i++)
-		jsonw_uint(ctx, rtt_stats->bins[i]);
+		jsonw_uint(ctx, stats->rtt_bins[i]);
 	jsonw_end_array(ctx);
 
 exit:
 	jsonw_end_object(ctx);
 }
 
-static void print_aggregated_rtts(struct output_context *out_ctx, __u64 t,
-				  struct ipprefix_key *prefix, int af,
-				  __u8 prefix_len,
-				  struct aggregated_rtt_stats *rtt_stats,
-				  struct aggregation_config *agg_conf)
+static void print_aggregated_stats(struct output_context *out_ctx, __u64 t,
+				   struct ipprefix_key *prefix, int af,
+				   __u8 prefix_len,
+				   struct aggregated_stats *stats,
+				   struct aggregation_config *agg_conf)
 {
 	char prefixstr[INET6_PREFIXSTRLEN] = { 0 };
 
@@ -1300,11 +1724,11 @@ static void print_aggregated_rtts(struct output_context *out_ctx, __u64 t,
 	format_ipprefix(prefixstr, sizeof(prefixstr), af, prefix, prefix_len);
 
 	if (out_ctx->format == PPING_OUTPUT_STANDARD)
-		print_aggrtts_standard(out_ctx->stream, t, prefixstr, rtt_stats,
-				       agg_conf);
+		print_aggstats_standard(out_ctx->stream, t, prefixstr, stats,
+					agg_conf);
 	else if (out_ctx->jctx)
-		print_aggrtts_json(out_ctx->jctx, t, prefixstr, rtt_stats,
-				   agg_conf);
+		print_aggstats_json(out_ctx->jctx, t, prefixstr, stats,
+				    agg_conf);
 }
 
 // Stolen from BPF selftests
@@ -1342,13 +1766,13 @@ static int switch_agg_map(int map_active_fd)
 	return prev_map;
 }
 
-static void report_aggregated_rtt_mapentry(
+static void report_aggregated_stats_mapentry(
 	struct output_context *out_ctx, struct ipprefix_key *prefix,
-	struct aggregated_rtt_stats *percpu_stats, int n_cpus, int af,
+	struct aggregated_stats *percpu_stats, int n_cpus, int af,
 	__u8 prefix_len, __u64 t_monotonic, struct aggregation_config *agg_conf,
 	bool *del_entry)
 {
-	struct aggregated_rtt_stats merged_stats;
+	struct aggregated_stats merged_stats;
 	struct ipprefix_key backup_key = { 0 };
 	int i;
 
@@ -1359,8 +1783,8 @@ static void report_aggregated_rtt_mapentry(
 		prefix_len = 0;
 	}
 
-	merge_percpu_aggreated_rtts(percpu_stats, &merged_stats, n_cpus,
-				    agg_conf->n_bins);
+	merge_percpu_aggreated_stats(percpu_stats, &merged_stats, n_cpus,
+				     agg_conf->n_bins);
 
 	if (prefix_len > 0 && // Pointless deleting /0 entry, and ensures backup keys are never deleted
 	    agg_conf->timeout_interval > 0 &&
@@ -1371,24 +1795,25 @@ static void report_aggregated_rtt_mapentry(
 	else
 		*del_entry = false;
 
-	// Only print and clear prefixes which have RTT samples
-	if (!aggregated_rtt_stats_empty(&merged_stats)) {
-		print_aggregated_rtts(out_ctx, t_monotonic, prefix, af,
-				      prefix_len, &merged_stats, agg_conf);
+	// Only print and clear prefixes which have seen traffic
+	if (!aggregated_stats_empty(&merged_stats)) {
+		print_aggregated_stats(out_ctx, t_monotonic, prefix, af,
+				       prefix_len, &merged_stats, agg_conf);
 
 		// Clear out the reported stats
 		if (!*del_entry)
 			for (i = 0; i < n_cpus; i++) {
-				clear_aggregated_rtts(&percpu_stats[i]);
+				clear_aggregated_stats(&percpu_stats[i]);
 			}
 	}
 }
 
-static int report_aggregated_rtt_map(struct output_context *out_ctx, int map_fd,
-				     int af, __u8 prefix_len, __u64 t_monotonic,
-				     struct aggregation_config *agg_conf)
+static int report_aggregated_stats_map(struct output_context *out_ctx,
+				       int map_fd, int af, __u8 prefix_len,
+				       __u64 t_monotonic,
+				       struct aggregation_config *agg_conf)
 {
-	struct aggregated_rtt_stats *values = NULL;
+	struct aggregated_stats *values = NULL;
 	void *keys = NULL, *del_keys = NULL;
 	int n_cpus = libbpf_num_possible_cpus();
 	size_t keysize = af == AF_INET ? sizeof(__u32) : sizeof(__u64);
@@ -1419,7 +1844,7 @@ static int report_aggregated_rtt_map(struct output_context *out_ctx, int map_fd,
 		}
 
 		for (i = 0; i < count; i++) {
-			report_aggregated_rtt_mapentry(
+			report_aggregated_stats_mapentry(
 				out_ctx, keys + i * keysize,
 				values + i * n_cpus, n_cpus, af, prefix_len,
 				t_monotonic, agg_conf, &del_key);
@@ -1451,26 +1876,32 @@ exit:
 	return err;
 }
 
-static int report_aggregated_rtts(struct output_context *out_ctx,
-				  struct aggregation_maps *maps,
-				  struct aggregation_config *agg_conf)
+static int report_aggregated_stats(struct output_context *out_ctx,
+				   struct aggregation_context *agg_ctx,
+				   struct aggregation_config *agg_conf)
 {
 	__u64 t = get_time_ns(CLOCK_MONOTONIC);
 	int err, map_idx;
 
-	map_idx = switch_agg_map(maps->map_active_fd);
+	map_idx = switch_agg_map(agg_ctx->maps.map_active_fd);
 	if (map_idx < 0)
 		return map_idx;
 
-	err = report_aggregated_rtt_map(out_ctx, maps->map_v4_fd[map_idx],
-					AF_INET, agg_conf->ipv4_prefix_len, t,
-					agg_conf);
+	err = report_aggregated_stats_map(out_ctx,
+					  agg_ctx->maps.map_v4_fd[map_idx],
+					  AF_INET, agg_conf->ipv4_prefix_len, t,
+					  agg_conf);
 	if (err)
 		return err;
 
-	err = report_aggregated_rtt_map(out_ctx, maps->map_v6_fd[map_idx],
-					AF_INET6, agg_conf->ipv6_prefix_len, t,
-					agg_conf);
+	err = report_aggregated_stats_map(out_ctx,
+					  agg_ctx->maps.map_v6_fd[map_idx],
+					  AF_INET6, agg_conf->ipv6_prefix_len,
+					  t, agg_conf);
+	if (err)
+		return err;
+
+	err = report_globalcounters(out_ctx, agg_ctx);
 	return err;
 }
 
@@ -1838,15 +2269,17 @@ int fetch_aggregation_map_fds(struct bpf_object *obj,
 		bpf_object__find_map_fd_by_name(obj, "map_v6_agg1");
 	maps->map_v6_fd[1] =
 		bpf_object__find_map_fd_by_name(obj, "map_v6_agg2");
+	maps->map_globcnt_fd =
+		bpf_object__find_map_fd_by_name(obj, "map_global_counters");
 
 	if (maps->map_active_fd < 0 || maps->map_v4_fd[0] < 0 ||
 	    maps->map_v4_fd[1] < 0 || maps->map_v6_fd[0] < 0 ||
-	    maps->map_v6_fd[1] < 0) {
+	    maps->map_v6_fd[1] < 0 || maps->map_globcnt_fd < 0) {
 		fprintf(stderr,
-			"Unable to find aggregation maps (%d/%d/%d/%d/%d).\n",
+			"Unable to find aggregation maps (%d/%d/%d/%d/%d/%d).\n",
 			maps->map_active_fd, maps->map_v4_fd[0],
 			maps->map_v4_fd[1], maps->map_v6_fd[0],
-			maps->map_v6_fd[1]);
+			maps->map_v6_fd[1], maps->map_globcnt_fd);
 		return -ENOENT;
 	}
 
@@ -1856,7 +2289,7 @@ int fetch_aggregation_map_fds(struct bpf_object *obj,
 static int init_agg_backup_entries(struct aggregation_maps *maps, bool ipv4,
 				   bool ipv6)
 {
-	struct aggregated_rtt_stats *empty_stats;
+	struct aggregated_stats *empty_stats;
 	struct ipprefix_key key;
 	int instance, err = 0;
 
@@ -1923,14 +2356,17 @@ static int init_aggregation_timer(struct bpf_object *obj,
 {
 	int err, fd;
 
-	err = fetch_aggregation_map_fds(obj, &config->agg_maps);
+	memset(&config->agg_ctx.prev_counters, 0,
+	       sizeof(config->agg_ctx.prev_counters));
+
+	err = fetch_aggregation_map_fds(obj, &config->agg_ctx.maps);
 	if (err) {
 		fprintf(stderr, "Failed fetching aggregation maps: %s\n",
 			get_libbpf_strerror(err));
 		return err;
 	}
 
-	err = init_agg_backup_entries(&config->agg_maps,
+	err = init_agg_backup_entries(&config->agg_ctx.maps,
 				      config->agg_conf.ipv4_prefix_len > 0,
 				      config->agg_conf.ipv6_prefix_len > 0);
 	if (err) {
@@ -1954,7 +2390,7 @@ static int init_aggregation_timer(struct bpf_object *obj,
 
 static int handle_aggregation_timer(int timer_fd,
 				    struct output_context *out_ctx,
-				    struct aggregation_maps *maps,
+				    struct aggregation_context *agg_ctx,
 				    struct aggregation_config *agg_conf)
 {
 	__u64 timer_exps;
@@ -1972,7 +2408,7 @@ static int handle_aggregation_timer(int timer_fd,
 			timer_exps - 1);
 	}
 
-	err = report_aggregated_rtts(out_ctx, maps, agg_conf);
+	err = report_aggregated_stats(out_ctx, agg_ctx, agg_conf);
 	if (err) {
 		fprintf(stderr, "Failed reporting aggregated RTTs: %s\n",
 			get_libbpf_strerror(err));
@@ -2079,7 +2515,7 @@ static int epoll_poll_events(int epfd, struct pping_config *config,
 		case PPING_EPEVENT_TYPE_AGGTIMER:
 			err = handle_aggregation_timer(
 				events[i].data.u64 & PPING_EPEVENT_MASK,
-				config->out_ctx, &config->agg_maps,
+				config->out_ctx, &config->agg_ctx,
 				&config->agg_conf);
 			break;
 		case PPING_EPEVENT_TYPE_SIGNAL:

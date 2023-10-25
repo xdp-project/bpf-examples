@@ -270,3 +270,22 @@ replies are processed concurrently, it's possible one of them will
 update the flow-open information and emit a flow opening message, but
 another reply closing the flow without thinking it's ever been opened,
 thus not sending a flow closing message.
+
+### Reporting global counters
+While the global counters use per-CPU maps, and are therefore safe to
+concurrently update in the BPF programs, there is no synchronization
+between the BPF programs updating these stats and the user space
+fetching them. It is therefore possible that the user space reports
+these counters in an inconsistent state, i.e. a BPF program may only
+have updated a subset of all the counters it will update by the time
+the user space process fetches the map. For example, a BPF program
+could have updated the packet count but not the byte count when user
+space reports the stats. In practice these errors should be very
+small, and any updates missed in one report will be included in the
+next, i.e. it has eventual consistency.
+
+This problem could be avoided by using two instances of the maps and
+swapping between them (as done by the aggregation stats), however such
+a solution is a fair bit more complex, and has slightly more overhead
+(needs to perform an initial map lookup to determine which instance of
+a map it should update).
