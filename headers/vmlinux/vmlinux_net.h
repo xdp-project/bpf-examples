@@ -142,6 +142,7 @@ struct nf_conn {
 enum ip_conntrack_status {
 	/* Connection is confirmed: originating packet has left box */
 	IPS_CONFIRMED_BIT = 3,
+	IPS_CONFIRMED = (1 << IPS_CONFIRMED_BIT),
 };
 
 #endif /* __VMLINUX_NET_H__ */
