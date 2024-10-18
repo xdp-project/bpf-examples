@@ -5,6 +5,8 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/if_ether.h>
+#include <linux/if_pppox.h>
+#include <linux/ppp_defs.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/tcp.h>
@@ -22,6 +24,41 @@
 #include <xdp/parsing_helpers.h>
 #include "pping.h"
 #include "pping_debug_cleanup.h"
+
+/* To be moved to xdp/parsing_helpers.h */
+static __always_inline int parse_pppoehdr(struct hdr_cursor *nh, void *data_end,
+					  struct pppoe_hdr **pppoehdr)
+{
+	struct pppoe_hdr *ph = nh->pos;
+	__u8 *proto_byte;
+	__u16 ppp_proto;
+
+	if (ph + 1 > data_end)
+		return -1;
+
+	/* Must be a data frame */
+	if (ph->ver != 1 || ph->type != 1 || ph->code != 0)
+		return -1;
+
+	proto_byte = (void *)(ph + 1);
+	if (proto_byte + 1 > data_end)
+		return -1;
+
+	/* protocol compression, see ___ppp_decompress_proto() in the kernel */
+	if (*proto_byte & 0x01)
+		ppp_proto = *proto_byte;
+	else {
+		ppp_proto = (*proto_byte++) << 8;
+		if (proto_byte + 1 > data_end)
+			return -1;
+		ppp_proto |= *proto_byte;
+	}
+
+	nh->pos = proto_byte + 1;
+	*pppoehdr = ph;
+
+	return bpf_htons(ppp_proto); /* network-byte-order */
+}
 
 #ifndef AF_INET
 #define AF_INET 2
@@ -650,6 +687,17 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	p_info->time = bpf_ktime_get_ns();
 	p_info->pkt_len = pctx->pkt_len;
 	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
+
+	if (proto == bpf_htons(ETH_P_PPP_SES)) {
+		struct pppoe_hdr *ph;
+		int ppp_proto;
+
+		ppp_proto = parse_pppoehdr(&pctx->nh, pctx->data_end, &ph);
+		if (ppp_proto == bpf_htons(PPP_IP))
+			proto = bpf_htons(ETH_P_IP);
+		else if (ppp_proto == bpf_htons(PPP_IPV6))
+			proto = bpf_htons(ETH_P_IPV6);
+	}
 
 	// Parse IPv4/6 header
 	if (proto == bpf_htons(ETH_P_IP)) {
