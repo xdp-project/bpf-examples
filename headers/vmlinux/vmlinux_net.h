@@ -145,4 +145,8 @@ enum ip_conntrack_status {
 	IPS_CONFIRMED = (1 << IPS_CONFIRMED_BIT),
 };
 
+struct scm_timestamping_internal {
+        struct timespec64 ts[3];
+};
+
 #endif /* __VMLINUX_NET_H__ */
