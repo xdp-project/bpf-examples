@@ -11,4 +11,11 @@ typedef __u64 u64;
 
 typedef s64 ktime_t;
 
+typedef __s64 time64_t;
+
+struct timespec64 {
+        time64_t tv_sec;
+        long int tv_nsec;
+};
+
 #endif /* __VMLINUX_TYPES_H__ */
