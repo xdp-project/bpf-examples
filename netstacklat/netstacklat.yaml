@@ -1,0 +1,79 @@
+metrics:
+  histograms:
+    - name: netstack_latency_ip_start_seconds
+      help: Time for packet to reach the start of the IP-stack
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint
+    - name: netstack_latency_tcp_start_seconds
+      help: Time for packet to reach the start of the TCP stack
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint
+    - name: netstack_latency_udp_start_seconds
+      help: Time until packet to reach the start of the UDP stack
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint
+    - name: netstack_latency_tcp_sock_enqueued_seconds
+      help: Time until packet is queued to TCP socket
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint
+    - name: netstack_latency_udp_sock_enqueued_seconds
+      help: Time until packet is queued to UDP socket
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint
+    - name: netstack_latency_tcp_sock_read_seconds
+      help: Time until packet data is read from TCP socket
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint
+    - name: netstack_latency_udp_sock_read_seconds
+      help: Time until packet data is read from UDP socket
+      bucket_type: exp2
+      bucket_min: 0
+      bucket_max: 34
+      bucket_multiplier: 0.000000001 # nanoseconds to seconds
+      labels:
+        - name: bucket
+          size: 4
+          decoders:
+            - name: uint

@@ -33,4 +33,26 @@ sudo bpftrace -e '
 The eBPF part of the tool (`netstacklat.bpf.c`) is designed to be
 compatible with
 [ebpf_exporter](https://github.com/cloudflare/ebpf_exporter), so that
-the data can easily be exported to Prometheus.
+the data can easily be exported to Prometheus. The easiest way to use
+netstacklat together with ebpf-exporter is simply to point it to this
+directory, i.e.
+```console
+$ ebpf_exporter --config.dir=<path>/bpf-examples/netstacklat --config.names=netstacklat
+```
+
+Alternatively, you can copy over the files to ebpf-exporter's example
+repository.
+```console
+$ cp netstacklat.{bpf.c,h,yaml} -t <path>/ebpf_exporter/examples/
+# Fix up some header includes (e.g. "vmlinux_local.h" -> <vmlinux.h>
+$ make -C <path>/ebpf_exporter/examples build
+$ ebpf_exporter --config.dir=<path>/ebpf_exporter/examples --config.names
+```
+
+Note that when using together with ebpf-exporter, some of the
+functionality handled by netstacklat's userspace program will not be
+available. This includes setting the `TAI_OFFSET` constant in
+`netstacklat.bpf.c` to match your system's TAI offset (you can do this
+manually instead), and enabling RX timestamping by the kernel (see the
+`enable_sw_rx_tstamps()` function in `netstacklat.c` for an example of
+how to do this).
