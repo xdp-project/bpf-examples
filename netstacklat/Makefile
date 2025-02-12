@@ -5,6 +5,7 @@ BPF_TARGETS    := netstacklat.bpf
 BPF_SKEL_OBJ   := netstacklat.bpf.o
 
 EXTRA_DEPS += netstacklat.h bits.bpf.h
+LDLIBS     += -lm
 
 LIB_DIR = ../lib
 
