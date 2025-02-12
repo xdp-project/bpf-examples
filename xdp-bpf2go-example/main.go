@@ -14,6 +14,11 @@ import (
 )
 
 func main() {
+	// Check if running as root
+	if os.Geteuid() != 0 {
+		log.Fatal("This program must be run as root!")
+	}
+
 	// Remove resource limits for kernels <5.11.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("Removing memlock:", err)
@@ -26,7 +31,12 @@ func main() {
 	}
 	defer objs.Close()
 
-	ifname := "eno2" // Change this to an interface on your machine.
+	// Capture user input from command-line arguments
+	if len(os.Args) < 2 {
+		log.Fatal("Please provide a network interface name as an argument")
+	}
+	ifname := os.Args[1] // Get the interface name from the first argument
+
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
 		log.Fatalf("Getting interface %s: %s", ifname, err)
@@ -50,7 +60,6 @@ func main() {
 	for {
 		select {
 		case <-tick:
-			//    log.Print(objs.ProtocolCount)
 			printMap(objs.ProtocolCount)
 			if err != nil {
 				log.Fatal("Map lookup:", err)
