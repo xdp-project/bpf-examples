@@ -84,6 +84,20 @@ check_zlib()
     fi
 }
 
+check_libcap()
+{
+    if ${PKG_CONFIG} libcap --exists; then
+        echo "HAVE_LIBCAP:=y" >>$CONFIG
+        echo "yes"
+
+        echo 'CFLAGS += -DHAVE_LIBCAP' `${PKG_CONFIG} libcap --cflags` >> $CONFIG
+        echo 'LDLIBS += ' `${PKG_CONFIG} libcap --libs` >>$CONFIG
+    else
+        echo "missing - this is required"
+        return 1
+    fi
+}
+
 check_libmnl()
 {
     if ${PKG_CONFIG} libmnl --exists; then
@@ -261,6 +275,8 @@ quiet_config >> $CONFIG
 
 check_toolchain
 
+echo -n "libcap support: "
+check_libcap || exit 1
 echo -n "libmnl support: "
 check_libmnl || exit 1
 echo -n "libbpf support: "
