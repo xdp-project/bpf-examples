@@ -13,10 +13,12 @@ static const char *__doc__ =
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <linux/types.h>
+#include <linux/net_tstamp.h>
 
 #include "netstacklat.h"
 #include "netstacklat.bpf.skel.h"
@@ -460,6 +462,34 @@ static int report_stats(const struct netstacklat_bpf *obj)
 	return 0;
 }
 
+static int enable_sw_rx_tstamps(void)
+{
+	int tstamp_opt = SOF_TIMESTAMPING_RX_SOFTWARE;
+	int sock_fd, err;
+
+	sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock_fd < 0) {
+		err = -errno;
+		fprintf(stderr, "Failed opening socket: %s\n", strerror(-err));
+		return err;
+	}
+
+	err = setsockopt(sock_fd, SOL_SOCKET, SO_TIMESTAMPING, &tstamp_opt,
+			 sizeof(tstamp_opt));
+	if (err) {
+		err = -errno;
+		fprintf(stderr, "Failed setting SO_TIMESTAMPING option: %s\n",
+			strerror(-err));
+		goto err_socket;
+	}
+
+	return sock_fd;
+
+err_socket:
+	close(sock_fd);
+	return err;
+}
+
 static int init_signalfd(void)
 {
 	sigset_t mask;
@@ -622,10 +652,10 @@ static int poll_events(int epoll_fd, const struct netstacklat_bpf *obj)
 
 int main(int argc, char *argv[])
 {
+	int sig_fd, timer_fd, epoll_fd, sock_fd, err;
 	struct netstacklat_config config = {
 		.report_interval_s = 5,
 	};
-	int sig_fd, timer_fd, epoll_fd, err;
 	struct netstacklat_bpf *obj;
 	char errmsg[128];
 
@@ -636,19 +666,28 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	sock_fd = enable_sw_rx_tstamps();
+	if (sock_fd < 0) {
+		err = sock_fd;
+		fprintf(stderr,
+			"Failed enabling software RX timestamping: %s\n",
+			strerror(-err));
+		return EXIT_FAILURE;
+	}
+
 	obj = netstacklat_bpf__open_and_load();
 	if (!obj) {
 		err = libbpf_get_error(obj);
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed loading eBPF programs: %s\n", errmsg);
-		return EXIT_FAILURE;
+		goto exit_sockfd;
 	}
 
 	err = netstacklat_bpf__attach(obj);
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed to attach eBPF programs: %s\n", errmsg);
-		goto exit_destroy;
+		goto exit_destroy_bpf;
 	}
 
 	sig_fd = init_signalfd();
@@ -656,7 +695,7 @@ int main(int argc, char *argv[])
 		err = sig_fd;
 		fprintf(stderr, "Failed setting up signal handling: %s\n",
 			strerror(-err));
-		goto exit_detach;
+		goto exit_detach_bpf;
 	}
 
 	timer_fd = setup_timer(config.report_interval_s * NS_PER_S);
@@ -697,9 +736,11 @@ exit_timerfd:
 	close(timer_fd);
 exit_sigfd:
 	close(sig_fd);
-exit_detach:
+exit_detach_bpf:
 	netstacklat_bpf__detach(obj);
-exit_destroy:
+exit_destroy_bpf:
 	netstacklat_bpf__destroy(obj);
+exit_sockfd:
+	close(sock_fd);
 	return err ? EXIT_FAILURE : EXIT_SUCCESS;
 }
