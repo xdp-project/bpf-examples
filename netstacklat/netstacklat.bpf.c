@@ -11,7 +11,7 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
-static volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
+volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
 
 /*
  * To be compatible with ebpf-exporter, all histograms need a key struct whose final

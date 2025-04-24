@@ -14,6 +14,7 @@ static const char *__doc__ =
 #include <sys/timerfd.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/timex.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -490,6 +491,14 @@ err_socket:
 	return err;
 }
 
+static __s64 get_tai_offset(void)
+{
+	struct ntptimeval ntpt;
+
+	ntp_gettimex(&ntpt);
+	return ntpt.tai;
+}
+
 static int init_signalfd(void)
 {
 	sigset_t mask;
@@ -675,12 +684,21 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	obj = netstacklat_bpf__open_and_load();
+	obj = netstacklat_bpf__open();
 	if (!obj) {
 		err = libbpf_get_error(obj);
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
-		fprintf(stderr, "Failed loading eBPF programs: %s\n", errmsg);
+		fprintf(stderr, "Failed opening eBPF object file: %s\n", errmsg);
 		goto exit_sockfd;
+	}
+
+	obj->rodata->TAI_OFFSET = get_tai_offset() * NS_PER_S;
+
+	err = netstacklat_bpf__load(obj);
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed loading eBPF programs: %s\n", errmsg);
+		goto exit_destroy_bpf;
 	}
 
 	err = netstacklat_bpf__attach(obj);
