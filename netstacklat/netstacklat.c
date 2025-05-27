@@ -46,14 +46,20 @@ static const char *__doc__ =
 
 #define MAX_HOOK_PROGS 4
 
+// Maximum number of different pids that can be filtered for
+#define MAX_FILTER_PIDS 4096
+
 struct hook_prog_collection {
 	struct bpf_program *progs[MAX_HOOK_PROGS];
 	int nprogs;
 };
 
 struct netstacklat_config {
+	struct netstacklat_bpf_config bpf_conf;
 	double report_interval_s;
 	bool enabled_hooks[NETSTACKLAT_N_HOOKS];
+	int npids;
+	__u32 pids[MAX_FILTER_PIDS];
 };
 
 static const struct option long_options[] = {
@@ -62,6 +68,7 @@ static const struct option long_options[] = {
 	{ "list-probes",     no_argument,       NULL, 'l' },
 	{ "enable-probes",   required_argument, NULL, 'e' },
 	{ "disable-probes",  required_argument, NULL, 'd' },
+	{ "pids",            required_argument, NULL, 'p' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -302,6 +309,32 @@ static int parse_bounded_double(double *res, const char *str, double low,
 	return 0;
 }
 
+static int parse_bounded_long(long long *res, const char *str, long long low,
+			      long long high, const char *name)
+{
+	char *endptr;
+	errno = 0;
+
+	*res = strtoll(str, &endptr, 10);
+	if (endptr == str || strlen(str) != endptr - str) {
+		fprintf(stderr, "%s %s is not a valid integer\n", name, str);
+		return -EINVAL;
+	}
+
+	if (errno == ERANGE) {
+		fprintf(stderr, "%s %s overflowed\n", name, str);
+		return -ERANGE;
+	}
+
+	if (*res < low || *res > high) {
+		fprintf(stderr, "%s must be in range [%lld, %lld]\n", name, low,
+			high);
+		return -ERANGE;
+	}
+
+	return 0;
+}
+
 /*
  * Parses a comma-delimited string of hook-names, and sets the positions for
  * the hooks that appear in the string to true.
@@ -337,6 +370,39 @@ static int parse_hooks(bool hooks[NETSTACKLAT_N_HOOKS], const char *_str)
 	return 0;
 }
 
+static int parse_pids(size_t size, __u32 arr[size], const char *_str,
+		      const char *name)
+{
+	char *pidstr, *str;
+	char *tokp = NULL;
+	int err, i = 0;
+	long long val;
+
+	str = malloc(strlen(_str) + 1);
+	if (!str)
+		return -ENOMEM;
+	strcpy(str, _str);
+
+	pidstr = strtok_r(str, ",", &tokp);
+	while (pidstr && i < size) {
+		err = parse_bounded_long(&val, pidstr, 1, PID_MAX_LIMIT, name);
+		if (err)
+			goto exit;
+		arr[i] = val;
+
+		pidstr = strtok_r(NULL, ",", &tokp);
+		i++;
+	}
+
+	if (pidstr)
+		// Parsed size pids, but more still remain
+		err = -E2BIG;
+
+exit:
+	free(str);
+	return err ?: i;
+}
+
 static int parse_arguments(int argc, char *argv[],
 			   struct netstacklat_config *conf)
 {
@@ -345,6 +411,9 @@ static int parse_arguments(int argc, char *argv[],
 	int opt, err, ret, i;
 	char optstr[64];
 	double fval;
+
+	conf->npids = 0;
+	conf->bpf_conf.filter_pid = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -389,6 +458,16 @@ static int parse_arguments(int argc, char *argv[],
 			for (i = 1; i < NETSTACKLAT_N_HOOKS; i++)
 				conf->enabled_hooks[i] = !hooks[i];
 			hooks_off = true;
+			break;
+		case 'p': // filter-pids
+			ret = parse_pids(ARRAY_SIZE(conf->pids) - conf->npids,
+					 conf->pids + conf->npids, optarg,
+					 optval_to_longopt(opt)->name);
+			if (ret < 0)
+				return ret;
+
+			conf->npids += ret;
+			conf->bpf_conf.filter_pid = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
@@ -850,6 +929,24 @@ static int poll_events(int epoll_fd, const struct netstacklat_config *conf,
 	return err;
 }
 
+static int init_pidfilter_map(const struct netstacklat_bpf *obj,
+			      const struct netstacklat_config *conf)
+{
+	__u8 pid_ok_val = 1;
+	int map_fd, err;
+	__u32 i;
+
+	map_fd = bpf_map__fd(obj->maps.netstack_pidfilter);
+	for (i = 0; i < conf->npids; i++) {
+		err = bpf_map_update_elem(map_fd, &conf->pids[i], &pid_ok_val,
+					  0);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	int sig_fd, timer_fd, epoll_fd, sock_fd, err;
@@ -884,6 +981,7 @@ int main(int argc, char *argv[])
 	}
 
 	obj->rodata->TAI_OFFSET = get_tai_offset() * NS_PER_S;
+	obj->rodata->user_config = config.bpf_conf;
 
 	set_programs_to_load(&config, obj);
 
@@ -891,6 +989,14 @@ int main(int argc, char *argv[])
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed loading eBPF programs: %s\n", errmsg);
+		goto exit_destroy_bpf;
+	}
+
+	err = init_pidfilter_map(obj, &config);
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed filling the pid filter map: %s\n",
+			errmsg);
 		goto exit_destroy_bpf;
 	}
 

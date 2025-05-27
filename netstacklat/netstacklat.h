@@ -13,6 +13,9 @@
 
 #define NS_PER_S 1000000000
 
+// The highest possible PID on a Linux system (from /include/linux/threads.h)
+#define PID_MAX_LIMIT (4 * 1024 * 1024)
+
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 #endif
@@ -36,6 +39,11 @@ enum netstacklat_hook {
 	NETSTACKLAT_HOOK_TCP_SOCK_READ,
 	NETSTACKLAT_HOOK_UDP_SOCK_READ,
 	NETSTACKLAT_N_HOOKS,
+};
+
+struct netstacklat_bpf_config
+{
+	bool filter_pid;
 };
 
 #endif
