@@ -41,7 +41,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, PID_MAX_LIMIT);
 	__type(key, u32);
-	__type(value, u8);
+	__type(value, u64);
 } netstack_pidfilter SEC(".maps");
 
 static u64 *lookup_or_zeroinit_histentry(void *map, const struct hist_key *key)
@@ -161,7 +161,7 @@ static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
 
 static bool filter_pid(u32 pid)
 {
-	u8 *pid_ok;
+	u64 *pid_ok;
 
 	if (!user_config.filter_pid)
 		// No PID filter - all PIDs ok

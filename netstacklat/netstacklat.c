@@ -883,6 +883,22 @@ static void set_programs_to_load(const struct netstacklat_config *conf,
 	}
 }
 
+static int init_filtermap(int map_fd, void *keys, size_t nelem,
+			  size_t elem_size)
+{
+	__u64 ok_val = 1;
+	int i, err;
+
+	for (i = 0; i < nelem; i++) {
+		err = bpf_map_update_elem(map_fd, (char *)keys + i * elem_size,
+					  &ok_val, 0);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 static int init_signalfd(void)
 {
 	sigset_t mask;
@@ -1045,24 +1061,6 @@ static int poll_events(int epoll_fd, const struct netstacklat_bpf *obj,
 	return err;
 }
 
-static int init_pidfilter_map(const struct netstacklat_bpf *obj,
-			      const struct netstacklat_config *conf)
-{
-	__u8 pid_ok_val = 1;
-	int map_fd, err;
-	__u32 i;
-
-	map_fd = bpf_map__fd(obj->maps.netstack_pidfilter);
-	for (i = 0; i < conf->npids; i++) {
-		err = bpf_map_update_elem(map_fd, &conf->pids[i], &pid_ok_val,
-					  0);
-		if (err)
-			return err;
-	}
-
-	return 0;
-}
-
 int main(int argc, char *argv[])
 {
 	int sig_fd, timer_fd, epoll_fd, sock_fd, err;
@@ -1116,7 +1114,9 @@ int main(int argc, char *argv[])
 		goto exit_destroy_bpf;
 	}
 
-	err = init_pidfilter_map(obj, &config);
+	err = init_filtermap(bpf_map__fd(obj->maps.netstack_pidfilter),
+			     config.pids, config.npids, sizeof(*config.pids));
+
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed filling the pid filter map: %s\n",
