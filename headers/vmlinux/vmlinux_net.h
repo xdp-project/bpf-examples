@@ -67,6 +67,7 @@ struct sk_buff {
 	__u8 nf_trace: 1;
 	__u8 ip_summed: 2;
 	__u8 ooo_okay: 1;
+	__u8 tstamp_type: 2;
 	__u8 l4_hash: 1;
 	__u8 sw_hash: 1;
 	__u8 wifi_acked_valid: 1;
