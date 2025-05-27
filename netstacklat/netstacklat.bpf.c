@@ -14,6 +14,19 @@ char LICENSE[] SEC("license") = "GPL";
 volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
 
 /*
+ * Alternative definition of sk_buff to handle renaming of the field
+ * mono_delivery_time to tstamp_type. See
+ * https://nakryiko.com/posts/bpf-core-reference-guide/#handling-incompatible-field-and-type-changes
+ */
+struct sk_buff___old {
+	union {
+		ktime_t tstamp;
+		u64 skb_mstamp_ns;
+	};
+	__u8 mono_delivery_time: 1;
+} __attribute__((preserve_access_index));
+
+/*
  * To be compatible with ebpf-exporter, all histograms need a key struct whose final
  * member is named "bucket" and is the histogram bucket index.
  * As we store the histograms in array maps, the key type for each array map
@@ -170,12 +183,40 @@ static void record_latency_since(ktime_t tstamp, enum netstacklat_hook hook)
 		record_latency(latency, hook);
 }
 
+static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
+{
+	if (bpf_core_field_exists(skb->tstamp_type)) {
+		/*
+		 * For kernels >= v6.11 the tstamp_type being non-zero
+		 * (SKB_CLOCK_REALTIME) implies that skb->tstamp holds a
+		 * preserved TX timestamp rather than a RX timestamp. See
+		 * https://lore.kernel.org/all/20240509211834.3235191-2-quic_abchauha@quicinc.com/
+		 */
+		if (BPF_CORE_READ_BITFIELD(skb, tstamp_type) > 0)
+			return;
+
+	} else {
+		/*
+		 * For kernels < v6.11, the field was called mono_delivery_time
+		 * instead, see https://lore.kernel.org/all/20220302195525.3480280-1-kafai@fb.com/
+		 * Kernels < v5.18 do not have the mono_delivery_field either,
+		 * but we do not support those anyways (as they lack the
+		 * bpf_ktime_get_tai_ns helper)
+		 */
+		struct sk_buff___old *skb_old = (void *)skb;
+		if (BPF_CORE_READ_BITFIELD(skb_old, mono_delivery_time) > 0)
+			return;
+	}
+
+	record_latency_since(skb->tstamp, hook);
+}
+
 
 SEC("fentry/ip_rcv_core")
 int BPF_PROG(netstacklat_ip_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_IP_RCV);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_IP_RCV);
 	return 0;
 }
 
@@ -183,42 +224,42 @@ SEC("fentry/ip6_rcv_core")
 int BPF_PROG(netstacklat_ip6_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_IP_RCV);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_IP_RCV);
 	return 0;
 }
 
 SEC("fentry/tcp_v4_rcv")
 int BPF_PROG(netstacklat_tcp_v4_rcv, struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_TCP_START);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_START);
 	return 0;
 }
 
 SEC("fentry/tcp_v6_rcv")
 int BPF_PROG(netstacklat_tcp_v6_rcv, struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_TCP_START);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_START);
 	return 0;
 }
 
 SEC("fentry/udp_rcv")
 int BPF_PROG(netstacklat_udp_rcv, struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_UDP_START);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_START);
 	return 0;
 }
 
 SEC("fentry/udpv6_rcv")
 int BPF_PROG(netstacklat_udpv6_rcv, struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_UDP_START);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_START);
 	return 0;
 }
 
 SEC("fexit/tcp_data_queue")
 int BPF_PROG(netstacklat_tcp_data_queue, struct sock *sk, struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
 	return 0;
 }
 
@@ -226,7 +267,7 @@ SEC("fexit/udp_queue_rcv_one_skb")
 int BPF_PROG(netstacklat_udp_queue_rcv_one_skb, struct sock *sk,
 	     struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
 	return 0;
 }
 
@@ -234,7 +275,7 @@ SEC("fexit/udpv6_queue_rcv_one_skb")
 int BPF_PROG(netstacklat_udpv6_queue_rcv_one_skb, struct sock *sk,
 	     struct sk_buff *skb)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
 	return 0;
 }
 
@@ -252,6 +293,6 @@ SEC("fentry/skb_consume_udp")
 int BPF_PROG(netstacklat_skb_consume_udp, struct sock *sk, struct sk_buff *skb,
 	     int len)
 {
-	record_latency_since(skb->tstamp, NETSTACKLAT_HOOK_UDP_SOCK_READ);
+	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_READ);
 	return 0;
 }
