@@ -44,14 +44,24 @@ static const char *__doc__ =
 #define MAX_BUCKETCOUNT_STRLEN 10
 #define MAX_BAR_STRLEN (80 - 6 - MAX_BUCKETSPAN_STRLEN - MAX_BUCKETCOUNT_STRLEN)
 
+#define MAX_HOOK_PROGS 4
+
+struct hook_prog_collection {
+	struct bpf_program *progs[MAX_HOOK_PROGS];
+	int nprogs;
+};
+
 struct netstacklat_config {
 	double report_interval_s;
+	bool enabled_hooks[NETSTACKLAT_N_HOOKS];
 };
 
 static const struct option long_options[] = {
 	{ "help",            no_argument,       NULL, 'h' },
 	{ "report-interval", required_argument, NULL, 'r' },
 	{ "list-probes",     no_argument,       NULL, 'l' },
+	{ "enable-probes",   required_argument, NULL, 'e' },
+	{ "disable-probes",  required_argument, NULL, 'd' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -150,6 +160,18 @@ static const char *hook_to_str(enum netstacklat_hook hook)
 	}
 }
 
+static enum netstacklat_hook str_to_hook(const char *str)
+{
+	enum netstacklat_hook hook;
+
+	for (hook = 1; hook < NETSTACKLAT_N_HOOKS; hook++) {
+		if (strcmp(str, hook_to_str(hook)) == 0)
+			return hook;
+	}
+
+	return NETSTACKLAT_HOOK_INVALID;
+}
+
 static const char *hook_to_description(enum netstacklat_hook hook)
 {
 	switch (hook) {
@@ -201,6 +223,50 @@ static int hook_to_histmap(enum netstacklat_hook hook,
 	}
 }
 
+static void hook_to_progs(struct hook_prog_collection *progs,
+			  enum netstacklat_hook hook,
+			  const struct netstacklat_bpf *obj)
+{
+	switch (hook) {
+	case NETSTACKLAT_HOOK_IP_RCV:
+		progs->progs[0] = obj->progs.netstacklat_ip_rcv_core;
+		progs->progs[1] = obj->progs.netstacklat_ip6_rcv_core;
+		progs->nprogs = 2;
+		break;
+	case NETSTACKLAT_HOOK_TCP_START:
+		progs->progs[0] = obj->progs.netstacklat_tcp_v4_rcv;
+		progs->progs[1] = obj->progs.netstacklat_tcp_v6_rcv;
+		progs->nprogs = 2;
+		break;
+	case NETSTACKLAT_HOOK_UDP_START:
+		progs->progs[0] = obj->progs.netstacklat_udp_rcv;
+		progs->progs[1] = obj->progs.netstacklat_udpv6_rcv;
+		progs->nprogs = 2;
+		break;
+	case NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED:
+		progs->progs[0] = obj->progs.netstacklat_tcp_data_queue;
+		progs->nprogs = 1;
+		break;
+	case NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED:
+		progs->progs[0] = obj->progs.netstacklat_udp_queue_rcv_one_skb;
+		progs->progs[1] =
+			obj->progs.netstacklat_udpv6_queue_rcv_one_skb;
+		progs->nprogs = 2;
+		break;
+	case NETSTACKLAT_HOOK_TCP_SOCK_READ:
+		progs->progs[0] = obj->progs.netstacklat_tcp_recv_timestamp;
+		progs->nprogs = 1;
+		break;
+	case NETSTACKLAT_HOOK_UDP_SOCK_READ:
+		progs->progs[0] = obj->progs.netstacklat_skb_consume_udp;
+		progs->nprogs = 1;
+		break;
+	default:
+		progs->nprogs = 0;
+		break;
+	}
+}
+
 static void list_hooks(FILE *stream)
 {
 	enum netstacklat_hook hook;
@@ -236,12 +302,53 @@ static int parse_bounded_double(double *res, const char *str, double low,
 	return 0;
 }
 
+/*
+ * Parses a comma-delimited string of hook-names, and sets the positions for
+ * the hooks that appear in the string to true.
+ */
+static int parse_hooks(bool hooks[NETSTACKLAT_N_HOOKS], const char *_str)
+{
+	enum netstacklat_hook hook;
+	char *tokp = NULL;
+	char str[1024];
+	char *hookstr;
+	int i;
+
+	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
+		hooks[i] = false;
+
+	if (strlen(_str) >= sizeof(str))
+		return -E2BIG;
+	strcpy(str, _str);
+
+	hookstr = strtok_r(str, ",", &tokp);
+	while (hookstr) {
+		hook = str_to_hook(hookstr);
+		if (hook == NETSTACKLAT_HOOK_INVALID) {
+			fprintf(stderr, "%s is not a valid hook\n", hookstr);
+			return -EINVAL;
+		}
+
+		hooks[hook] = true;
+
+		hookstr = strtok_r(NULL, ",", &tokp);
+	}
+
+	return 0;
+}
+
 static int parse_arguments(int argc, char *argv[],
 			   struct netstacklat_config *conf)
 {
-	int opt, err, ret;
+	bool hooks_on = false, hooks_off = false;
+	bool hooks[NETSTACKLAT_N_HOOKS];
+	int opt, err, ret, i;
 	char optstr[64];
 	double fval;
+
+	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
+		// All probes enabled by default
+		conf->enabled_hooks[i] = true;
 
 	ret = generate_optstr(optstr, sizeof(optstr));
 	if (ret < 0) {
@@ -265,6 +372,24 @@ static int parse_arguments(int argc, char *argv[],
 		case 'l': // list-probes
 			list_hooks(stdout);
 			exit(EXIT_SUCCESS);
+		case 'e': // enable-probes
+			err = parse_hooks(hooks, optarg);
+			if (err)
+				return err;
+
+			for (i = 1; i < NETSTACKLAT_N_HOOKS; i++)
+				conf->enabled_hooks[i] = hooks[i];
+			hooks_on = true;
+			break;
+		case 'd': // disable-probes
+			err = parse_hooks(hooks, optarg);
+			if (err)
+				return err;
+
+			for (i = 1; i < NETSTACKLAT_N_HOOKS; i++)
+				conf->enabled_hooks[i] = !hooks[i];
+			hooks_off = true;
+			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
 			exit(EXIT_SUCCESS);
@@ -273,6 +398,14 @@ static int parse_arguments(int argc, char *argv[],
 			print_usage(stderr, argv[0]);
 			return -EINVAL;
 		}
+	}
+
+	if (hooks_on && hooks_off) {
+		fprintf(stderr,
+			"%s and %s are mutually exclusive, only use one of them\n",
+			optval_to_longopt('e')->name,
+			optval_to_longopt('d')->name);
+		return -EINVAL;
 	}
 
 	return 0;
@@ -474,7 +607,8 @@ exit:
 	return err;
 }
 
-static int report_stats(const struct netstacklat_bpf *obj)
+static int report_stats(const struct netstacklat_config *conf,
+			const struct netstacklat_bpf *obj)
 {
 	enum netstacklat_hook hook;
 	__u64 hist[HIST_NBUCKETS] = { 0 };
@@ -485,6 +619,9 @@ static int report_stats(const struct netstacklat_bpf *obj)
 	printf("%s", ctime(&t));
 
 	for (hook = 1; hook < NETSTACKLAT_N_HOOKS; hook++) {
+		if (!conf->enabled_hooks[hook])
+			continue;
+
 		printf("%s:\n", hook_to_str(hook));
 
 		err = fetch_hist_map(hook_to_histmap(hook, obj), hist);
@@ -533,6 +670,22 @@ static __s64 get_tai_offset(void)
 
 	ntp_gettimex(&ntpt);
 	return ntpt.tai;
+}
+
+static void set_programs_to_load(const struct netstacklat_config *conf,
+				 struct netstacklat_bpf *obj)
+{
+	struct hook_prog_collection progs;
+	enum netstacklat_hook hook;
+	int i;
+
+	for (hook = 1; hook < NETSTACKLAT_N_HOOKS; hook++) {
+		hook_to_progs(&progs, hook, obj);
+
+		for (i = 0; i < progs.nprogs; i++)
+			bpf_program__set_autoload(progs.progs[i],
+						  conf->enabled_hooks[hook]);
+	}
 }
 
 static int init_signalfd(void)
@@ -604,7 +757,8 @@ static int setup_timer(__u64 interval_ns)
 	return fd;
 }
 
-static int handle_timer(int timer_fd, const struct netstacklat_bpf *obj)
+static int handle_timer(int timer_fd, const struct netstacklat_config *conf,
+			const struct netstacklat_bpf *obj)
 {
 	__u64 timer_exps;
 	ssize_t size;
@@ -621,7 +775,7 @@ static int handle_timer(int timer_fd, const struct netstacklat_bpf *obj)
 		fprintf(stderr, "Warning: Missed %llu reporting intervals\n",
 			timer_exps - 1);
 
-	return report_stats(obj);
+	return report_stats(conf, obj);
 }
 
 static int epoll_add_event(int epoll_fd, int fd, __u64 event_type, __u64 value)
@@ -661,7 +815,8 @@ err:
 	return err;
 }
 
-static int poll_events(int epoll_fd, const struct netstacklat_bpf *obj)
+static int poll_events(int epoll_fd, const struct netstacklat_config *conf,
+		       const struct netstacklat_bpf *obj)
 {
 	struct epoll_event events[MAX_EPOLL_EVENTS];
 	int i, n, fd, err = 0;
@@ -680,7 +835,7 @@ static int poll_events(int epoll_fd, const struct netstacklat_bpf *obj)
 			err = handle_signal(fd);
 			break;
 		case NETSTACKLAT_EPOLL_TIMER:
-			err = handle_timer(fd, obj);
+			err = handle_timer(fd, conf, obj);
 			break;
 		default:
 			fprintf(stderr, "Warning: unexpected epoll data: %lu\n",
@@ -730,6 +885,8 @@ int main(int argc, char *argv[])
 
 	obj->rodata->TAI_OFFSET = get_tai_offset() * NS_PER_S;
 
+	set_programs_to_load(&config, obj);
+
 	err = netstacklat_bpf__load(obj);
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
@@ -769,12 +926,12 @@ int main(int argc, char *argv[])
 
 	// Report stats until user shuts down program
 	while (true) {
-		err = poll_events(epoll_fd, obj);
+		err = poll_events(epoll_fd, &config, obj);
 
 		if (err) {
 			if (err == NETSTACKLAT_ABORT) {
 				// Report stats a final time before terminating
-				err = report_stats(obj);
+				err = report_stats(&config, obj);
 			} else {
 				libbpf_strerror(err, errmsg, sizeof(errmsg));
 				fprintf(stderr, "Failed polling fds: %s\n",
