@@ -51,6 +51,8 @@ static const char *__doc__ =
 // Maximum number of different pids that can be filtered for
 #define MAX_FILTER_PIDS 4096
 
+typedef int (*t_parse_val_func)(const char *, void *);
+
 struct hook_prog_collection {
 	struct bpf_program *progs[MAX_HOOK_PROGS];
 	int nprogs;
@@ -318,72 +320,92 @@ static int parse_bounded_long(long long *res, const char *str, long long low,
 	return 0;
 }
 
-/*
- * Parses a comma-delimited string of hook-names, and sets the positions for
- * the hooks that appear in the string to true.
- */
-static int parse_hooks(bool hooks[NETSTACKLAT_N_HOOKS], const char *_str)
+static int parse_strlist_to_arr(const char *_str, void *arr, size_t nelem,
+				size_t elem_size, const char *delim,
+				t_parse_val_func parse_func)
 {
-	enum netstacklat_hook hook;
-	char *tokp = NULL;
-	char str[1024];
-	char *hookstr;
-	int i;
-
-	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
-		hooks[i] = false;
-
-	if (strlen(_str) >= sizeof(str))
-		return -E2BIG;
-	strcpy(str, _str);
-
-	hookstr = strtok_r(str, ",", &tokp);
-	while (hookstr) {
-		hook = str_to_hook(hookstr);
-		if (hook == NETSTACKLAT_HOOK_INVALID) {
-			fprintf(stderr, "%s is not a valid hook\n", hookstr);
-			return -EINVAL;
-		}
-
-		hooks[hook] = true;
-
-		hookstr = strtok_r(NULL, ",", &tokp);
-	}
-
-	return 0;
-}
-
-static int parse_pids(size_t size, __u32 arr[size], const char *_str,
-		      const char *name)
-{
-	char *pidstr, *str;
-	char *tokp = NULL;
-	int err, i = 0;
-	long long val;
+	char *tokstr, *str;
+	char *saveptr = NULL;
+	int err = 0, i = 0;
 
 	str = malloc(strlen(_str) + 1);
 	if (!str)
 		return -ENOMEM;
 	strcpy(str, _str);
 
-	pidstr = strtok_r(str, ",", &tokp);
-	while (pidstr && i < size) {
-		err = parse_bounded_long(&val, pidstr, 1, PID_MAX_LIMIT, name);
+	tokstr = strtok_r(str, delim, &saveptr);
+	while (tokstr && i < nelem) {
+		err = parse_func(tokstr, (char *)arr + i * elem_size);
 		if (err)
 			goto exit;
-		arr[i] = val;
 
-		pidstr = strtok_r(NULL, ",", &tokp);
+		tokstr = strtok_r(NULL, delim, &saveptr);
 		i++;
 	}
 
-	if (pidstr)
-		// Parsed size pids, but more still remain
+	if (tokstr)
+		// Parsed size values, but more still remain
 		err = -E2BIG;
 
 exit:
 	free(str);
 	return err ?: i;
+}
+
+int parse_hook(const char *str, void *hookout)
+{
+	enum netstacklat_hook hook;
+
+	hook = str_to_hook(str);
+	if (hook == NETSTACKLAT_HOOK_INVALID) {
+		fprintf(stderr, "%s is not a valid hook\n", str);
+		return -EINVAL;
+	}
+
+	*(enum netstacklat_hook *)hookout = hook;
+	return 0;
+}
+
+/*
+ * Parses a comma-delimited string of hook-names, and sets the positions for
+ * the hooks that appear in the string to true.
+ */
+static int parse_hooks(bool hooks[NETSTACKLAT_N_HOOKS], const char *str)
+{
+	enum netstacklat_hook ehooks[NETSTACKLAT_N_HOOKS * 2];
+	int len, i;
+
+	len = parse_strlist_to_arr(str, ehooks, ARRAY_SIZE(ehooks),
+				   sizeof(*ehooks), ",", parse_hook);
+	if (len < 0)
+		return len;
+
+	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
+		hooks[i] = false;
+
+	for (i = 0; i < len; i++)
+		hooks[ehooks[i]] = true;
+
+	return 0;
+}
+
+static int parse_pid(const char *str, void *pidout)
+{
+	long long lval;
+	int err;
+
+	err = parse_bounded_long(&lval, str, 1, PID_MAX_LIMIT, "pid");
+	if (err)
+		return err;
+
+	*(__u32 *)pidout = lval;
+	return 0;
+}
+
+static int parse_pids(size_t size, __u32 arr[size], const char *str)
+{
+	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",",
+				    parse_pid);
 }
 
 static int parse_arguments(int argc, char *argv[],
@@ -444,8 +466,7 @@ static int parse_arguments(int argc, char *argv[],
 			break;
 		case 'p': // filter-pids
 			ret = parse_pids(ARRAY_SIZE(conf->pids) - conf->npids,
-					 conf->pids + conf->npids, optarg,
-					 optval_to_longopt(opt)->name);
+					 conf->pids + conf->npids, optarg);
 			if (ret < 0)
 				return ret;
 
