@@ -251,14 +251,13 @@ static void hook_to_progs(struct hook_prog_collection *progs,
 		progs->nprogs = 2;
 		break;
 	case NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED:
-		progs->progs[0] = obj->progs.netstacklat_tcp_data_queue;
+		progs->progs[0] = obj->progs.netstacklat_tcp_queue_rcv;
 		progs->nprogs = 1;
 		break;
 	case NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED:
-		progs->progs[0] = obj->progs.netstacklat_udp_queue_rcv_one_skb;
-		progs->progs[1] =
-			obj->progs.netstacklat_udpv6_queue_rcv_one_skb;
-		progs->nprogs = 2;
+		progs->progs[0] =
+			obj->progs.netstacklat_udp_enqueue_schedule_skb;
+		progs->nprogs = 1;
 		break;
 	case NETSTACKLAT_HOOK_TCP_SOCK_READ:
 		progs->progs[0] = obj->progs.netstacklat_tcp_recv_timestamp;

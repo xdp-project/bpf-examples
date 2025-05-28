@@ -301,26 +301,19 @@ int BPF_PROG(netstacklat_udpv6_rcv, struct sk_buff *skb)
 	return 0;
 }
 
-SEC("fexit/tcp_data_queue")
-int BPF_PROG(netstacklat_tcp_data_queue, struct sock *sk, struct sk_buff *skb)
+SEC("fexit/tcp_queue_rcv")
+int BPF_PROG(netstacklat_tcp_queue_rcv, struct sock *sk, struct sk_buff *skb)
 {
 	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
 	return 0;
 }
 
-SEC("fexit/udp_queue_rcv_one_skb")
-int BPF_PROG(netstacklat_udp_queue_rcv_one_skb, struct sock *sk,
-	     struct sk_buff *skb)
+SEC("fexit/__udp_enqueue_schedule_skb")
+int BPF_PROG(netstacklat_udp_enqueue_schedule_skb, struct sock *sk,
+	     struct sk_buff *skb, int retval)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
-	return 0;
-}
-
-SEC("fexit/udpv6_queue_rcv_one_skb")
-int BPF_PROG(netstacklat_udpv6_queue_rcv_one_skb, struct sock *sk,
-	     struct sk_buff *skb)
-{
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
+	if (retval == 0)
+		record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
 	return 0;
 }
 
