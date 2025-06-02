@@ -16,6 +16,7 @@ static const char *__doc__ =
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/timex.h>
+#include <sys/stat.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -82,13 +83,14 @@ struct netstacklat_config {
 };
 
 static const struct option long_options[] = {
-	{ "help",            no_argument,       NULL, 'h' },
-	{ "report-interval", required_argument, NULL, 'r' },
-	{ "list-probes",     no_argument,       NULL, 'l' },
-	{ "enable-probes",   required_argument, NULL, 'e' },
-	{ "disable-probes",  required_argument, NULL, 'd' },
-	{ "pids",            required_argument, NULL, 'p' },
-	{ "interfaces",      required_argument, NULL, 'i' },
+	{ "help",              no_argument,       NULL, 'h' },
+	{ "report-interval",   required_argument, NULL, 'r' },
+	{ "list-probes",       no_argument,       NULL, 'l' },
+	{ "enable-probes",     required_argument, NULL, 'e' },
+	{ "disable-probes",    required_argument, NULL, 'd' },
+	{ "pids",              required_argument, NULL, 'p' },
+	{ "interfaces",        required_argument, NULL, 'i' },
+	{ "network-namespace", required_argument, NULL, 'n' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -274,6 +276,18 @@ static void list_hooks(FILE *stream)
 			hook_to_description(hook));
 }
 
+static long long get_current_network_ns(void)
+{
+	struct stat ns_stat;
+	int err;
+
+	err = stat("/proc/self/ns/net", &ns_stat);
+	if (err)
+		return -errno;
+
+	return ns_stat.st_ino;
+}
+
 static int parse_bounded_double(double *res, const char *str, double low,
 				double high, const char *name)
 {
@@ -452,6 +466,7 @@ static int parse_arguments(int argc, char *argv[],
 {
 	bool hooks_on = false, hooks_off = false;
 	bool hooks[NETSTACKLAT_N_HOOKS];
+	long long network_ns = 0;
 	int opt, err, ret, i;
 	char optstr[64];
 	double fval;
@@ -524,6 +539,13 @@ static int parse_arguments(int argc, char *argv[],
 			conf->nifindices += ret;
 			conf->bpf_conf.filter_ifindex = true;
 			break;
+		case 'n': // network-namespace
+			err = parse_bounded_long(&network_ns, optarg, -1,
+						 UINT32_MAX,
+						 optval_to_longopt(opt)->name);
+			if (err)
+				return err;
+			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
 			exit(EXIT_SUCCESS);
@@ -540,6 +562,21 @@ static int parse_arguments(int argc, char *argv[],
 			optval_to_longopt('e')->name,
 			optval_to_longopt('d')->name);
 		return -EINVAL;
+	}
+
+	if (network_ns < 0) {
+		conf->bpf_conf.network_ns = 0;
+	} else if (network_ns == 0) {
+		network_ns = get_current_network_ns();
+		if (network_ns < 0) {
+			fprintf(stderr,
+				"Failed getting current network namespace: %s\n",
+				strerror(-network_ns));
+			return network_ns;
+		}
+		conf->bpf_conf.network_ns = network_ns;
+	} else {
+		conf->bpf_conf.network_ns = network_ns;
 	}
 
 	return 0;

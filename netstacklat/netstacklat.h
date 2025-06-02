@@ -54,6 +54,7 @@ struct hist_key {
 };
 
 struct netstacklat_bpf_config {
+	__u32 network_ns;
 	bool filter_pid;
 	bool filter_ifindex;
 };

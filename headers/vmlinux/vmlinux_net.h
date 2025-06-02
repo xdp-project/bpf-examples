@@ -3,6 +3,15 @@
 
 typedef __u32 __wsum;
 
+typedef struct {
+	struct net *net;
+} possible_net_t;
+
+struct net_device {
+	int ifindex;
+	possible_net_t nd_net;
+};
+
 typedef unsigned int sk_buff_data_t; // Assumes 64-bit. FIXME see below
 /*
 // BITS_PER_LONG can be wrong with -target bpf
@@ -147,10 +156,24 @@ enum ip_conntrack_status {
 };
 
 struct scm_timestamping_internal {
-        struct timespec64 ts[3];
+	struct timespec64 ts[3];
+};
+
+struct ns_common {
+	struct dentry *stashed;
+	unsigned int inum;
+};
+
+struct net {
+	struct ns_common ns;
+};
+
+struct sock_common {
+	possible_net_t skc_net;
 };
 
 struct sock {
+	struct sock_common __sk_common;
 	struct dst_entry *sk_rx_dst;
 	int sk_rx_dst_ifindex;
 	u32 sk_rx_dst_cookie;

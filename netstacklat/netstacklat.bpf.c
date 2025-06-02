@@ -14,6 +14,7 @@ char LICENSE[] SEC("license") = "GPL";
 
 volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
 volatile const struct netstacklat_bpf_config user_config = {
+	.network_ns = 0,
 	.filter_pid = false,
 	.filter_ifindex = false,
 };
@@ -154,7 +155,29 @@ static bool filter_ifindex(u32 ifindex)
 	return *ifindex_ok > 0;
 }
 
-static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
+static __u64 get_network_ns(struct sk_buff *skb, struct sock *sk)
+{
+	/*
+	 * Favor reading from sk due to less redirection (fewer probe reads)
+	 * and skb->dev is not always set.
+	 */
+	if (sk)
+		return BPF_CORE_READ(sk->__sk_common.skc_net.net, ns.inum);
+	else if (skb)
+		return BPF_CORE_READ(skb->dev, nd_net.net, ns.inum);
+	return 0;
+}
+
+static bool filter_network_ns(struct sk_buff *skb, struct sock *sk)
+{
+	if (user_config.network_ns == 0)
+		return true;
+
+	return get_network_ns(skb, sk) == user_config.network_ns;
+}
+
+
+static void record_skb_latency(struct sk_buff *skb, struct sock *sk, enum netstacklat_hook hook)
 {
 	if (bpf_core_field_exists(skb->tstamp_type)) {
 		/*
@@ -180,6 +203,9 @@ static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
 	}
 
 	if (!filter_ifindex(skb->skb_iif))
+		return;
+
+	if (!filter_network_ns(skb, sk))
 		return;
 
 	record_latency_since(skb->tstamp, hook);
@@ -223,6 +249,9 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 	if (!filter_ifindex(ifindex))
 		return;
 
+	if (!filter_network_ns(skb, sk))
+		return;
+
 	record_latency_since(tstamp, hook);
 }
 
@@ -230,7 +259,7 @@ SEC("fentry/ip_rcv_core")
 int BPF_PROG(netstacklat_ip_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_IP_RCV);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_IP_RCV);
 	return 0;
 }
 
@@ -238,42 +267,42 @@ SEC("fentry/ip6_rcv_core")
 int BPF_PROG(netstacklat_ip6_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_IP_RCV);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_IP_RCV);
 	return 0;
 }
 
 SEC("fentry/tcp_v4_rcv")
 int BPF_PROG(netstacklat_tcp_v4_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_TCP_START);
 	return 0;
 }
 
 SEC("fentry/tcp_v6_rcv")
 int BPF_PROG(netstacklat_tcp_v6_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_TCP_START);
 	return 0;
 }
 
 SEC("fentry/udp_rcv")
 int BPF_PROG(netstacklat_udp_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_UDP_START);
 	return 0;
 }
 
 SEC("fentry/udpv6_rcv")
 int BPF_PROG(netstacklat_udpv6_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_UDP_START);
 	return 0;
 }
 
 SEC("fexit/tcp_queue_rcv")
 int BPF_PROG(netstacklat_tcp_queue_rcv, struct sock *sk, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
+	record_skb_latency(skb, sk, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
 	return 0;
 }
 
@@ -282,7 +311,7 @@ int BPF_PROG(netstacklat_udp_enqueue_schedule_skb, struct sock *sk,
 	     struct sk_buff *skb, int retval)
 {
 	if (retval == 0)
-		record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
+		record_skb_latency(skb, sk, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
 	return 0;
 }
 
