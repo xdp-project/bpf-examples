@@ -1008,9 +1008,15 @@ static int report_stats(const struct netstacklat_bpf *obj,
 	return 0;
 }
 
-static int init_histogram_buffer(struct histogram_buffer *buf)
+static int init_histogram_buffer(struct histogram_buffer *buf,
+				 const struct netstacklat_config *conf)
 {
-	int max_hists = NETSTACKLAT_N_HOOKS;
+	int max_hists = 0, i;
+
+	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++) {
+		if (conf->enabled_hooks[i])
+			max_hists++;
+	}
 
 	buf->hists = calloc(max_hists, sizeof(*buf->hists));
 	if (!buf->hists)
@@ -1071,6 +1077,59 @@ static void set_programs_to_load(const struct netstacklat_config *conf,
 			bpf_program__set_autoload(progs.progs[i],
 						  conf->enabled_hooks[hook]);
 	}
+}
+
+static int set_map_sizes(const struct netstacklat_config *conf,
+			 struct netstacklat_bpf *obj, int max_hists)
+{
+	__u32 size;
+	int err, i;
+
+	size = max_hists * HIST_NBUCKETS;
+	err = bpf_map__set_max_entries(obj->maps.netstack_latency_seconds,
+				       size);
+	if (err) {
+		fprintf(stderr, "Failed setting size of histogram map to %u\n",
+			size);
+		return err;
+	}
+
+	// PID filter - arraymap, needs max PID + 1 entries
+	for (i = 0, size = 1; i < conf->npids; i++) {
+		if (conf->pids[i] >= size)
+			size = conf->pids[i] + 1;
+	}
+	err = bpf_map__set_max_entries(obj->maps.netstack_pidfilter, size);
+	if (err) {
+		fprintf(stderr, "Failed setting size of PID filter map to %u\n",
+			size);
+		return err;
+	}
+
+	// ifindex filter - arraymap, needs max ifindex + 1 entries
+	for (i = 0, size = 1; i < conf->nifindices; i++) {
+		if (conf->ifindices[i] >= size)
+			size = conf->ifindices[i] + 1;
+	}
+	err = bpf_map__set_max_entries(obj->maps.netstack_ifindexfilter, size);
+	if (err) {
+		fprintf(stderr,
+			"Failed setting size of ifindex filter map to %u\n",
+			size);
+		return err;
+	}
+
+	// cgroup filter - hashmap, should be ~2x expected number of entries
+	size = conf->bpf_conf.filter_cgroup ? conf->ncgroups * 2 : 1;
+	err = bpf_map__set_max_entries(obj->maps.netstack_cgroupfilter, size);
+	if (err) {
+		fprintf(stderr,
+			"Failed setting size of cgroup filter map to %u\n",
+			size);
+		return err;
+	}
+
+	return 0;
 }
 
 static int init_filtermap(int map_fd, void *keys, size_t nelem,
@@ -1268,7 +1327,7 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	err = init_histogram_buffer(&hist_buf);
+	err = init_histogram_buffer(&hist_buf, &config);
 	if (err) {
 		fprintf(stderr, "Failed allocating buffer for histograms: %s\n",
 			strerror(-err));
@@ -1286,7 +1345,7 @@ int main(int argc, char *argv[])
 
 	obj = netstacklat_bpf__open();
 	if (!obj) {
-		err = libbpf_get_error(obj);
+		err = -errno;
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed opening eBPF object file: %s\n", errmsg);
 		goto exit_sockfd;
@@ -1296,6 +1355,13 @@ int main(int argc, char *argv[])
 	obj->rodata->user_config = config.bpf_conf;
 
 	set_programs_to_load(&config, obj);
+
+	err = set_map_sizes(&config, obj, hist_buf.max_size);
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed configuring map sizes: %s\n", errmsg);
+		goto exit_destroy_bpf;
+	}
 
 	err = netstacklat_bpf__load(obj);
 	if (err) {
