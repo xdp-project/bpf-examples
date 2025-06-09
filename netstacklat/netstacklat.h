@@ -63,6 +63,7 @@ enum netstacklat_hook {
  * member is named "bucket" and is the histogram bucket index.
  */
 struct hist_key {
+	__u64 cgroup;
 	__u32 ifindex;
 	__u16 hook; // need well defined size for ebpf-exporter to decode
 	__u16 bucket; // needs to be last to be compatible with ebpf-exporter
@@ -75,6 +76,7 @@ struct netstacklat_bpf_config {
 	bool filter_ifindex;
 	bool filter_cgroup;
 	bool groupby_ifindex;
+	bool groupby_cgroup;
 };
 
 #endif

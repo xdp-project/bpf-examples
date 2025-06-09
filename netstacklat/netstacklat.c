@@ -94,6 +94,7 @@ static const struct option long_options[] = {
 	{ "cgroups",           required_argument, NULL, 'c' },
 	{ "min-queuelength",   required_argument, NULL, 'q' },
 	{ "groupby-interface", no_argument,       NULL, 'I' },
+	{ "groupby-cgroup",    no_argument,       NULL, 'C' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -562,6 +563,7 @@ static int parse_arguments(int argc, char *argv[],
 	conf->bpf_conf.filter_ifindex = false;
 	conf->bpf_conf.filter_cgroup = false;
 	conf->bpf_conf.groupby_ifindex = false;
+	conf->bpf_conf.groupby_cgroup = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -652,6 +654,9 @@ static int parse_arguments(int argc, char *argv[],
 			break;
 		case 'I': // groupby-interface
 			conf->bpf_conf.groupby_ifindex = true;
+			break;
+		case 'C': // groupby-cgroup
+			conf->bpf_conf.groupby_cgroup = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
@@ -826,6 +831,9 @@ static void print_histkey(FILE *stream, const struct hist_key *key)
 
 	if (key->ifindex)
 		fprintf(stream, ", interface=%u", key->ifindex);
+
+	if (key->cgroup)
+		fprintf(stream, ", cgroup=%llu", key->cgroup);
 }
 
 static int cmp_histkey(const void *val1, const void *val2)
@@ -837,6 +845,9 @@ static int cmp_histkey(const void *val1, const void *val2)
 
 	if (key1->ifindex != key2->ifindex)
 		return key1->ifindex > key2->ifindex ? 1 : -1;
+
+	if (key1->cgroup != key2->cgroup)
+		return key1->cgroup > key2->cgroup ? 1 : -1;
 
 	return 0;
 }
@@ -1036,6 +1047,11 @@ static int init_histogram_buffer(struct histogram_buffer *buf,
 		max_hists *= conf->bpf_conf.filter_ifindex ?
 				     min(conf->nifindices, 64) :
 				     32;
+
+	if (conf->bpf_conf.groupby_cgroup)
+		max_hists *= conf->bpf_conf.filter_cgroup ?
+				     min(conf->ncgroups, 128) :
+				     64;
 
 	buf->hists = calloc(max_hists, sizeof(*buf->hists));
 	if (!buf->hists)

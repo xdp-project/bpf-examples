@@ -7,6 +7,11 @@ metrics:
       bucket_max: 34
       bucket_multiplier: 0.000000001 # nanoseconds to seconds
       labels:
+        - name: cgroup
+          size: 8
+          decoders:
+            - name: uint
+            - name: cgroup
         - name: iface
           size: 4
           decoders:

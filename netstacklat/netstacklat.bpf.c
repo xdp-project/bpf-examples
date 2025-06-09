@@ -22,6 +22,7 @@ volatile const struct netstacklat_bpf_config user_config = {
 	.filter_ifindex = false,
 	.filter_cgroup = false,
 	.groupby_ifindex = false,
+	.groupby_cgroup = false,
 };
 
 /*
@@ -39,7 +40,7 @@ struct sk_buff___old {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, HIST_NBUCKETS * NETSTACKLAT_N_HOOKS * 16);
+	__uint(max_entries, HIST_NBUCKETS * NETSTACKLAT_N_HOOKS * 64);
 	__type(key, struct hist_key);
 	__type(value, u64);
 } netstack_latency_seconds SEC(".maps");
@@ -253,10 +254,9 @@ static bool filter_cgroup(u64 cgroup_id)
 	return bpf_map_lookup_elem(&netstack_cgroupfilter, &cgroup_id) != NULL;
 }
 
-static bool filter_current_task(void)
+static bool filter_current_task(u64 cgroup)
 {
 	bool ok = true;
-	__u64 cgroup;
 	__u32 tgid;
 
 	if (user_config.filter_pid) {
@@ -264,10 +264,8 @@ static bool filter_current_task(void)
 		ok = ok && filter_pid(tgid);
 	}
 
-	if (user_config.filter_cgroup) {
-		cgroup = bpf_get_current_cgroup_id();
+	if (user_config.filter_cgroup)
 		ok = ok && filter_cgroup(cgroup);
-	}
 
 	return ok;
 }
@@ -306,12 +304,16 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 				  ktime_t tstamp, enum netstacklat_hook hook)
 {
 	struct hist_key key = { .hook = hook };
+	u64 cgroup = 0;
 	u32 ifindex;
 
 	if (!filter_min_sockqueue_len(sk))
 		return;
 
-	if (!filter_current_task())
+	if (user_config.filter_cgroup || user_config.groupby_cgroup)
+		cgroup = bpf_get_current_cgroup_id();
+
+	if (!filter_current_task(cgroup))
 		return;
 
 	ifindex = skb ? skb->skb_iif : sk->sk_rx_dst_ifindex;
@@ -323,6 +325,8 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 
 	if (user_config.groupby_ifindex)
 		key.ifindex = ifindex;
+	if (user_config.groupby_cgroup)
+		key.cgroup = cgroup;
 
 	record_latency_since(tstamp, &key);
 }
