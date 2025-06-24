@@ -1,0 +1,19 @@
+* Demonstration of trie_free() latency for large maps
+
+Freeing large LPM_TRIE maps can take significant time. This demo shows the
+duration of trie_free() for trie maps with varying numbers of entries.
+
+Below are the results showing trie_free() durations when running Linux 6.12.32
+on AMD EPYC 9684X (96-Core):
+
+| Num of map entries | Duration |  CoV  | Duration per entry |
+|--------------------|----------|-------|--------------------|
+| 1K                 | 0ms      | 2.88% | 239ns              |
+| 10K                | 2ms      | 0.97% | 242ns              |
+| 100K               | 32ms     | 2.54% | 329ns              |
+| 1M                 | 427ms    | 1.17% | 427ns              |
+| 10M                | 5056ms   | 1.74% | 505ns              |
+| 100M               | 67253ms  | 1.48% | 672ns              |
+
+Clearly the algorithm doesn't scale linearly and the per entry duration at 100M
+entries is almost 3x that at 1K.
