@@ -27,7 +27,7 @@
 static unsigned int ifindex;
 static __u32 attached_prog_id;
 
-static noreturn void cleanup()
+static noreturn void cleanup(int signal __attribute__((unused)))
 {
         char errmsg[STRERR_BUFSIZE];
         struct xdp_program *p = NULL;

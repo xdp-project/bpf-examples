@@ -26,7 +26,7 @@ int  cls_filter(struct __sk_buff *skb)
 	struct ethhdr *eth;
 	int eth_type;
 	int ip_type;
-	int tcp_type;
+	int tcp_len;
 	struct iphdr *iphdr;
 	struct ipv6hdr *ipv6hdr;
 	struct tcphdr *tcphdr;
@@ -50,8 +50,8 @@ int  cls_filter(struct __sk_buff *skb)
 	}
 
 	/* Classify TCP ports 8080 and 8081 */
-	tcp_type = parse_tcphdr(&nh, data_end, &tcphdr);
-	if (tcphdr + 1 > data_end) {
+	tcp_len = parse_tcphdr(&nh, data_end, &tcphdr);
+	if (tcp_len < sizeof(tcphdr) || tcphdr + 1 > data_end) {
 		goto out;
 	}
 
