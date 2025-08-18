@@ -195,17 +195,11 @@ EOF
 
     compile_err=$($CLANG -target bpf ${ARCH_INCLUDES} -c $TMPDIR/bpf_use_errno_test.c 2>&1)
     if [ "$?" -ne "0" ]; then
-        echo "*** ERROR - Clang BPF-prog cannot include <errno.h>"
-        echo "          - Install missing userspace header file"
-        echo ""
-        echo "Compile error: $compile_err"
-        echo ""
-        echo " On Fedora install:"
-        echo "   dnf install glibc-devel.i686"
-        echo " On Debian install:"
-        echo "   apt install libc6-dev-i386"
-        echo ""
-        exit 1
+        echo "no - some examples will fail and won't be compiled from the top-level Makefile. See README.md."
+        echo "HAVE_CLANG_ERRNO:=n" >>"$CONFIG"
+    else
+        echo yes
+        echo "HAVE_CLANG_ERRNO:=y" >>"$CONFIG"
     fi
 }
 
@@ -281,6 +275,7 @@ check_libbpf
 echo -n "libxdp support: "
 check_libxdp
 
+echo -n "clang errno support: "
 check_bpf_use_errno
 
 if [ -n "$KERNEL_HEADERS" ]; then
