@@ -21,6 +21,7 @@ volatile const struct netstacklat_bpf_config user_config = {
 	.filter_pid = false,
 	.filter_ifindex = false,
 	.filter_cgroup = false,
+	.groupby_ifindex = false,
 };
 
 /*
@@ -38,7 +39,7 @@ struct sk_buff___old {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, HIST_NBUCKETS * NETSTACKLAT_N_HOOKS);
+	__uint(max_entries, HIST_NBUCKETS * NETSTACKLAT_N_HOOKS * 16);
 	__type(key, struct hist_key);
 	__type(value, u64);
 } netstack_latency_seconds SEC(".maps");
@@ -137,18 +138,17 @@ static ktime_t time_since(ktime_t tstamp)
 	return now - tstamp;
 }
 
-static void record_latency(ktime_t latency, enum netstacklat_hook hook)
+static void record_latency(ktime_t latency, const struct hist_key *key)
 {
-	struct hist_key key = { .hook = hook };
-	increment_exp2_histogram_nosync(&netstack_latency_seconds, key, latency,
+	increment_exp2_histogram_nosync(&netstack_latency_seconds, *key, latency,
 					HIST_MAX_LATENCY_SLOT);
 }
 
-static void record_latency_since(ktime_t tstamp, enum netstacklat_hook hook)
+static void record_latency_since(ktime_t tstamp, const struct hist_key *key)
 {
 	ktime_t latency = time_since(tstamp);
 	if (latency >= 0)
-		record_latency(latency, hook);
+		record_latency(latency, key);
 }
 
 static bool filter_ifindex(u32 ifindex)
@@ -190,6 +190,9 @@ static bool filter_network_ns(struct sk_buff *skb, struct sock *sk)
 
 static void record_skb_latency(struct sk_buff *skb, struct sock *sk, enum netstacklat_hook hook)
 {
+	struct hist_key key = { .hook = hook };
+	u32 ifindex;
+
 	if (bpf_core_field_exists(skb->tstamp_type)) {
 		/*
 		 * For kernels >= v6.11 the tstamp_type being non-zero
@@ -213,13 +216,17 @@ static void record_skb_latency(struct sk_buff *skb, struct sock *sk, enum netsta
 			return;
 	}
 
-	if (!filter_ifindex(skb->skb_iif))
+	ifindex = skb->skb_iif;
+	if (!filter_ifindex(ifindex))
 		return;
 
 	if (!filter_network_ns(skb, sk))
 		return;
 
-	record_latency_since(skb->tstamp, hook);
+	if (user_config.groupby_ifindex)
+		key.ifindex = ifindex;
+
+	record_latency_since(skb->tstamp, &key);
 }
 
 static bool filter_pid(u32 pid)
@@ -298,6 +305,7 @@ static bool filter_min_sockqueue_len(struct sock *sk)
 static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 				  ktime_t tstamp, enum netstacklat_hook hook)
 {
+	struct hist_key key = { .hook = hook };
 	u32 ifindex;
 
 	if (!filter_min_sockqueue_len(sk))
@@ -313,7 +321,10 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 	if (!filter_network_ns(skb, sk))
 		return;
 
-	record_latency_since(tstamp, hook);
+	if (user_config.groupby_ifindex)
+		key.ifindex = ifindex;
+
+	record_latency_since(tstamp, &key);
 }
 
 SEC("fentry/ip_rcv_core")

@@ -7,6 +7,13 @@ metrics:
       bucket_max: 34
       bucket_multiplier: 0.000000001 # nanoseconds to seconds
       labels:
+        - name: iface
+          size: 4
+          decoders:
+            # If including output from a different network namespace than ebpf-exporter
+            # you probably just want to decode as a uint (ifindex) instead
+            # - name: uint # For the ifname decoder you apparently don't first need a uint decoder like the others
+            - name: ifname
         - name: hook
           size: 2
           decoders:

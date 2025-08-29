@@ -93,6 +93,7 @@ static const struct option long_options[] = {
 	{ "network-namespace", required_argument, NULL, 'n' },
 	{ "cgroups",           required_argument, NULL, 'c' },
 	{ "min-queuelength",   required_argument, NULL, 'q' },
+	{ "groupby-interface", no_argument,       NULL, 'I' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -560,6 +561,7 @@ static int parse_arguments(int argc, char *argv[],
 	conf->bpf_conf.filter_pid = false;
 	conf->bpf_conf.filter_ifindex = false;
 	conf->bpf_conf.filter_cgroup = false;
+	conf->bpf_conf.groupby_ifindex = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -647,6 +649,9 @@ static int parse_arguments(int argc, char *argv[],
 			if (err)
 				return err;
 			conf->bpf_conf.filter_min_sockqueue_len = lval;
+			break;
+		case 'I': // groupby-interface
+			conf->bpf_conf.groupby_ifindex = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
@@ -818,13 +823,22 @@ static void print_log2hist(FILE *stream, size_t n, const __u64 hist[n],
 static void print_histkey(FILE *stream, const struct hist_key *key)
 {
 	fprintf(stream, "%s", hook_to_str(key->hook));
+
+	if (key->ifindex)
+		fprintf(stream, ", interface=%u", key->ifindex);
 }
 
 static int cmp_histkey(const void *val1, const void *val2)
 {
 	const struct hist_key *key1 = val1, *key2 = val2;
 
-	return key1->hook == key2->hook ? 0 : key1->hook > key2->hook ? 1 : -1;
+	if (key1->hook != key2->hook)
+		return key1->hook > key2->hook ? 1 : -1;
+
+	if (key1->ifindex != key2->ifindex)
+		return key1->ifindex > key2->ifindex ? 1 : -1;
+
+	return 0;
 }
 
 static int cmp_histentry(const void *val1, const void *val2)
@@ -1017,6 +1031,11 @@ static int init_histogram_buffer(struct histogram_buffer *buf,
 		if (conf->enabled_hooks[i])
 			max_hists++;
 	}
+
+	if (conf->bpf_conf.groupby_ifindex)
+		max_hists *= conf->bpf_conf.filter_ifindex ?
+				     min(conf->nifindices, 64) :
+				     32;
 
 	buf->hists = calloc(max_hists, sizeof(*buf->hists));
 	if (!buf->hists)
