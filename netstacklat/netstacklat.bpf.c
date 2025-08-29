@@ -9,12 +9,15 @@
 #include "netstacklat.h"
 #include "bits.bpf.h"
 
+#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
+
 char LICENSE[] SEC("license") = "GPL";
 
 
 volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
 volatile const struct netstacklat_bpf_config user_config = {
 	.network_ns = 0,
+	.filter_min_sockqueue_len = 0, /* zero means filter is inactive */
 	.filter_pid = false,
 	.filter_ifindex = false,
 	.filter_cgroup = false,
@@ -262,10 +265,43 @@ static bool filter_current_task(void)
 	return ok;
 }
 
+static __u32 sk_queue_len(const struct sk_buff_head *list)
+{
+	return READ_ONCE(list->qlen);
+}
+
+static bool sk_backlog_empty(const struct sock *sk)
+{
+	return READ_ONCE(sk->sk_backlog.tail) == NULL;
+}
+
+static bool filter_min_sockqueue_len(struct sock *sk)
+{
+	const u32 min_qlen = user_config.filter_min_sockqueue_len;
+
+	if (min_qlen == 0)
+		return true;
+
+	if (sk_queue_len(&sk->sk_receive_queue) >= min_qlen)
+		return true;
+
+	/* Packets can also be on the sk_backlog, but we don't know the number
+	 * of SKBs on the queue, because sk_backlog.len is in bytes (based on
+	 * skb->truesize).  Thus, if any backlog exists we don't filter.
+	 */
+	if (!sk_backlog_empty(sk))
+		return true;
+
+	return false;
+}
+
 static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 				  ktime_t tstamp, enum netstacklat_hook hook)
 {
 	u32 ifindex;
+
+	if (!filter_min_sockqueue_len(sk))
+		return;
 
 	if (!filter_current_task())
 		return;

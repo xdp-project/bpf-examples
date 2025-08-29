@@ -92,6 +92,7 @@ static const struct option long_options[] = {
 	{ "interfaces",        required_argument, NULL, 'i' },
 	{ "network-namespace", required_argument, NULL, 'n' },
 	{ "cgroups",           required_argument, NULL, 'c' },
+	{ "min-queuelength",   required_argument, NULL, 'q' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -550,10 +551,12 @@ static int parse_arguments(int argc, char *argv[],
 	long long network_ns = 0;
 	int opt, err, ret, i;
 	char optstr[64];
+	long long lval;
 	double fval;
 
 	conf->npids = 0;
 	conf->nifindices = 0;
+	conf->bpf_conf.filter_min_sockqueue_len = 0;
 	conf->bpf_conf.filter_pid = false;
 	conf->bpf_conf.filter_ifindex = false;
 	conf->bpf_conf.filter_cgroup = false;
@@ -637,6 +640,13 @@ static int parse_arguments(int argc, char *argv[],
 
 			conf->ncgroups += ret;
 			conf->bpf_conf.filter_cgroup = true;
+			break;
+		case 'q': // min-queuelength
+			err = parse_bounded_long(&lval, optarg, 0, 65536,
+						 optval_to_longopt(opt)->name);
+			if (err)
+				return err;
+			conf->bpf_conf.filter_min_sockqueue_len = lval;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);

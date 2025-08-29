@@ -60,6 +60,7 @@ struct hist_key {
 
 struct netstacklat_bpf_config {
 	__u32 network_ns;
+	__u32 filter_min_sockqueue_len;
 	bool filter_pid;
 	bool filter_ifindex;
 	bool filter_cgroup;

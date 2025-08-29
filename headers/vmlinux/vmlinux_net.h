@@ -26,6 +26,22 @@ typedef unsigned char *sk_buff_data_t;
 #endif
 */
 
+struct sk_buff_list {
+	struct sk_buff *next;
+	struct sk_buff *prev;
+};
+
+struct sk_buff_head {
+	union {
+		struct {
+			struct sk_buff *next;
+			struct sk_buff *prev;
+		};
+		struct sk_buff_list list;
+	};
+	__u32 qlen;
+};
+
 struct sk_buff {
 	union {
 		struct {
@@ -174,6 +190,13 @@ struct sock_common {
 
 struct sock {
 	struct sock_common __sk_common;
+	struct sk_buff_head sk_receive_queue;
+	struct {
+		atomic_t rmem_alloc;
+		int len;
+		struct sk_buff *head;
+		struct sk_buff *tail;
+	} sk_backlog;
 	struct dst_entry *sk_rx_dst;
 	int sk_rx_dst_ifindex;
 	u32 sk_rx_dst_cookie;
