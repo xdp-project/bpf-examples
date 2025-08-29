@@ -17,6 +17,7 @@ volatile const struct netstacklat_bpf_config user_config = {
 	.network_ns = 0,
 	.filter_pid = false,
 	.filter_ifindex = false,
+	.filter_cgroup = false,
 };
 
 /*
@@ -52,6 +53,13 @@ struct {
 	__type(key, u32);
 	__type(value, u64);
 } netstack_ifindexfilter SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_PARSED_CGROUPS);
+	__type(key, u64);
+	__type(value, u64);
+} netstack_cgroupfilter SEC(".maps");
 
 static u64 *lookup_or_zeroinit_histentry(void *map, const struct hist_key *key)
 {
@@ -226,15 +234,32 @@ static bool filter_pid(u32 pid)
 	return *pid_ok > 0;
 }
 
-static bool filter_current_task(void)
+static bool filter_cgroup(u64 cgroup_id)
 {
-	__u32 tgid;
-
-	if (!user_config.filter_pid)
+	if (!user_config.filter_cgroup)
+		// No cgroup filter - all cgroups ok
 		return true;
 
-	tgid = bpf_get_current_pid_tgid() >> 32;
-	return filter_pid(tgid);
+	return bpf_map_lookup_elem(&netstack_cgroupfilter, &cgroup_id) != NULL;
+}
+
+static bool filter_current_task(void)
+{
+	bool ok = true;
+	__u64 cgroup;
+	__u32 tgid;
+
+	if (user_config.filter_pid) {
+		tgid = bpf_get_current_pid_tgid() >> 32;
+		ok = ok && filter_pid(tgid);
+	}
+
+	if (user_config.filter_cgroup) {
+		cgroup = bpf_get_current_cgroup_id();
+		ok = ok && filter_cgroup(cgroup);
+	}
+
+	return ok;
 }
 
 static void record_socket_latency(struct sock *sk, struct sk_buff *skb,

@@ -2,6 +2,7 @@
 static const char *__doc__ =
 	"Netstacklat - Monitor latency to various points in the ingress network stack";
 
+#define _GNU_SOURCE // to get name_to_handle_at
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
@@ -10,6 +11,7 @@ static const char *__doc__ =
 #include <math.h>
 #include <getopt.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <net/if.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
@@ -50,10 +52,6 @@ static const char *__doc__ =
 
 #define MAX_HOOK_PROGS 4
 
-// Maximum number of PIDs to read from user
-#define MAX_PARSED_PIDS 4096
-#define MAX_PARSED_IFACES 4096
-
 typedef int (*t_parse_val_func)(const char *, void *);
 
 struct hook_prog_collection {
@@ -78,8 +76,10 @@ struct netstacklat_config {
 	bool enabled_hooks[NETSTACKLAT_N_HOOKS];
 	int npids;
 	int nifindices;
+	int ncgroups;
 	__u32 pids[MAX_PARSED_PIDS];
 	__u32 ifindices[MAX_PARSED_IFACES];
+	__u64 cgroups[MAX_PARSED_CGROUPS];
 };
 
 static const struct option long_options[] = {
@@ -91,6 +91,7 @@ static const struct option long_options[] = {
 	{ "pids",              required_argument, NULL, 'p' },
 	{ "interfaces",        required_argument, NULL, 'i' },
 	{ "network-namespace", required_argument, NULL, 'n' },
+	{ "cgroups",           required_argument, NULL, 'c' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -461,6 +462,86 @@ static int parse_ifaces(size_t size, __u32 arr[size], const char *str)
 	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",", parse_iface);
 }
 
+/**
+ * get_cgroup_id_from_path - Get cgroup id for a particular cgroup path
+ * @cgroup_workdir: The absolute cgroup path
+ *
+ * On success, it returns the cgroup id. On failure it returns 0,
+ * which is an invalid cgroup id, and errno is set.
+ *
+ * Slightly modified version of get_cgroup_id_from_path from
+ * /tools/testing/selftests/bpf/cgroup_helpers.c that does not
+ * print out the errors
+ */
+static unsigned long long get_cgroup_id_from_path(const char *cgroup_workdir)
+{
+	int dirfd, err, flags, mount_id, fhsize;
+	union {
+		unsigned long long cgid;
+		unsigned char raw_bytes[8];
+	} id;
+	struct file_handle *fhp, *fhp2;
+	unsigned long long ret = 0;
+
+	dirfd = AT_FDCWD;
+	flags = 0;
+	fhsize = sizeof(*fhp);
+	fhp = calloc(1, fhsize);
+	if (!fhp)
+		return 0;
+
+	err = name_to_handle_at(dirfd, cgroup_workdir, fhp, &mount_id, flags);
+	if (err >= 0 || fhp->handle_bytes != 8) {
+		errno = EBADE;
+		goto free_mem;
+	}
+
+	fhsize = sizeof(struct file_handle) + fhp->handle_bytes;
+	fhp2 = realloc(fhp, fhsize);
+	if (!fhp2)
+		goto free_mem;
+
+	err = name_to_handle_at(dirfd, cgroup_workdir, fhp2, &mount_id, flags);
+	fhp = fhp2;
+	if (err < 0)
+		goto free_mem;
+
+	memcpy(id.raw_bytes, fhp->f_handle, 8);
+	ret = id.cgid;
+
+free_mem:
+	free(fhp);
+	return ret;
+}
+
+static int parse_cgroup(const char *str, void *cgroupout)
+{
+	long long lval;
+	__u64 cgroup;
+	int err = 0;
+
+	cgroup = get_cgroup_id_from_path(str);
+
+	if (cgroup == 0) {
+		// Not a valid cgroup path - try parse it as an int instead
+		err = parse_bounded_long(&lval, str, 0, INT64_MAX, "cgroup");
+		if (!err)
+			cgroup = lval;
+	}
+
+	if (cgroup != 0)
+		*(__u64 *)cgroupout = cgroup;
+	else
+		fprintf(stderr, "%s is not a valid cgroup path or ID\n", str);
+
+	return err;
+}
+
+static int parse_cgroups(size_t size, __u64 arr[size], const char *str)
+{
+	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",", parse_cgroup);
+}
+
 static int parse_arguments(int argc, char *argv[],
 			   struct netstacklat_config *conf)
 {
@@ -475,6 +556,7 @@ static int parse_arguments(int argc, char *argv[],
 	conf->nifindices = 0;
 	conf->bpf_conf.filter_pid = false;
 	conf->bpf_conf.filter_ifindex = false;
+	conf->bpf_conf.filter_cgroup = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -545,6 +627,16 @@ static int parse_arguments(int argc, char *argv[],
 						 optval_to_longopt(opt)->name);
 			if (err)
 				return err;
+			break;
+		case 'c': // cgroups
+			ret = parse_cgroups(
+				ARRAY_SIZE(conf->cgroups) - conf->ncgroups,
+				conf->cgroups + conf->ncgroups, optarg);
+			if (ret < 0)
+				return ret;
+
+			conf->ncgroups += ret;
+			conf->bpf_conf.filter_cgroup = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
@@ -1218,6 +1310,16 @@ int main(int argc, char *argv[])
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed filling the ifindex filter map: %s\n",
+			errmsg);
+		goto exit_destroy_bpf;
+	}
+
+	err = init_filtermap(bpf_map__fd(obj->maps.netstack_cgroupfilter),
+			     config.cgroups, config.ncgroups,
+			     sizeof(*config.cgroups));
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed filling the cgroup filter map: %s\n",
 			errmsg);
 		goto exit_destroy_bpf;
 	}

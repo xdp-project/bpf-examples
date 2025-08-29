@@ -18,6 +18,11 @@
 // The highest ifindex we expect to encounter
 #define IFINDEX_MAX 16384
 
+// Maximum number of PIDs/ifaces/cgroups to read from the user and filter for
+#define MAX_PARSED_PIDS 4096
+#define MAX_PARSED_IFACES 4096
+#define MAX_PARSED_CGROUPS 4096
+
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 #endif
@@ -57,6 +62,7 @@ struct netstacklat_bpf_config {
 	__u32 network_ns;
 	bool filter_pid;
 	bool filter_ifindex;
+	bool filter_cgroup;
 };
 
 #endif
