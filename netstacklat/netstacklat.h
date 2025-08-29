@@ -15,6 +15,8 @@
 
 // The highest possible PID on a Linux system (from /include/linux/threads.h)
 #define PID_MAX_LIMIT (4 * 1024 * 1024)
+// The highest ifindex we expect to encounter
+#define IFINDEX_MAX 16384
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
@@ -53,6 +55,7 @@ struct hist_key {
 
 struct netstacklat_bpf_config {
 	bool filter_pid;
+	bool filter_ifindex;
 };
 
 #endif

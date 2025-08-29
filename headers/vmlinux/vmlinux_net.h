@@ -150,4 +150,10 @@ struct scm_timestamping_internal {
         struct timespec64 ts[3];
 };
 
+struct sock {
+	struct dst_entry *sk_rx_dst;
+	int sk_rx_dst_ifindex;
+	u32 sk_rx_dst_cookie;
+};
+
 #endif /* __VMLINUX_NET_H__ */

@@ -15,6 +15,7 @@ char LICENSE[] SEC("license") = "GPL";
 volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
 volatile const struct netstacklat_bpf_config user_config = {
 	.filter_pid = false,
+	.filter_ifindex = false,
 };
 
 /*
@@ -39,10 +40,17 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, PID_MAX_LIMIT);
+	__uint(max_entries, PID_MAX_LIMIT + 1);
 	__type(key, u32);
 	__type(value, u64);
 } netstack_pidfilter SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, IFINDEX_MAX + 1);
+	__type(key, u32);
+	__type(value, u64);
+} netstack_ifindexfilter SEC(".maps");
 
 static u64 *lookup_or_zeroinit_histentry(void *map, const struct hist_key *key)
 {
@@ -131,6 +139,21 @@ static void record_latency_since(ktime_t tstamp, enum netstacklat_hook hook)
 		record_latency(latency, hook);
 }
 
+static bool filter_ifindex(u32 ifindex)
+{
+	u64 *ifindex_ok;
+
+	if (!user_config.filter_ifindex)
+		// No ifindex filter - all ok
+		return true;
+
+	ifindex_ok = bpf_map_lookup_elem(&netstack_ifindexfilter, &ifindex);
+	if (!ifindex_ok)
+		return false;
+
+	return *ifindex_ok > 0;
+}
+
 static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
 {
 	if (bpf_core_field_exists(skb->tstamp_type)) {
@@ -155,6 +178,9 @@ static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
 		if (BPF_CORE_READ_BITFIELD(skb_old, mono_delivery_time) > 0)
 			return;
 	}
+
+	if (!filter_ifindex(skb->skb_iif))
+		return;
 
 	record_latency_since(skb->tstamp, hook);
 }
@@ -185,10 +211,16 @@ static bool filter_current_task(void)
 	return filter_pid(tgid);
 }
 
-static void record_socket_latency(struct sock *sk, ktime_t tstamp,
-				  enum netstacklat_hook hook)
+static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
+				  ktime_t tstamp, enum netstacklat_hook hook)
 {
+	u32 ifindex;
+
 	if (!filter_current_task())
+		return;
+
+	ifindex = skb ? skb->skb_iif : sk->sk_rx_dst_ifindex;
+	if (!filter_ifindex(ifindex))
 		return;
 
 	record_latency_since(tstamp, hook);
@@ -259,7 +291,8 @@ int BPF_PROG(netstacklat_tcp_recv_timestamp, void *msg, struct sock *sk,
 	     struct scm_timestamping_internal *tss)
 {
 	struct timespec64 *ts = &tss->ts[0];
-	record_socket_latency(sk, (ktime_t)ts->tv_sec * NS_PER_S + ts->tv_nsec,
+	record_socket_latency(sk, NULL,
+			      (ktime_t)ts->tv_sec * NS_PER_S + ts->tv_nsec,
 			      NETSTACKLAT_HOOK_TCP_SOCK_READ);
 	return 0;
 }
@@ -268,6 +301,7 @@ SEC("fentry/skb_consume_udp")
 int BPF_PROG(netstacklat_skb_consume_udp, struct sock *sk, struct sk_buff *skb,
 	     int len)
 {
-	record_socket_latency(sk, skb->tstamp, NETSTACKLAT_HOOK_UDP_SOCK_READ);
+	record_socket_latency(sk, skb, skb->tstamp,
+			      NETSTACKLAT_HOOK_UDP_SOCK_READ);
 	return 0;
 }

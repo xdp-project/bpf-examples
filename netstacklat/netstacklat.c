@@ -10,6 +10,7 @@ static const char *__doc__ =
 #include <math.h>
 #include <getopt.h>
 #include <ctype.h>
+#include <net/if.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
 #include <sys/epoll.h>
@@ -48,8 +49,9 @@ static const char *__doc__ =
 
 #define MAX_HOOK_PROGS 4
 
-// Maximum number of different pids that can be filtered for
-#define MAX_FILTER_PIDS 4096
+// Maximum number of PIDs to read from user
+#define MAX_PARSED_PIDS 4096
+#define MAX_PARSED_IFACES 4096
 
 typedef int (*t_parse_val_func)(const char *, void *);
 
@@ -74,7 +76,9 @@ struct netstacklat_config {
 	double report_interval_s;
 	bool enabled_hooks[NETSTACKLAT_N_HOOKS];
 	int npids;
-	__u32 pids[MAX_FILTER_PIDS];
+	int nifindices;
+	__u32 pids[MAX_PARSED_PIDS];
+	__u32 ifindices[MAX_PARSED_IFACES];
 };
 
 static const struct option long_options[] = {
@@ -84,6 +88,7 @@ static const struct option long_options[] = {
 	{ "enable-probes",   required_argument, NULL, 'e' },
 	{ "disable-probes",  required_argument, NULL, 'd' },
 	{ "pids",            required_argument, NULL, 'p' },
+	{ "interfaces",      required_argument, NULL, 'i' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -408,6 +413,40 @@ static int parse_pids(size_t size, __u32 arr[size], const char *str)
 				    parse_pid);
 }
 
+static int parse_iface(const char *str, void *ifindexout)
+{
+	int ifindex, err = 0;
+	long long lval;
+
+	ifindex = if_nametoindex(str);
+	if (ifindex > IFINDEX_MAX) {
+		fprintf(stderr,
+			"%s has ifindex %d which is above the supported limit %d\n",
+			str, ifindex, IFINDEX_MAX);
+		return -ENOTSUP;
+	} else if (ifindex == 0) {
+		// Not a valid interface name - try parsing it as an index instead
+		err = parse_bounded_long(&lval, str, 1, IFINDEX_MAX,
+					 "interface");
+		if (!err)
+			ifindex = lval;
+	}
+
+	if (ifindex > 0)
+		*(__u32 *)ifindexout = ifindex;
+	else
+		fprintf(stderr,
+			"%s is not a recognized interface name, nor a valid interface index\n",
+			str);
+
+	return err;
+}
+
+static int parse_ifaces(size_t size, __u32 arr[size], const char *str)
+{
+	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",", parse_iface);
+}
+
 static int parse_arguments(int argc, char *argv[],
 			   struct netstacklat_config *conf)
 {
@@ -418,7 +457,9 @@ static int parse_arguments(int argc, char *argv[],
 	double fval;
 
 	conf->npids = 0;
+	conf->nifindices = 0;
 	conf->bpf_conf.filter_pid = false;
+	conf->bpf_conf.filter_ifindex = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -464,7 +505,7 @@ static int parse_arguments(int argc, char *argv[],
 				conf->enabled_hooks[i] = !hooks[i];
 			hooks_off = true;
 			break;
-		case 'p': // filter-pids
+		case 'p': // pids
 			ret = parse_pids(ARRAY_SIZE(conf->pids) - conf->npids,
 					 conf->pids + conf->npids, optarg);
 			if (ret < 0)
@@ -472,6 +513,16 @@ static int parse_arguments(int argc, char *argv[],
 
 			conf->npids += ret;
 			conf->bpf_conf.filter_pid = true;
+			break;
+		case 'i': // interfaces
+			ret = parse_ifaces(
+				ARRAY_SIZE(conf->ifindices) - conf->nifindices,
+				conf->ifindices + conf->nifindices, optarg);
+			if (ret < 0)
+				return ret;
+
+			conf->nifindices += ret;
+			conf->bpf_conf.filter_ifindex = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
@@ -1120,6 +1171,16 @@ int main(int argc, char *argv[])
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed filling the pid filter map: %s\n",
+			errmsg);
+		goto exit_destroy_bpf;
+	}
+
+	err = init_filtermap(bpf_map__fd(obj->maps.netstack_ifindexfilter),
+			     config.ifindices, config.nifindices,
+			     sizeof(*config.ifindices));
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed filling the ifindex filter map: %s\n",
 			errmsg);
 		goto exit_destroy_bpf;
 	}
