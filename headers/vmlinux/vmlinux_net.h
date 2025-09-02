@@ -3,6 +3,15 @@
 
 typedef __u32 __wsum;
 
+typedef struct {
+	struct net *net;
+} possible_net_t;
+
+struct net_device {
+	int ifindex;
+	possible_net_t nd_net;
+};
+
 typedef unsigned int sk_buff_data_t; // Assumes 64-bit. FIXME see below
 /*
 // BITS_PER_LONG can be wrong with -target bpf
@@ -16,6 +25,22 @@ typedef unsigned int sk_buff_data_t;
 typedef unsigned char *sk_buff_data_t;
 #endif
 */
+
+struct sk_buff_list {
+	struct sk_buff *next;
+	struct sk_buff *prev;
+};
+
+struct sk_buff_head {
+	union {
+		struct {
+			struct sk_buff *next;
+			struct sk_buff *prev;
+		};
+		struct sk_buff_list list;
+	};
+	__u32 qlen;
+};
 
 struct sk_buff {
 	union {
@@ -147,7 +172,34 @@ enum ip_conntrack_status {
 };
 
 struct scm_timestamping_internal {
-        struct timespec64 ts[3];
+	struct timespec64 ts[3];
+};
+
+struct ns_common {
+	struct dentry *stashed;
+	unsigned int inum;
+};
+
+struct net {
+	struct ns_common ns;
+};
+
+struct sock_common {
+	possible_net_t skc_net;
+};
+
+struct sock {
+	struct sock_common __sk_common;
+	struct sk_buff_head sk_receive_queue;
+	struct {
+		atomic_t rmem_alloc;
+		int len;
+		struct sk_buff *head;
+		struct sk_buff *tail;
+	} sk_backlog;
+	struct dst_entry *sk_rx_dst;
+	int sk_rx_dst_ifindex;
+	u32 sk_rx_dst_cookie;
 };
 
 #endif /* __VMLINUX_NET_H__ */

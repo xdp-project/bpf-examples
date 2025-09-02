@@ -9,12 +9,20 @@
 #include "netstacklat.h"
 #include "bits.bpf.h"
 
+#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
+
 char LICENSE[] SEC("license") = "GPL";
 
 
 volatile const __s64 TAI_OFFSET = (37LL * NS_PER_S);
 volatile const struct netstacklat_bpf_config user_config = {
+	.network_ns = 0,
+	.filter_min_sockqueue_len = 0, /* zero means filter is inactive */
 	.filter_pid = false,
+	.filter_ifindex = false,
+	.filter_cgroup = false,
+	.groupby_ifindex = false,
+	.groupby_cgroup = false,
 };
 
 /*
@@ -30,74 +38,47 @@ struct sk_buff___old {
 	__u8 mono_delivery_time: 1;
 } __attribute__((preserve_access_index));
 
-/*
- * To be compatible with ebpf-exporter, all histograms need a key struct whose final
- * member is named "bucket" and is the histogram bucket index.
- * As we store the histograms in array maps, the key type for each array map
- * below has to be a u32 (and not a struct), but as this struct consists of a
- * single u32 member we can still use a pointer to the hist_key struct in
- * lookup-functions, and the u32 bucket index will implicitly be mapped to the
- * array map index.
- */
-struct hist_key {
-	u32 bucket;
-};
-
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
+	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+	__uint(max_entries, HIST_NBUCKETS * NETSTACKLAT_N_HOOKS * 64);
+	__type(key, struct hist_key);
 	__type(value, u64);
-} netstack_latency_ip_start_seconds SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
-	__type(value, u64);
-} netstack_latency_tcp_start_seconds SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
-	__type(value, u64);
-} netstack_latency_udp_start_seconds SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
-	__type(value, u64);
-} netstack_latency_tcp_sock_enqueued_seconds SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
-	__type(value, u64);
-} netstack_latency_udp_sock_enqueued_seconds SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
-	__type(value, u64);
-} netstack_latency_tcp_sock_read_seconds SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, HIST_NBUCKETS);
-	__type(key, u32);
-	__type(value, u64);
-} netstack_latency_udp_sock_read_seconds SEC(".maps");
+} netstack_latency_seconds SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, PID_MAX_LIMIT);
+	__uint(max_entries, PID_MAX_LIMIT + 1);
 	__type(key, u32);
-	__type(value, u8);
+	__type(value, u64);
 } netstack_pidfilter SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, IFINDEX_MAX + 1);
+	__type(key, u32);
+	__type(value, u64);
+} netstack_ifindexfilter SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_PARSED_CGROUPS);
+	__type(key, u64);
+	__type(value, u64);
+} netstack_cgroupfilter SEC(".maps");
+
+static u64 *lookup_or_zeroinit_histentry(void *map, const struct hist_key *key)
+{
+	u64 zero = 0;
+	u64 *val;
+
+	val = bpf_map_lookup_elem(map, key);
+	if (val)
+		return val;
+
+	// Key not in map - try insert it and lookup again
+	bpf_map_update_elem(map, key, &zero, BPF_NOEXIST);
+	return bpf_map_lookup_elem(map, key);
+}
 
 static u32 get_exp2_histogram_bucket_idx(u64 value, u32 max_bucket)
 {
@@ -130,7 +111,7 @@ static void increment_exp2_histogram_nosync(void *map, struct hist_key key,
 
 	// Increment histogram
 	key.bucket = get_exp2_histogram_bucket_idx(value, max_bucket);
-	bucket_count = bpf_map_lookup_elem(map, &key);
+	bucket_count = lookup_or_zeroinit_histentry(map, &key);
 	if (bucket_count)
 		(*bucket_count)++;
 
@@ -139,31 +120,9 @@ static void increment_exp2_histogram_nosync(void *map, struct hist_key key,
 		return;
 
 	key.bucket = max_bucket + 1;
-	bucket_count = bpf_map_lookup_elem(map, &key);
+	bucket_count = lookup_or_zeroinit_histentry(map, &key);
 	if (bucket_count)
 		*bucket_count += value;
-}
-
-static void *hook_to_histmap(enum netstacklat_hook hook)
-{
-	switch (hook) {
-	case NETSTACKLAT_HOOK_IP_RCV:
-		return &netstack_latency_ip_start_seconds;
-	case NETSTACKLAT_HOOK_TCP_START:
-		return &netstack_latency_tcp_start_seconds;
-	case NETSTACKLAT_HOOK_UDP_START:
-		return &netstack_latency_udp_start_seconds;
-	case NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED:
-		return &netstack_latency_tcp_sock_enqueued_seconds;
-	case NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED:
-		return &netstack_latency_udp_sock_enqueued_seconds;
-	case NETSTACKLAT_HOOK_TCP_SOCK_READ:
-		return &netstack_latency_tcp_sock_read_seconds;
-	case NETSTACKLAT_HOOK_UDP_SOCK_READ:
-		return &netstack_latency_udp_sock_read_seconds;
-	default:
-		return NULL;
-	}
 }
 
 static ktime_t time_since(ktime_t tstamp)
@@ -180,22 +139,61 @@ static ktime_t time_since(ktime_t tstamp)
 	return now - tstamp;
 }
 
-static void record_latency(ktime_t latency, enum netstacklat_hook hook)
+static void record_latency(ktime_t latency, const struct hist_key *key)
 {
-	struct hist_key key = { 0 };
-	increment_exp2_histogram_nosync(hook_to_histmap(hook), key, latency,
+	increment_exp2_histogram_nosync(&netstack_latency_seconds, *key, latency,
 					HIST_MAX_LATENCY_SLOT);
 }
 
-static void record_latency_since(ktime_t tstamp, enum netstacklat_hook hook)
+static void record_latency_since(ktime_t tstamp, const struct hist_key *key)
 {
 	ktime_t latency = time_since(tstamp);
 	if (latency >= 0)
-		record_latency(latency, hook);
+		record_latency(latency, key);
 }
 
-static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
+static bool filter_ifindex(u32 ifindex)
 {
+	u64 *ifindex_ok;
+
+	if (!user_config.filter_ifindex)
+		// No ifindex filter - all ok
+		return true;
+
+	ifindex_ok = bpf_map_lookup_elem(&netstack_ifindexfilter, &ifindex);
+	if (!ifindex_ok)
+		return false;
+
+	return *ifindex_ok > 0;
+}
+
+static __u64 get_network_ns(struct sk_buff *skb, struct sock *sk)
+{
+	/*
+	 * Favor reading from sk due to less redirection (fewer probe reads)
+	 * and skb->dev is not always set.
+	 */
+	if (sk)
+		return BPF_CORE_READ(sk->__sk_common.skc_net.net, ns.inum);
+	else if (skb)
+		return BPF_CORE_READ(skb->dev, nd_net.net, ns.inum);
+	return 0;
+}
+
+static bool filter_network_ns(struct sk_buff *skb, struct sock *sk)
+{
+	if (user_config.network_ns == 0)
+		return true;
+
+	return get_network_ns(skb, sk) == user_config.network_ns;
+}
+
+
+static void record_skb_latency(struct sk_buff *skb, struct sock *sk, enum netstacklat_hook hook)
+{
+	struct hist_key key = { .hook = hook };
+	u32 ifindex;
+
 	if (bpf_core_field_exists(skb->tstamp_type)) {
 		/*
 		 * For kernels >= v6.11 the tstamp_type being non-zero
@@ -219,12 +217,22 @@ static void record_skb_latency(struct sk_buff *skb, enum netstacklat_hook hook)
 			return;
 	}
 
-	record_latency_since(skb->tstamp, hook);
+	ifindex = skb->skb_iif;
+	if (!filter_ifindex(ifindex))
+		return;
+
+	if (!filter_network_ns(skb, sk))
+		return;
+
+	if (user_config.groupby_ifindex)
+		key.ifindex = ifindex;
+
+	record_latency_since(skb->tstamp, &key);
 }
 
 static bool filter_pid(u32 pid)
 {
-	u8 *pid_ok;
+	u64 *pid_ok;
 
 	if (!user_config.filter_pid)
 		// No PID filter - all PIDs ok
@@ -237,31 +245,97 @@ static bool filter_pid(u32 pid)
 	return *pid_ok > 0;
 }
 
-static bool filter_current_task(void)
+static bool filter_cgroup(u64 cgroup_id)
 {
-	__u32 tgid;
-
-	if (!user_config.filter_pid)
+	if (!user_config.filter_cgroup)
+		// No cgroup filter - all cgroups ok
 		return true;
 
-	tgid = bpf_get_current_pid_tgid() >> 32;
-	return filter_pid(tgid);
+	return bpf_map_lookup_elem(&netstack_cgroupfilter, &cgroup_id) != NULL;
 }
 
-static void record_socket_latency(struct sock *sk, ktime_t tstamp,
-				  enum netstacklat_hook hook)
+static bool filter_current_task(u64 cgroup)
 {
-	if (!filter_current_task())
+	bool ok = true;
+	__u32 tgid;
+
+	if (user_config.filter_pid) {
+		tgid = bpf_get_current_pid_tgid() >> 32;
+		ok = ok && filter_pid(tgid);
+	}
+
+	if (user_config.filter_cgroup)
+		ok = ok && filter_cgroup(cgroup);
+
+	return ok;
+}
+
+static __u32 sk_queue_len(const struct sk_buff_head *list)
+{
+	return READ_ONCE(list->qlen);
+}
+
+static bool sk_backlog_empty(const struct sock *sk)
+{
+	return READ_ONCE(sk->sk_backlog.tail) == NULL;
+}
+
+static bool filter_min_sockqueue_len(struct sock *sk)
+{
+	const u32 min_qlen = user_config.filter_min_sockqueue_len;
+
+	if (min_qlen == 0)
+		return true;
+
+	if (sk_queue_len(&sk->sk_receive_queue) >= min_qlen)
+		return true;
+
+	/* Packets can also be on the sk_backlog, but we don't know the number
+	 * of SKBs on the queue, because sk_backlog.len is in bytes (based on
+	 * skb->truesize).  Thus, if any backlog exists we don't filter.
+	 */
+	if (!sk_backlog_empty(sk))
+		return true;
+
+	return false;
+}
+
+static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
+				  ktime_t tstamp, enum netstacklat_hook hook)
+{
+	struct hist_key key = { .hook = hook };
+	u64 cgroup = 0;
+	u32 ifindex;
+
+	if (!filter_min_sockqueue_len(sk))
 		return;
 
-	record_latency_since(tstamp, hook);
+	if (user_config.filter_cgroup || user_config.groupby_cgroup)
+		cgroup = bpf_get_current_cgroup_id();
+
+	if (!filter_current_task(cgroup))
+		return;
+
+	ifindex = skb ? skb->skb_iif : sk->sk_rx_dst_ifindex;
+	if (!filter_ifindex(ifindex))
+		return;
+
+	if (!filter_network_ns(skb, sk))
+		return;
+
+	if (user_config.groupby_ifindex)
+		key.ifindex = ifindex;
+	if (user_config.groupby_cgroup)
+		key.cgroup = cgroup;
+
+	record_latency_since(tstamp, &key);
 }
 
 SEC("fentry/ip_rcv_core")
 int BPF_PROG(netstacklat_ip_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_IP_RCV);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_IP_RCV);
 	return 0;
 }
 
@@ -269,58 +343,51 @@ SEC("fentry/ip6_rcv_core")
 int BPF_PROG(netstacklat_ip6_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_IP_RCV);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_IP_RCV);
 	return 0;
 }
 
 SEC("fentry/tcp_v4_rcv")
 int BPF_PROG(netstacklat_tcp_v4_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_TCP_START);
 	return 0;
 }
 
 SEC("fentry/tcp_v6_rcv")
 int BPF_PROG(netstacklat_tcp_v6_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_TCP_START);
 	return 0;
 }
 
 SEC("fentry/udp_rcv")
 int BPF_PROG(netstacklat_udp_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_UDP_START);
 	return 0;
 }
 
 SEC("fentry/udpv6_rcv")
 int BPF_PROG(netstacklat_udpv6_rcv, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_START);
+	record_skb_latency(skb, NULL, NETSTACKLAT_HOOK_UDP_START);
 	return 0;
 }
 
-SEC("fexit/tcp_data_queue")
-int BPF_PROG(netstacklat_tcp_data_queue, struct sock *sk, struct sk_buff *skb)
+SEC("fexit/tcp_queue_rcv")
+int BPF_PROG(netstacklat_tcp_queue_rcv, struct sock *sk, struct sk_buff *skb)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
+	record_skb_latency(skb, sk, NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED);
 	return 0;
 }
 
-SEC("fexit/udp_queue_rcv_one_skb")
-int BPF_PROG(netstacklat_udp_queue_rcv_one_skb, struct sock *sk,
-	     struct sk_buff *skb)
+SEC("fexit/__udp_enqueue_schedule_skb")
+int BPF_PROG(netstacklat_udp_enqueue_schedule_skb, struct sock *sk,
+	     struct sk_buff *skb, int retval)
 {
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
-	return 0;
-}
-
-SEC("fexit/udpv6_queue_rcv_one_skb")
-int BPF_PROG(netstacklat_udpv6_queue_rcv_one_skb, struct sock *sk,
-	     struct sk_buff *skb)
-{
-	record_skb_latency(skb, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
+	if (retval == 0)
+		record_skb_latency(skb, sk, NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED);
 	return 0;
 }
 
@@ -329,7 +396,8 @@ int BPF_PROG(netstacklat_tcp_recv_timestamp, void *msg, struct sock *sk,
 	     struct scm_timestamping_internal *tss)
 {
 	struct timespec64 *ts = &tss->ts[0];
-	record_socket_latency(sk, (ktime_t)ts->tv_sec * NS_PER_S + ts->tv_nsec,
+	record_socket_latency(sk, NULL,
+			      (ktime_t)ts->tv_sec * NS_PER_S + ts->tv_nsec,
 			      NETSTACKLAT_HOOK_TCP_SOCK_READ);
 	return 0;
 }
@@ -338,6 +406,7 @@ SEC("fentry/skb_consume_udp")
 int BPF_PROG(netstacklat_skb_consume_udp, struct sock *sk, struct sk_buff *skb,
 	     int len)
 {
-	record_socket_latency(sk, skb->tstamp, NETSTACKLAT_HOOK_UDP_SOCK_READ);
+	record_socket_latency(sk, skb, skb->tstamp,
+			      NETSTACKLAT_HOOK_UDP_SOCK_READ);
 	return 0;
 }

@@ -15,6 +15,13 @@
 
 // The highest possible PID on a Linux system (from /include/linux/threads.h)
 #define PID_MAX_LIMIT (4 * 1024 * 1024)
+// The highest ifindex we expect to encounter
+#define IFINDEX_MAX 16384
+
+// Maximum number of PIDs/ifaces/cgroups to read from the user and filter for
+#define MAX_PARSED_PIDS 4096
+#define MAX_PARSED_IFACES 4096
+#define MAX_PARSED_CGROUPS 4096
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
@@ -26,6 +33,15 @@
 		typeof(a) _a = (a); \
 		typeof(b) _b = (b); \
 		_a > _b ? _a : _b;  \
+	})
+#endif
+
+#ifndef min
+#define min(a, b)                   \
+	({                          \
+		typeof(a) _a = (a); \
+		typeof(b) _b = (b); \
+		_a < _b ? _a : _b;  \
 	})
 #endif
 
@@ -41,10 +57,26 @@ enum netstacklat_hook {
 	NETSTACKLAT_N_HOOKS,
 };
 
-struct netstacklat_bpf_config
-{
+/*
+ * Key used for the histogram map
+ * To be compatible with ebpf-exporter, all histograms need a key struct whose final
+ * member is named "bucket" and is the histogram bucket index.
+ */
+struct hist_key {
+	__u64 cgroup;
+	__u32 ifindex;
+	__u16 hook; // need well defined size for ebpf-exporter to decode
+	__u16 bucket; // needs to be last to be compatible with ebpf-exporter
+};
+
+struct netstacklat_bpf_config {
+	__u32 network_ns;
+	__u32 filter_min_sockqueue_len;
 	bool filter_pid;
+	bool filter_ifindex;
+	bool filter_cgroup;
+	bool groupby_ifindex;
+	bool groupby_cgroup;
 };
 
 #endif
-

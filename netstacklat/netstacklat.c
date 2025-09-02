@@ -2,6 +2,7 @@
 static const char *__doc__ =
 	"Netstacklat - Monitor latency to various points in the ingress network stack";
 
+#define _GNU_SOURCE // to get name_to_handle_at
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
@@ -10,11 +11,14 @@ static const char *__doc__ =
 #include <math.h>
 #include <getopt.h>
 #include <ctype.h>
+#include <fcntl.h>
+#include <net/if.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/timex.h>
+#include <sys/stat.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -44,14 +48,26 @@ static const char *__doc__ =
 #define MAX_BUCKETCOUNT_STRLEN 10
 #define MAX_BAR_STRLEN (80 - 6 - MAX_BUCKETSPAN_STRLEN - MAX_BUCKETCOUNT_STRLEN)
 
+#define LOOKUP_BATCH_SIZE 128
+
 #define MAX_HOOK_PROGS 4
 
-// Maximum number of different pids that can be filtered for
-#define MAX_FILTER_PIDS 4096
+typedef int (*t_parse_val_func)(const char *, void *);
 
 struct hook_prog_collection {
 	struct bpf_program *progs[MAX_HOOK_PROGS];
 	int nprogs;
+};
+
+struct histogram_entry {
+	struct hist_key key;
+	__u64 *buckets;
+};
+
+struct histogram_buffer {
+	struct histogram_entry *hists;
+	size_t max_size;
+	size_t current_size;
 };
 
 struct netstacklat_config {
@@ -59,16 +75,26 @@ struct netstacklat_config {
 	double report_interval_s;
 	bool enabled_hooks[NETSTACKLAT_N_HOOKS];
 	int npids;
-	__u32 pids[MAX_FILTER_PIDS];
+	int nifindices;
+	int ncgroups;
+	__u32 pids[MAX_PARSED_PIDS];
+	__u32 ifindices[MAX_PARSED_IFACES];
+	__u64 cgroups[MAX_PARSED_CGROUPS];
 };
 
 static const struct option long_options[] = {
-	{ "help",            no_argument,       NULL, 'h' },
-	{ "report-interval", required_argument, NULL, 'r' },
-	{ "list-probes",     no_argument,       NULL, 'l' },
-	{ "enable-probes",   required_argument, NULL, 'e' },
-	{ "disable-probes",  required_argument, NULL, 'd' },
-	{ "pids",            required_argument, NULL, 'p' },
+	{ "help",              no_argument,       NULL, 'h' },
+	{ "report-interval",   required_argument, NULL, 'r' },
+	{ "list-probes",       no_argument,       NULL, 'l' },
+	{ "enable-probes",     required_argument, NULL, 'e' },
+	{ "disable-probes",    required_argument, NULL, 'd' },
+	{ "pids",              required_argument, NULL, 'p' },
+	{ "interfaces",        required_argument, NULL, 'i' },
+	{ "network-namespace", required_argument, NULL, 'n' },
+	{ "cgroups",           required_argument, NULL, 'c' },
+	{ "min-queuelength",   required_argument, NULL, 'q' },
+	{ "groupby-interface", no_argument,       NULL, 'I' },
+	{ "groupby-cgroup",    no_argument,       NULL, 'C' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -201,35 +227,6 @@ static const char *hook_to_description(enum netstacklat_hook hook)
 	}
 }
 
-static int hook_to_histmap(enum netstacklat_hook hook,
-			   const struct netstacklat_bpf *obj)
-{
-	switch (hook) {
-	case NETSTACKLAT_HOOK_IP_RCV:
-		return bpf_map__fd(obj->maps.netstack_latency_ip_start_seconds);
-	case NETSTACKLAT_HOOK_TCP_START:
-		return bpf_map__fd(
-			obj->maps.netstack_latency_tcp_start_seconds);
-	case NETSTACKLAT_HOOK_UDP_START:
-		return bpf_map__fd(
-			obj->maps.netstack_latency_udp_start_seconds);
-	case NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED:
-		return bpf_map__fd(
-			obj->maps.netstack_latency_tcp_sock_enqueued_seconds);
-	case NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED:
-		return bpf_map__fd(
-			obj->maps.netstack_latency_udp_sock_enqueued_seconds);
-	case NETSTACKLAT_HOOK_TCP_SOCK_READ:
-		return bpf_map__fd(
-			obj->maps.netstack_latency_tcp_sock_read_seconds);
-	case NETSTACKLAT_HOOK_UDP_SOCK_READ:
-		return bpf_map__fd(
-			obj->maps.netstack_latency_udp_sock_read_seconds);
-	default:
-		return -EINVAL;
-	}
-}
-
 static void hook_to_progs(struct hook_prog_collection *progs,
 			  enum netstacklat_hook hook,
 			  const struct netstacklat_bpf *obj)
@@ -251,14 +248,13 @@ static void hook_to_progs(struct hook_prog_collection *progs,
 		progs->nprogs = 2;
 		break;
 	case NETSTACKLAT_HOOK_TCP_SOCK_ENQUEUED:
-		progs->progs[0] = obj->progs.netstacklat_tcp_data_queue;
+		progs->progs[0] = obj->progs.netstacklat_tcp_queue_rcv;
 		progs->nprogs = 1;
 		break;
 	case NETSTACKLAT_HOOK_UDP_SOCK_ENQUEUED:
-		progs->progs[0] = obj->progs.netstacklat_udp_queue_rcv_one_skb;
-		progs->progs[1] =
-			obj->progs.netstacklat_udpv6_queue_rcv_one_skb;
-		progs->nprogs = 2;
+		progs->progs[0] =
+			obj->progs.netstacklat_udp_enqueue_schedule_skb;
+		progs->nprogs = 1;
 		break;
 	case NETSTACKLAT_HOOK_TCP_SOCK_READ:
 		progs->progs[0] = obj->progs.netstacklat_tcp_recv_timestamp;
@@ -282,6 +278,18 @@ static void list_hooks(FILE *stream)
 	for (hook = 1; hook < NETSTACKLAT_N_HOOKS; hook++)
 		fprintf(stream, "  %s: %s\n", hook_to_str(hook),
 			hook_to_description(hook));
+}
+
+static long long get_current_network_ns(void)
+{
+	struct stat ns_stat;
+	int err;
+
+	err = stat("/proc/self/ns/net", &ns_stat);
+	if (err)
+		return -errno;
+
+	return ns_stat.st_ino;
 }
 
 static int parse_bounded_double(double *res, const char *str, double low,
@@ -335,67 +343,31 @@ static int parse_bounded_long(long long *res, const char *str, long long low,
 	return 0;
 }
 
-/*
- * Parses a comma-delimited string of hook-names, and sets the positions for
- * the hooks that appear in the string to true.
- */
-static int parse_hooks(bool hooks[NETSTACKLAT_N_HOOKS], const char *_str)
+static int parse_strlist_to_arr(const char *_str, void *arr, size_t nelem,
+				size_t elem_size, const char *delim,
+				t_parse_val_func parse_func)
 {
-	enum netstacklat_hook hook;
-	char *tokp = NULL;
-	char str[1024];
-	char *hookstr;
-	int i;
-
-	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
-		hooks[i] = false;
-
-	if (strlen(_str) >= sizeof(str))
-		return -E2BIG;
-	strcpy(str, _str);
-
-	hookstr = strtok_r(str, ",", &tokp);
-	while (hookstr) {
-		hook = str_to_hook(hookstr);
-		if (hook == NETSTACKLAT_HOOK_INVALID) {
-			fprintf(stderr, "%s is not a valid hook\n", hookstr);
-			return -EINVAL;
-		}
-
-		hooks[hook] = true;
-
-		hookstr = strtok_r(NULL, ",", &tokp);
-	}
-
-	return 0;
-}
-
-static int parse_pids(size_t size, __u32 arr[size], const char *_str,
-		      const char *name)
-{
-	char *pidstr, *str;
-	char *tokp = NULL;
-	int err, i = 0;
-	long long val;
+	char *tokstr, *str;
+	char *saveptr = NULL;
+	int err = 0, i = 0;
 
 	str = malloc(strlen(_str) + 1);
 	if (!str)
 		return -ENOMEM;
 	strcpy(str, _str);
 
-	pidstr = strtok_r(str, ",", &tokp);
-	while (pidstr && i < size) {
-		err = parse_bounded_long(&val, pidstr, 1, PID_MAX_LIMIT, name);
+	tokstr = strtok_r(str, delim, &saveptr);
+	while (tokstr && i < nelem) {
+		err = parse_func(tokstr, (char *)arr + i * elem_size);
 		if (err)
 			goto exit;
-		arr[i] = val;
 
-		pidstr = strtok_r(NULL, ",", &tokp);
+		tokstr = strtok_r(NULL, delim, &saveptr);
 		i++;
 	}
 
-	if (pidstr)
-		// Parsed size pids, but more still remain
+	if (tokstr)
+		// Parsed size values, but more still remain
 		err = -E2BIG;
 
 exit:
@@ -403,17 +375,195 @@ exit:
 	return err ?: i;
 }
 
+int parse_hook(const char *str, void *hookout)
+{
+	enum netstacklat_hook hook;
+
+	hook = str_to_hook(str);
+	if (hook == NETSTACKLAT_HOOK_INVALID) {
+		fprintf(stderr, "%s is not a valid hook\n", str);
+		return -EINVAL;
+	}
+
+	*(enum netstacklat_hook *)hookout = hook;
+	return 0;
+}
+
+/*
+ * Parses a comma-delimited string of hook-names, and sets the positions for
+ * the hooks that appear in the string to true.
+ */
+static int parse_hooks(bool hooks[NETSTACKLAT_N_HOOKS], const char *str)
+{
+	enum netstacklat_hook ehooks[NETSTACKLAT_N_HOOKS * 2];
+	int len, i;
+
+	len = parse_strlist_to_arr(str, ehooks, ARRAY_SIZE(ehooks),
+				   sizeof(*ehooks), ",", parse_hook);
+	if (len < 0)
+		return len;
+
+	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
+		hooks[i] = false;
+
+	for (i = 0; i < len; i++)
+		hooks[ehooks[i]] = true;
+
+	return 0;
+}
+
+static int parse_pid(const char *str, void *pidout)
+{
+	long long lval;
+	int err;
+
+	err = parse_bounded_long(&lval, str, 1, PID_MAX_LIMIT, "pid");
+	if (err)
+		return err;
+
+	*(__u32 *)pidout = lval;
+	return 0;
+}
+
+static int parse_pids(size_t size, __u32 arr[size], const char *str)
+{
+	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",",
+				    parse_pid);
+}
+
+static int parse_iface(const char *str, void *ifindexout)
+{
+	int ifindex, err = 0;
+	long long lval;
+
+	ifindex = if_nametoindex(str);
+	if (ifindex > IFINDEX_MAX) {
+		fprintf(stderr,
+			"%s has ifindex %d which is above the supported limit %d\n",
+			str, ifindex, IFINDEX_MAX);
+		return -ENOTSUP;
+	} else if (ifindex == 0) {
+		// Not a valid interface name - try parsing it as an index instead
+		err = parse_bounded_long(&lval, str, 1, IFINDEX_MAX,
+					 "interface");
+		if (!err)
+			ifindex = lval;
+	}
+
+	if (ifindex > 0)
+		*(__u32 *)ifindexout = ifindex;
+	else
+		fprintf(stderr,
+			"%s is not a recognized interface name, nor a valid interface index\n",
+			str);
+
+	return err;
+}
+
+static int parse_ifaces(size_t size, __u32 arr[size], const char *str)
+{
+	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",", parse_iface);
+}
+
+/**
+ * get_cgroup_id_from_path - Get cgroup id for a particular cgroup path
+ * @cgroup_workdir: The absolute cgroup path
+ *
+ * On success, it returns the cgroup id. On failure it returns 0,
+ * which is an invalid cgroup id, and errno is set.
+ *
+ * Slightly modified version of get_cgroup_id_from_path from
+ * /tools/testing/selftests/bpf/cgroup_helpers.c that does not
+ * print out the errors
+ */
+static unsigned long long get_cgroup_id_from_path(const char *cgroup_workdir)
+{
+	int dirfd, err, flags, mount_id, fhsize;
+	union {
+		unsigned long long cgid;
+		unsigned char raw_bytes[8];
+	} id;
+	struct file_handle *fhp, *fhp2;
+	unsigned long long ret = 0;
+
+	dirfd = AT_FDCWD;
+	flags = 0;
+	fhsize = sizeof(*fhp);
+	fhp = calloc(1, fhsize);
+	if (!fhp)
+		return 0;
+
+	err = name_to_handle_at(dirfd, cgroup_workdir, fhp, &mount_id, flags);
+	if (err >= 0 || fhp->handle_bytes != 8) {
+		errno = EBADE;
+		goto free_mem;
+	}
+
+	fhsize = sizeof(struct file_handle) + fhp->handle_bytes;
+	fhp2 = realloc(fhp, fhsize);
+	if (!fhp2)
+		goto free_mem;
+
+	err = name_to_handle_at(dirfd, cgroup_workdir, fhp2, &mount_id, flags);
+	fhp = fhp2;
+	if (err < 0)
+		goto free_mem;
+
+	memcpy(id.raw_bytes, fhp->f_handle, 8);
+	ret = id.cgid;
+
+free_mem:
+	free(fhp);
+	return ret;
+}
+
+static int parse_cgroup(const char *str, void *cgroupout)
+{
+	long long lval;
+	__u64 cgroup;
+	int err = 0;
+
+	cgroup = get_cgroup_id_from_path(str);
+
+	if (cgroup == 0) {
+		// Not a valid cgroup path - try parse it as an int instead
+		err = parse_bounded_long(&lval, str, 0, INT64_MAX, "cgroup");
+		if (!err)
+			cgroup = lval;
+	}
+
+	if (cgroup != 0)
+		*(__u64 *)cgroupout = cgroup;
+	else
+		fprintf(stderr, "%s is not a valid cgroup path or ID\n", str);
+
+	return err;
+}
+
+static int parse_cgroups(size_t size, __u64 arr[size], const char *str)
+{
+	return parse_strlist_to_arr(str, arr, size, sizeof(*arr), ",", parse_cgroup);
+}
+
 static int parse_arguments(int argc, char *argv[],
 			   struct netstacklat_config *conf)
 {
 	bool hooks_on = false, hooks_off = false;
 	bool hooks[NETSTACKLAT_N_HOOKS];
+	long long network_ns = 0;
 	int opt, err, ret, i;
 	char optstr[64];
+	long long lval;
 	double fval;
 
 	conf->npids = 0;
+	conf->nifindices = 0;
+	conf->bpf_conf.filter_min_sockqueue_len = 0;
 	conf->bpf_conf.filter_pid = false;
+	conf->bpf_conf.filter_ifindex = false;
+	conf->bpf_conf.filter_cgroup = false;
+	conf->bpf_conf.groupby_ifindex = false;
+	conf->bpf_conf.groupby_cgroup = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -459,15 +609,54 @@ static int parse_arguments(int argc, char *argv[],
 				conf->enabled_hooks[i] = !hooks[i];
 			hooks_off = true;
 			break;
-		case 'p': // filter-pids
+		case 'p': // pids
 			ret = parse_pids(ARRAY_SIZE(conf->pids) - conf->npids,
-					 conf->pids + conf->npids, optarg,
-					 optval_to_longopt(opt)->name);
+					 conf->pids + conf->npids, optarg);
 			if (ret < 0)
 				return ret;
 
 			conf->npids += ret;
 			conf->bpf_conf.filter_pid = true;
+			break;
+		case 'i': // interfaces
+			ret = parse_ifaces(
+				ARRAY_SIZE(conf->ifindices) - conf->nifindices,
+				conf->ifindices + conf->nifindices, optarg);
+			if (ret < 0)
+				return ret;
+
+			conf->nifindices += ret;
+			conf->bpf_conf.filter_ifindex = true;
+			break;
+		case 'n': // network-namespace
+			err = parse_bounded_long(&network_ns, optarg, -1,
+						 UINT32_MAX,
+						 optval_to_longopt(opt)->name);
+			if (err)
+				return err;
+			break;
+		case 'c': // cgroups
+			ret = parse_cgroups(
+				ARRAY_SIZE(conf->cgroups) - conf->ncgroups,
+				conf->cgroups + conf->ncgroups, optarg);
+			if (ret < 0)
+				return ret;
+
+			conf->ncgroups += ret;
+			conf->bpf_conf.filter_cgroup = true;
+			break;
+		case 'q': // min-queuelength
+			err = parse_bounded_long(&lval, optarg, 0, 65536,
+						 optval_to_longopt(opt)->name);
+			if (err)
+				return err;
+			conf->bpf_conf.filter_min_sockqueue_len = lval;
+			break;
+		case 'I': // groupby-interface
+			conf->bpf_conf.groupby_ifindex = true;
+			break;
+		case 'C': // groupby-cgroup
+			conf->bpf_conf.groupby_cgroup = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
@@ -485,6 +674,21 @@ static int parse_arguments(int argc, char *argv[],
 			optval_to_longopt('e')->name,
 			optval_to_longopt('d')->name);
 		return -EINVAL;
+	}
+
+	if (network_ns < 0) {
+		conf->bpf_conf.network_ns = 0;
+	} else if (network_ns == 0) {
+		network_ns = get_current_network_ns();
+		if (network_ns < 0) {
+			fprintf(stderr,
+				"Failed getting current network namespace: %s\n",
+				strerror(-network_ns));
+			return network_ns;
+		}
+		conf->bpf_conf.network_ns = network_ns;
+	} else {
+		conf->bpf_conf.network_ns = network_ns;
 	}
 
 	return 0;
@@ -621,97 +825,240 @@ static void print_log2hist(FILE *stream, size_t n, const __u64 hist[n],
 	}
 }
 
-static void merge_percpu_hist(size_t n, int ncpus,
-			      const __u64 percpu_hist[n][ncpus],
-			      __u64 merged_hist[n])
+static void print_histkey(FILE *stream, const struct hist_key *key)
 {
-	int idx, cpu;
+	fprintf(stream, "%s", hook_to_str(key->hook));
 
-	memset(merged_hist, 0, sizeof(__u64) * n);
+	if (key->ifindex)
+		fprintf(stream, ", interface=%u", key->ifindex);
 
-	for (idx = 0; idx < n; idx++) {
-		for (cpu = 0; cpu < ncpus; cpu++) {
-			merged_hist[idx] += percpu_hist[idx][cpu];
-		}
-	}
+	if (key->cgroup)
+		fprintf(stream, ", cgroup=%llu", key->cgroup);
 }
 
-static int fetch_hist_map(int map_fd, __u64 hist[HIST_NBUCKETS])
+static int cmp_histkey(const void *val1, const void *val2)
 {
-	__u32 in_batch, out_batch, count = HIST_NBUCKETS;
+	const struct hist_key *key1 = val1, *key2 = val2;
+
+	if (key1->hook != key2->hook)
+		return key1->hook > key2->hook ? 1 : -1;
+
+	if (key1->ifindex != key2->ifindex)
+		return key1->ifindex > key2->ifindex ? 1 : -1;
+
+	if (key1->cgroup != key2->cgroup)
+		return key1->cgroup > key2->cgroup ? 1 : -1;
+
+	return 0;
+}
+
+static int cmp_histentry(const void *val1, const void *val2)
+{
+	const struct histogram_entry *entry1 = val1, *entry2 = val2;
+
+	return cmp_histkey(&entry1->key, &entry2->key);
+}
+
+static int insert_last_hist_sorted(struct histogram_buffer *buf)
+{
+	struct histogram_entry *hists = buf->hists;
+	int i, last = buf->current_size - 1;
+	struct histogram_entry tmp;
+
+	if (buf->current_size < 2)
+		return 0;
+
+	i = last;
+	while (i > 0 && cmp_histentry(&hists[last], &hists[i - 1]) < 0)
+		i--;
+
+	if (i == last)
+		// Last hist already in the right place, no need to swap it in
+		return i;
+
+	// Swap in hist to the correct position
+	memcpy(&tmp, &hists[last], sizeof(tmp));
+	memmove(&hists[i + 1], &hists[i], (last - i) * sizeof(*hists));
+	memcpy(&hists[i], &tmp, sizeof(*hists));
+
+	return i;
+}
+
+static struct histogram_entry *
+lookup_or_zeroinit_hist(const struct hist_key *key,
+			struct histogram_buffer *buf)
+{
+	struct histogram_entry *hist;
+	__u64 *buckets;
+	int i;
+
+	hist = bsearch(key, buf->hists, buf->current_size, sizeof(*buf->hists),
+		       cmp_histentry);
+	if (hist)
+		return hist;
+
+	// No matching histogram key found - create new histogram entry and insert it
+	if (buf->current_size >= buf->max_size) {
+		errno = ENOSPC;
+		return NULL;
+	}
+
+	buckets = calloc(HIST_NBUCKETS, sizeof(*buckets));
+	if (!buckets) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	hist = &buf->hists[buf->current_size++];
+	memcpy(&hist->key, key, sizeof(hist->key));
+	hist->key.bucket = 0;
+	hist->buckets = buckets;
+
+	i = insert_last_hist_sorted(buf);
+	return &buf->hists[i];
+}
+
+static int update_histogram_entry_bucket(const struct hist_key *key,
+					 __u64 count,
+					 struct histogram_buffer *buf)
+{
+	struct histogram_entry *hist;
+	int bucket = key->bucket;
+
+	hist = lookup_or_zeroinit_hist(key, buf);
+	if (!hist)
+		return -errno;
+
+	hist->buckets[bucket] = count;
+	return 0;
+}
+
+static __u64 sum_percpu_vals(int cpus, __u64 vals[cpus])
+{
+	__u64 sum = 0;
+	int i;
+
+	for (i = 0; i < cpus; i++)
+		sum += vals[i];
+
+	return sum;
+}
+
+static int fetch_histograms(int map_fd, struct histogram_buffer *buf)
+{
+	__u32 in_batch, out_batch, count = LOOKUP_BATCH_SIZE;
 	int ncpus = libbpf_num_possible_cpus();
-	__u32 idx, buckets_fetched = 0;
-	__u64 (*percpu_hist)[ncpus];
-	__u32 *keys;
-	int err = 0;
+	int i, nentries = 0, err, err2 = 0;
+	__u64(*percpu_buckets)[ncpus];
+	bool entries_remain = true;
+	struct hist_key *keys;
 
-	DECLARE_LIBBPF_OPTS(bpf_map_batch_opts, batch_opts, .flags = BPF_EXIST);
+	DECLARE_LIBBPF_OPTS(bpf_map_batch_opts, batch_opts);
 
-	percpu_hist = calloc(HIST_NBUCKETS, sizeof(*percpu_hist));
-	keys = calloc(HIST_NBUCKETS, sizeof(*keys));
-	if (!percpu_hist || !keys) {
+	percpu_buckets = calloc(LOOKUP_BATCH_SIZE, sizeof(*percpu_buckets));
+	keys = calloc(LOOKUP_BATCH_SIZE, sizeof(*keys));
+	if (!percpu_buckets || !keys) {
 		err = -ENOMEM;
 		goto exit;
 	}
 
-	while (buckets_fetched < HIST_NBUCKETS) {
+	while (entries_remain) {
 		err = bpf_map_lookup_batch(map_fd,
-					   buckets_fetched > 0 ? &in_batch : NULL,
-					   &out_batch, keys + buckets_fetched,
-					   percpu_hist + buckets_fetched, &count,
-					   &batch_opts);
-		if (err == -ENOENT) // All entries fetched
+					   nentries > 0 ? &in_batch : NULL,
+					   &out_batch, keys, percpu_buckets,
+					   &count, &batch_opts);
+		if (err == -ENOENT) { // All entries fetched
+			entries_remain = false;
 			err = 0;
-		else if (err)
+		} else if (err) {
 			goto exit;
+		}
 
-		// Verify keys match expected idx range
-		for (idx = buckets_fetched; idx < buckets_fetched + count; idx++) {
-			if (keys[idx] != idx) {
-				err = -EBADSLT;
+		for (i = 0; i < count; i++) {
+			err = update_histogram_entry_bucket(
+				&keys[i],
+				sum_percpu_vals(ncpus, percpu_buckets[i]), buf);
+			if (err == -ENOSPC) {
+				/*
+				 * Out of histogram entries.
+				 * Record error, but continue.
+				 * Use error code that should not clash with
+				 * bpf_map_lookup_batch
+				 */
+				err2 = -ETOOMANYREFS;
+				err = 0;
+			} else if (err) {
+				// Critical error - abort
 				goto exit;
 			}
 		}
 
+		nentries += count;
+		count = LOOKUP_BATCH_SIZE;
 		in_batch = out_batch;
-		buckets_fetched += count;
-		count = HIST_NBUCKETS - buckets_fetched;
 	}
 
-	merge_percpu_hist(HIST_NBUCKETS, ncpus, percpu_hist, hist);
-
 exit:
-	free(percpu_hist);
+	free(percpu_buckets);
 	free(keys);
-	return err;
+	return err ?: err2;
 }
 
-static int report_stats(const struct netstacklat_config *conf,
-			const struct netstacklat_bpf *obj)
+static int report_stats(const struct netstacklat_bpf *obj,
+			struct histogram_buffer *hist_buf)
 {
-	enum netstacklat_hook hook;
-	__u64 hist[HIST_NBUCKETS] = { 0 };
+	int i, err;
 	time_t t;
-	int err;
+
+	err = fetch_histograms(bpf_map__fd(obj->maps.netstack_latency_seconds),
+			       hist_buf);
+	if (err == -ETOOMANYREFS)
+		fprintf(stderr,
+			"Warning: Histogram buffer ran out of space - some histograms may not be reported\n");
+	else if (err)
+		return err;
 
 	time(&t);
 	printf("%s", ctime(&t));
 
-	for (hook = 1; hook < NETSTACKLAT_N_HOOKS; hook++) {
-		if (!conf->enabled_hooks[hook])
-			continue;
-
-		printf("%s:\n", hook_to_str(hook));
-
-		err = fetch_hist_map(hook_to_histmap(hook, obj), hist);
-		if (err)
-			return err;
-
-		print_log2hist(stdout, ARRAY_SIZE(hist), hist, 1);
+	for (i = 0; i < hist_buf->current_size; i++) {
+		print_histkey(stdout, &hist_buf->hists[i].key);
+		printf(":\n");
+		print_log2hist(stdout, HIST_NBUCKETS,
+			       hist_buf->hists[i].buckets, 1);
 		printf("\n");
 	}
 	fflush(stdout);
 
+	return 0;
+}
+
+static int init_histogram_buffer(struct histogram_buffer *buf,
+				 const struct netstacklat_config *conf)
+{
+	int max_hists = 0, i;
+
+	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++) {
+		if (conf->enabled_hooks[i])
+			max_hists++;
+	}
+
+	if (conf->bpf_conf.groupby_ifindex)
+		max_hists *= conf->bpf_conf.filter_ifindex ?
+				     min(conf->nifindices, 64) :
+				     32;
+
+	if (conf->bpf_conf.groupby_cgroup)
+		max_hists *= conf->bpf_conf.filter_cgroup ?
+				     min(conf->ncgroups, 128) :
+				     64;
+
+	buf->hists = calloc(max_hists, sizeof(*buf->hists));
+	if (!buf->hists)
+		return -errno;
+
+	buf->max_size = max_hists;
+	buf->current_size = 0;
 	return 0;
 }
 
@@ -765,6 +1112,75 @@ static void set_programs_to_load(const struct netstacklat_config *conf,
 			bpf_program__set_autoload(progs.progs[i],
 						  conf->enabled_hooks[hook]);
 	}
+}
+
+static int set_map_sizes(const struct netstacklat_config *conf,
+			 struct netstacklat_bpf *obj, int max_hists)
+{
+	__u32 size;
+	int err, i;
+
+	size = max_hists * HIST_NBUCKETS;
+	err = bpf_map__set_max_entries(obj->maps.netstack_latency_seconds,
+				       size);
+	if (err) {
+		fprintf(stderr, "Failed setting size of histogram map to %u\n",
+			size);
+		return err;
+	}
+
+	// PID filter - arraymap, needs max PID + 1 entries
+	for (i = 0, size = 1; i < conf->npids; i++) {
+		if (conf->pids[i] >= size)
+			size = conf->pids[i] + 1;
+	}
+	err = bpf_map__set_max_entries(obj->maps.netstack_pidfilter, size);
+	if (err) {
+		fprintf(stderr, "Failed setting size of PID filter map to %u\n",
+			size);
+		return err;
+	}
+
+	// ifindex filter - arraymap, needs max ifindex + 1 entries
+	for (i = 0, size = 1; i < conf->nifindices; i++) {
+		if (conf->ifindices[i] >= size)
+			size = conf->ifindices[i] + 1;
+	}
+	err = bpf_map__set_max_entries(obj->maps.netstack_ifindexfilter, size);
+	if (err) {
+		fprintf(stderr,
+			"Failed setting size of ifindex filter map to %u\n",
+			size);
+		return err;
+	}
+
+	// cgroup filter - hashmap, should be ~2x expected number of entries
+	size = conf->bpf_conf.filter_cgroup ? conf->ncgroups * 2 : 1;
+	err = bpf_map__set_max_entries(obj->maps.netstack_cgroupfilter, size);
+	if (err) {
+		fprintf(stderr,
+			"Failed setting size of cgroup filter map to %u\n",
+			size);
+		return err;
+	}
+
+	return 0;
+}
+
+static int init_filtermap(int map_fd, void *keys, size_t nelem,
+			  size_t elem_size)
+{
+	__u64 ok_val = 1;
+	int i, err;
+
+	for (i = 0; i < nelem; i++) {
+		err = bpf_map_update_elem(map_fd, (char *)keys + i * elem_size,
+					  &ok_val, 0);
+		if (err)
+			return err;
+	}
+
+	return 0;
 }
 
 static int init_signalfd(void)
@@ -836,8 +1252,8 @@ static int setup_timer(__u64 interval_ns)
 	return fd;
 }
 
-static int handle_timer(int timer_fd, const struct netstacklat_config *conf,
-			const struct netstacklat_bpf *obj)
+static int handle_timer(int timer_fd, const struct netstacklat_bpf *obj,
+			struct histogram_buffer *hist_buf)
 {
 	__u64 timer_exps;
 	ssize_t size;
@@ -854,7 +1270,7 @@ static int handle_timer(int timer_fd, const struct netstacklat_config *conf,
 		fprintf(stderr, "Warning: Missed %llu reporting intervals\n",
 			timer_exps - 1);
 
-	return report_stats(conf, obj);
+	return report_stats(obj, hist_buf);
 }
 
 static int epoll_add_event(int epoll_fd, int fd, __u64 event_type, __u64 value)
@@ -894,8 +1310,8 @@ err:
 	return err;
 }
 
-static int poll_events(int epoll_fd, const struct netstacklat_config *conf,
-		       const struct netstacklat_bpf *obj)
+static int poll_events(int epoll_fd, const struct netstacklat_bpf *obj,
+		       struct histogram_buffer *hist_buf)
 {
 	struct epoll_event events[MAX_EPOLL_EVENTS];
 	int i, n, fd, err = 0;
@@ -914,7 +1330,7 @@ static int poll_events(int epoll_fd, const struct netstacklat_config *conf,
 			err = handle_signal(fd);
 			break;
 		case NETSTACKLAT_EPOLL_TIMER:
-			err = handle_timer(fd, conf, obj);
+			err = handle_timer(fd, obj, hist_buf);
 			break;
 		default:
 			fprintf(stderr, "Warning: unexpected epoll data: %lu\n",
@@ -929,36 +1345,26 @@ static int poll_events(int epoll_fd, const struct netstacklat_config *conf,
 	return err;
 }
 
-static int init_pidfilter_map(const struct netstacklat_bpf *obj,
-			      const struct netstacklat_config *conf)
-{
-	__u8 pid_ok_val = 1;
-	int map_fd, err;
-	__u32 i;
-
-	map_fd = bpf_map__fd(obj->maps.netstack_pidfilter);
-	for (i = 0; i < conf->npids; i++) {
-		err = bpf_map_update_elem(map_fd, &conf->pids[i], &pid_ok_val,
-					  0);
-		if (err)
-			return err;
-	}
-
-	return 0;
-}
-
 int main(int argc, char *argv[])
 {
 	int sig_fd, timer_fd, epoll_fd, sock_fd, err;
 	struct netstacklat_config config = {
 		.report_interval_s = 5,
 	};
+	struct histogram_buffer hist_buf;
 	struct netstacklat_bpf *obj;
 	char errmsg[128];
 
 	err = parse_arguments(argc, argv, &config);
 	if (err) {
 		fprintf(stderr, "Failed parsing arguments: %s\n",
+			strerror(-err));
+		return EXIT_FAILURE;
+	}
+
+	err = init_histogram_buffer(&hist_buf, &config);
+	if (err) {
+		fprintf(stderr, "Failed allocating buffer for histograms: %s\n",
 			strerror(-err));
 		return EXIT_FAILURE;
 	}
@@ -974,7 +1380,7 @@ int main(int argc, char *argv[])
 
 	obj = netstacklat_bpf__open();
 	if (!obj) {
-		err = libbpf_get_error(obj);
+		err = -errno;
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed opening eBPF object file: %s\n", errmsg);
 		goto exit_sockfd;
@@ -985,6 +1391,13 @@ int main(int argc, char *argv[])
 
 	set_programs_to_load(&config, obj);
 
+	err = set_map_sizes(&config, obj, hist_buf.max_size);
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed configuring map sizes: %s\n", errmsg);
+		goto exit_destroy_bpf;
+	}
+
 	err = netstacklat_bpf__load(obj);
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
@@ -992,10 +1405,32 @@ int main(int argc, char *argv[])
 		goto exit_destroy_bpf;
 	}
 
-	err = init_pidfilter_map(obj, &config);
+	err = init_filtermap(bpf_map__fd(obj->maps.netstack_pidfilter),
+			     config.pids, config.npids, sizeof(*config.pids));
+
 	if (err) {
 		libbpf_strerror(err, errmsg, sizeof(errmsg));
 		fprintf(stderr, "Failed filling the pid filter map: %s\n",
+			errmsg);
+		goto exit_destroy_bpf;
+	}
+
+	err = init_filtermap(bpf_map__fd(obj->maps.netstack_ifindexfilter),
+			     config.ifindices, config.nifindices,
+			     sizeof(*config.ifindices));
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed filling the ifindex filter map: %s\n",
+			errmsg);
+		goto exit_destroy_bpf;
+	}
+
+	err = init_filtermap(bpf_map__fd(obj->maps.netstack_cgroupfilter),
+			     config.cgroups, config.ncgroups,
+			     sizeof(*config.cgroups));
+	if (err) {
+		libbpf_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Failed filling the cgroup filter map: %s\n",
 			errmsg);
 		goto exit_destroy_bpf;
 	}
@@ -1032,12 +1467,12 @@ int main(int argc, char *argv[])
 
 	// Report stats until user shuts down program
 	while (true) {
-		err = poll_events(epoll_fd, &config, obj);
+		err = poll_events(epoll_fd, obj, &hist_buf);
 
 		if (err) {
 			if (err == NETSTACKLAT_ABORT) {
 				// Report stats a final time before terminating
-				err = report_stats(&config, obj);
+				err = report_stats(obj, &hist_buf);
 			} else {
 				libbpf_strerror(err, errmsg, sizeof(errmsg));
 				fprintf(stderr, "Failed polling fds: %s\n",
