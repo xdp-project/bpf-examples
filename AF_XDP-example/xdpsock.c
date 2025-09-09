@@ -1098,7 +1098,7 @@ static struct option long_options[] = {
 	{"no-need-wakeup", no_argument, 0, 'm'},
 	{"unaligned", no_argument, 0, 'u'},
 	{"shared-umem", no_argument, 0, 'M'},
-	{"force", no_argument, 0, 'F'},
+	{"frags", no_argument, 0, 'F'},
 	{"duration", required_argument, 0, 'd'},
 	{"clock", required_argument, 0, 'w'},
 	{"batch-size", required_argument, 0, 'b'},
