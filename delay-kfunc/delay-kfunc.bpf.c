@@ -20,11 +20,9 @@ struct {
 
 __u64 loop_iterations = 10000;
 __u64 avg_delay = 100;
-__u64 counter = 0;
 
 static int recurse_loop(__u64 idx, void *ctx)
 {
-	counter++;
 	return 0;
 }
 
