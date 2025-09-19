@@ -20,6 +20,7 @@ SUBDIRS += AF_XDP-example
 SUBDIRS += AF_XDP-forwarding
 SUBDIRS += ktrace-CO-RE
 SUBDIRS += tc-policy
+SUBDIRS += delay-kfunc
 ifeq ($(HAVE_CLANG_ERRNO),y)
 SUBDIRS += encap-forward
 SUBDIRS += lsm-nobpf
