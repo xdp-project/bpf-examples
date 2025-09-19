@@ -106,9 +106,9 @@ static int process_stats_entry(void *ctx, void *data, size_t len)
 
 int main(int argc, char *argv[])
 {
+	unsigned long loop_outer, loop_inner;
 	struct ring_buffer *rb = NULL;
 	struct delay_kfunc_bpf *skel;
-	unsigned long loop_iter;
 	long target_delay;
 	char *func_name;
 	int err = -1;
@@ -131,6 +131,9 @@ int main(int argc, char *argv[])
 	if (!skel)
 		goto out;
 
+	loop_outer = skel->data->iterations_outer;
+	loop_inner = skel->data->iterations_inner;
+
 	err = bpf_program__set_attach_target(skel->progs.delay_function, 0,
 					     func_name);
 	if (err) {
@@ -149,12 +152,18 @@ int main(int argc, char *argv[])
 	if (err)
 		goto out;
 
-	loop_iter = 1 + target_delay * 1000 / skel->data->avg_delay;
-	if (loop_iter > 1 << 23)
-		loop_iter = 1 << 23;
-	printf("average outer loop delay %llu ns - looping %lu times to hit target\n",
-	       skel->data->avg_delay, loop_iter);
-	skel->data->loop_iterations = loop_iter;
+	printf("average loop duration %llu ns / %lu iterations ",
+	       skel->data->avg_delay,
+	       loop_inner);
+
+	loop_outer = 1 + target_delay * 1000 / skel->data->avg_delay;
+	while (loop_outer > 1 << 23) {
+		loop_inner *= 10;
+		loop_outer /= 10;
+	}
+	printf("- looping %lu * %lu times to hit target\n", loop_outer, loop_inner);
+	skel->data->iterations_outer = loop_outer;
+	skel->data->iterations_inner = loop_inner;
 
 	rb = ring_buffer__new(bpf_map__fd(skel->maps.delay_ringbuf),
 			      process_stats_entry,

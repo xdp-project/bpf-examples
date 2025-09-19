@@ -11,14 +11,15 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define TIME_ROUNDS 10
-#define TIME_ITER 100
+#define TIME_ITER 1000
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 0x1000);
 } delay_ringbuf SEC(".maps");
 
-__u64 loop_iterations = 10000;
+__u64 iterations_inner = 10000;
+__u64 iterations_outer = 10000;
 __u64 avg_delay = 100;
 
 static int recurse_loop(__u64 idx, void *ctx)
@@ -28,7 +29,7 @@ static int recurse_loop(__u64 idx, void *ctx)
 
 static int run_delay(__u64 idx, void *ctx)
 {
-	bpf_loop(100000, recurse_loop, NULL, 0);
+	bpf_loop(iterations_inner, recurse_loop, NULL, 0);
 	return 0;
 }
 
@@ -41,7 +42,7 @@ int BPF_PROG(delay_function)
 	int ret;
 
 	start_ns = bpf_ktime_get_boot_ns();
-	ret = bpf_loop(loop_iterations, run_delay, NULL, 0);
+	ret = bpf_loop(iterations_outer, run_delay, NULL, 0);
 
 	stats = bpf_ringbuf_reserve(&delay_ringbuf, sizeof(*stats), 0);
 	if (stats) {
