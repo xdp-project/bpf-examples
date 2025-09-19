@@ -1,0 +1,43 @@
+* Kernel function delay utility
+
+This utility adds delay an arbitrary kernel function, by adding an fentry BPF
+probe to the function which contains a recursive =bpf_loop()= invocation that
+takes a long time to execute. This can be useful to debug stalling behaviour, by
+making the stalls deterministic.
+
+To use, simply compile and run:
+
+=sudo ./delay_kfunc <kernel_function> <target delay in usec>=
+
+The userspace program will first run a calibration to turn the requested delay
+into a number of loop iterations based on the timing of the loop (which will
+vary depending on the CPU speed). The target delay is capped at 10 minutes to
+prevent stalling indefinitely (but see the warning below!).
+
+The fentry program will output the actual measured delay through a ring buffer
+every time it runs. The userspace program will print these each (see example
+below), making it possible to keep track of the induced delay.
+
+** Limitations and caution on safety
+
+Since the delay is created by spinning in a tight loop, the actual delay can
+vary, especially on machines with varying CPU speeds (such as laptops or other
+systems that throttle the CPU on idle).
+
+Also, *there is no safety valve*. This program will run in a tight loop every
+time it is executed inside the kernel! Depending on which function it is
+attached to this may *completely stall the system*, leaving to way to interrupt
+it other than a hard power cycle of the machine. Use at your own risk!
+
+** Example usage
+To delay the teardown of veth devices by 10 second:
+
+#+begin_src sh
+$ sudo ./delay-kfunc veth_dellink 10000000
+Loop calibration: average outer loop delay 289631 ns - looping 34527 times to hit target
+Delay function attached to veth_dellink(). Press Ctrl-C to interrupt...
+Delayed veth_dellink() 9891187 us for PID 219904(ip)
+^C
+#+end_src
+
+
