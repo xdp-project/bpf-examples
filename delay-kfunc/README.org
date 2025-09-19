@@ -15,7 +15,7 @@ vary depending on the CPU speed). The target delay is capped at 10 minutes to
 prevent stalling indefinitely (but see the warning below!).
 
 The fentry program will output the actual measured delay through a ring buffer
-every time it runs. The userspace program will print these each (see example
+every time it runs. The userspace program will print these (see example
 below), making it possible to keep track of the induced delay.
 
 ** Limitations and caution on safety
@@ -24,13 +24,13 @@ Since the delay is created by spinning in a tight loop, the actual delay can
 vary, especially on machines with varying CPU speeds (such as laptops or other
 systems that throttle the CPU on idle).
 
-Also, *there is no safety valve*. This program will run in a tight loop every
+Also, *THERE IS NO SAFETY VALVE*. This program will run in a tight loop every
 time it is executed inside the kernel! Depending on which function it is
-attached to this may *completely stall the system*, leaving to way to interrupt
+attached to this may *COMPLETELY STALL THE SYSTEM*, leaving to way to interrupt
 it other than a hard power cycle of the machine. Use at your own risk!
 
 ** Example usage
-To delay the teardown of veth devices by 10 second:
+To delay the teardown of veth devices by 10 seconds:
 
 #+begin_src sh
 $ sudo ./delay-kfunc veth_dellink 10000000
