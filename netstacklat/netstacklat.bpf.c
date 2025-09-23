@@ -11,6 +11,10 @@
 
 #define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
 
+// Mimic macros from /include/net/tcp.h
+#define tcp_sk(ptr) container_of(ptr, struct tcp_sock, inet_conn.icsk_inet.sk)
+#define TCP_SKB_CB(__skb)	((struct tcp_skb_cb *)&((__skb)->cb[0]))
+
 char LICENSE[] SEC("license") = "GPL";
 
 
@@ -37,6 +41,12 @@ struct sk_buff___old {
 	};
 	__u8 mono_delivery_time: 1;
 } __attribute__((preserve_access_index));
+
+struct tcp_sock_ooo_range {
+	u32 ooo_seq_end;
+	/* indicates if ooo_seq_end is still valid (as 0 can be valid seq) */
+	bool active;
+};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -65,6 +75,22 @@ struct {
 	__type(key, u64);
 	__type(value, u64);
 } netstack_cgroupfilter SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct tcp_sock_ooo_range);
+} netstack_tcp_ooo_range SEC(".maps");
+
+/*
+ * Is a < b considering u32 wrap around?
+ * Based on the before() function in /include/net/tcp.h
+ */
+static bool u32_lt(u32 a, u32 b)
+{
+	return (s32)(a - b) < 0;
+}
 
 static u64 *lookup_or_zeroinit_histentry(void *map, const struct hist_key *key)
 {
@@ -331,6 +357,60 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 	record_latency_since(tstamp, &key);
 }
 
+static void tcp_update_ooo_range(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock_ooo_range *tp_ooo_range;
+
+	tp_ooo_range = bpf_sk_storage_get(&netstack_tcp_ooo_range, sk, NULL,
+					  BPF_SK_STORAGE_GET_F_CREATE);
+	if (!tp_ooo_range)
+		return;
+
+	if (tp_ooo_range->active) {
+		if (u32_lt(tp_ooo_range->ooo_seq_end, TCP_SKB_CB(skb)->end_seq))
+			tp_ooo_range->ooo_seq_end = TCP_SKB_CB(skb)->end_seq;
+	} else {
+		tp_ooo_range->ooo_seq_end = TCP_SKB_CB(skb)->end_seq;
+		tp_ooo_range->active = true;
+	}
+
+}
+
+static bool tcp_read_in_ooo_range(struct sock *sk)
+{
+	struct tcp_sock_ooo_range *tp_ooo_range;
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 last_read_seq;
+	int err;
+
+	tp_ooo_range = bpf_sk_storage_get(&netstack_tcp_ooo_range, sk, NULL, 0);
+	if (!tp_ooo_range)
+                /* no recorded ooo-range for sock, so cannot be in ooo-range */
+		return false;
+
+	if (!tp_ooo_range->active)
+		return false;
+
+	err = bpf_core_read(&last_read_seq, sizeof(last_read_seq), &tp->copied_seq);
+	if (err) {
+		/*
+		 * Shouldn't happen.
+		 * Should probably emit some warning if reading copied_seq
+		 * unexpectedly fails. Assume not in ooo-range to avoid
+		 * systematically filtering out ALL values if this does happen.
+		 */
+		bpf_printk("failed to read tcp_sock->copied_seq: err=%d", err);
+		return false;
+	}
+
+	if (u32_lt(tp_ooo_range->ooo_seq_end, last_read_seq)) {
+		tp_ooo_range->active = false;
+		return false;
+	}  else {
+		return true;
+	}
+}
+
 SEC("fentry/ip_rcv_core")
 int BPF_PROG(netstacklat_ip_rcv_core, struct sk_buff *skb, void *block,
 	     void *tp, void *res, bool compat_mode)
@@ -396,6 +476,11 @@ int BPF_PROG(netstacklat_tcp_recv_timestamp, void *msg, struct sock *sk,
 	     struct scm_timestamping_internal *tss)
 {
 	struct timespec64 *ts = &tss->ts[0];
+
+	/* skip if preceeding sock read ended in ooo-range */
+	if (tcp_read_in_ooo_range(sk))
+		return 0;
+
 	record_socket_latency(sk, NULL,
 			      (ktime_t)ts->tv_sec * NS_PER_S + ts->tv_nsec,
 			      NETSTACKLAT_HOOK_TCP_SOCK_READ);
@@ -408,5 +493,14 @@ int BPF_PROG(netstacklat_skb_consume_udp, struct sock *sk, struct sk_buff *skb,
 {
 	record_socket_latency(sk, skb, skb->tstamp,
 			      NETSTACKLAT_HOOK_UDP_SOCK_READ);
+	return 0;
+}
+
+/* This program should also be disabled if tcp-socket-read is disabled */
+SEC("fentry/tcp_data_queue_ofo")
+int BPF_PROG(netstacklat_tcp_data_queue_ofo, struct sock *sk,
+	     struct sk_buff *skb)
+{
+	tcp_update_ooo_range(sk, skb);
 	return 0;
 }
