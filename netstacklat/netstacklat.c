@@ -258,7 +258,8 @@ static void hook_to_progs(struct hook_prog_collection *progs,
 		break;
 	case NETSTACKLAT_HOOK_TCP_SOCK_READ:
 		progs->progs[0] = obj->progs.netstacklat_tcp_recv_timestamp;
-		progs->nprogs = 1;
+		progs->progs[1] = obj->progs.netstacklat_tcp_data_queue_ofo;
+		progs->nprogs = 2;
 		break;
 	case NETSTACKLAT_HOOK_UDP_SOCK_READ:
 		progs->progs[0] = obj->progs.netstacklat_skb_consume_udp;
