@@ -43,6 +43,7 @@ struct sk_buff___old {
 } __attribute__((preserve_access_index));
 
 struct tcp_sock_ooo_range {
+	struct bpf_spin_lock lock;
 	u32 ooo_seq_end;
 	/* indicates if ooo_seq_end is still valid (as 0 can be valid seq) */
 	bool active;
@@ -366,6 +367,7 @@ static void tcp_update_ooo_range(struct sock *sk, struct sk_buff *skb)
 	if (!tp_ooo_range)
 		return;
 
+	bpf_spin_lock(&tp_ooo_range->lock);
 	if (tp_ooo_range->active) {
 		if (u32_lt(tp_ooo_range->ooo_seq_end, TCP_SKB_CB(skb)->end_seq))
 			tp_ooo_range->ooo_seq_end = TCP_SKB_CB(skb)->end_seq;
@@ -373,6 +375,7 @@ static void tcp_update_ooo_range(struct sock *sk, struct sk_buff *skb)
 		tp_ooo_range->ooo_seq_end = TCP_SKB_CB(skb)->end_seq;
 		tp_ooo_range->active = true;
 	}
+	bpf_spin_unlock(&tp_ooo_range->lock);
 
 }
 
@@ -381,14 +384,12 @@ static bool tcp_read_in_ooo_range(struct sock *sk)
 	struct tcp_sock_ooo_range *tp_ooo_range;
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 last_read_seq;
+	bool ret;
 	int err;
 
 	tp_ooo_range = bpf_sk_storage_get(&netstack_tcp_ooo_range, sk, NULL, 0);
 	if (!tp_ooo_range)
                 /* no recorded ooo-range for sock, so cannot be in ooo-range */
-		return false;
-
-	if (!tp_ooo_range->active)
 		return false;
 
 	err = bpf_core_read(&last_read_seq, sizeof(last_read_seq), &tp->copied_seq);
@@ -403,12 +404,20 @@ static bool tcp_read_in_ooo_range(struct sock *sk)
 		return false;
 	}
 
-	if (u32_lt(tp_ooo_range->ooo_seq_end, last_read_seq)) {
-		tp_ooo_range->active = false;
-		return false;
-	}  else {
-		return true;
+	bpf_spin_lock(&tp_ooo_range->lock);
+	if (!tp_ooo_range->active) {
+		ret = false;
+	} else {
+		if (u32_lt(tp_ooo_range->ooo_seq_end, last_read_seq)) {
+			tp_ooo_range->active = false;
+			ret = false;
+		} else {
+			ret = true;
+		}
 	}
+
+	bpf_spin_unlock(&tp_ooo_range->lock);
+	return ret;
 }
 
 SEC("fentry/ip_rcv_core")
