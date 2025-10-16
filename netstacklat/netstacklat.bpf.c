@@ -188,11 +188,17 @@ static bool filter_network_ns(struct sk_buff *skb, struct sock *sk)
 	return get_network_ns(skb, sk) == user_config.network_ns;
 }
 
+static bool filter_network(struct sk_buff *skb, struct sock *sk)
+{
+	if (!filter_ifindex(skb ? skb->skb_iif : sk ? sk->sk_rx_dst_ifindex : 0))
+		return false;
+
+	return filter_network_ns(skb, sk);
+}
 
 static void record_skb_latency(struct sk_buff *skb, struct sock *sk, enum netstacklat_hook hook)
 {
 	struct hist_key key = { .hook = hook };
-	u32 ifindex;
 
 	if (bpf_core_field_exists(skb->tstamp_type)) {
 		/*
@@ -217,15 +223,11 @@ static void record_skb_latency(struct sk_buff *skb, struct sock *sk, enum netsta
 			return;
 	}
 
-	ifindex = skb->skb_iif;
-	if (!filter_ifindex(ifindex))
-		return;
-
-	if (!filter_network_ns(skb, sk))
+	if (!filter_network(skb, sk))
 		return;
 
 	if (user_config.groupby_ifindex)
-		key.ifindex = ifindex;
+		key.ifindex = skb->skb_iif;
 
 	record_latency_since(skb->tstamp, &key);
 }
@@ -305,7 +307,6 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 {
 	struct hist_key key = { .hook = hook };
 	u64 cgroup = 0;
-	u32 ifindex;
 
 	if (!filter_min_sockqueue_len(sk))
 		return;
@@ -316,15 +317,11 @@ static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
 	if (!filter_current_task(cgroup))
 		return;
 
-	ifindex = skb ? skb->skb_iif : sk->sk_rx_dst_ifindex;
-	if (!filter_ifindex(ifindex))
-		return;
-
-	if (!filter_network_ns(skb, sk))
+	if (!filter_network(skb, sk))
 		return;
 
 	if (user_config.groupby_ifindex)
-		key.ifindex = ifindex;
+		key.ifindex = skb ? skb->skb_iif : sk->sk_rx_dst_ifindex;
 	if (user_config.groupby_cgroup)
 		key.cgroup = cgroup;
 
