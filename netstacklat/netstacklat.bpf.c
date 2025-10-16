@@ -27,6 +27,7 @@ volatile const struct netstacklat_bpf_config user_config = {
 	.filter_cgroup = false,
 	.groupby_ifindex = false,
 	.groupby_cgroup = false,
+	.include_hol_blocked = false,
 };
 
 /*
@@ -484,7 +485,7 @@ int BPF_PROG(netstacklat_tcp_recv_timestamp, void *msg, struct sock *sk,
 	struct timespec64 *ts = &tss->ts[0];
 
 	/* skip if preceeding sock read ended in ooo-range */
-	if (tcp_read_in_ooo_range(sk))
+	if (!user_config.include_hol_blocked && tcp_read_in_ooo_range(sk))
 		return 0;
 
 	record_socket_latency(sk, NULL,
@@ -507,6 +508,15 @@ SEC("fentry/tcp_data_queue_ofo")
 int BPF_PROG(netstacklat_tcp_data_queue_ofo, struct sock *sk,
 	     struct sk_buff *skb)
 {
+	if (user_config.include_hol_blocked)
+		/*
+		 * It's better to not load this program at all if the ooo-range
+		 * tracking isn't needed (like done by netstacklat.c).
+		 * But if an external loader (like ebpf-exporter) is used,
+		 * this should at least minimze the unncecessary overhead.
+		 */
+		return 0;
+
 	if (!filter_network(skb, sk))
 		return 0;
 
