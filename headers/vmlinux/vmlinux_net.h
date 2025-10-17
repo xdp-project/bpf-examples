@@ -161,6 +161,35 @@ struct sk_buff {
 	struct skb_ext *extensions;
 };
 
+struct tcp_skb_cb {
+	__u32 seq;
+	__u32 end_seq;
+	union {
+		struct {
+			u16 tcp_gso_segs;
+			u16 tcp_gso_size;
+		};
+	};
+	__u8 tcp_flags;
+	__u8 sacked;
+	__u8 ip_dsfield;
+	__u8 txstamp_ack : 1;
+	__u8 eor : 1;
+	__u8 has_rxtstamp : 1;
+	__u8 unused : 5;
+	__u32 ack_seq;
+	union {
+		struct {
+			__u32 is_app_limited : 1;
+			__u32 delivered_ce : 20;
+			__u32 unused : 11;
+			__u32 delivered;
+			u64 first_tx_mstamp;
+			u64 delivered_mstamp;
+		} tx;
+	};
+};
+
 struct nf_conn {
 	unsigned long status;
 };
@@ -200,6 +229,53 @@ struct sock {
 	struct dst_entry *sk_rx_dst;
 	int sk_rx_dst_ifindex;
 	u32 sk_rx_dst_cookie;
+};
+
+struct inet_sock {
+	struct sock sk;
+};
+
+struct inet_connection_sock {
+	struct inet_sock icsk_inet;
+};
+
+struct tcp_sock {
+	struct inet_connection_sock inet_conn;
+	__u8 __cacheline_group_begin__tcp_sock_read_tx[0];
+	u32 max_window;
+	u32 rcv_ssthresh;
+	u32 reordering;
+	u32 notsent_lowat;
+	u16 gso_segs;
+	struct sk_buff *lost_skb_hint;
+	struct sk_buff *retransmit_skb_hint;
+	__u8 __cacheline_group_end__tcp_sock_read_tx[0];
+	__u8 __cacheline_group_begin__tcp_sock_read_txrx[0];
+	u32 tsoffset;
+	u32 snd_wnd;
+	u32 mss_cache;
+	u32 snd_cwnd;
+	u32 prr_out;
+	u32 lost_out;
+	u32 sacked_out;
+	u16 tcp_header_len;
+	u8 scaling_ratio;
+	u8 chrono_type : 2;
+	u8 repair : 1;
+	u8 tcp_usec_ts : 1;
+	u8 is_sack_reneg : 1;
+	u8 is_cwnd_limited : 1;
+	__u8 __cacheline_group_end__tcp_sock_read_txrx[0];
+	__u8 __cacheline_group_begin__tcp_sock_read_rx[0];
+	u32 copied_seq;
+	u32 rcv_tstamp;
+	u32 snd_wl1;
+	u32 tlp_high_seq;
+	u32 rttvar_us;
+	u32 retrans_out;
+	u16 advmss;
+	u16 urg_data;
+	u32 lost;
 };
 
 #endif /* __VMLINUX_NET_H__ */
