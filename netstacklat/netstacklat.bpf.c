@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "vmlinux_local.h"
 #include <linux/bpf.h>
+#include <linux/errno.h>
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -46,6 +47,8 @@ struct sk_buff___old {
 struct tcp_sock_ooo_range {
 	u32 prev_n_ooopkts;
 	u32 ooo_seq_end;
+	u32 last_rcv_nxt;
+	u32 last_copied_seq;
 	/* indicates if ooo_seq_end is still valid (as 0 can be valid seq) */
 	bool active;
 };
@@ -330,10 +333,43 @@ static bool filter_min_sockqueue_len(struct sock *sk)
 	return false;
 }
 
-static int current_max_possible_ooo_seq(struct tcp_sock *tp, u32 *seq)
+/* Get the current receive window end sequence for tp
+ * In the kernel receive window checks are done against
+ * tp->rcv_nxt + tcp_receive_window(tp). This function should give a compareable
+ * result, i.e. rcv_wup + rcv_wnd or rcv_nxt, whichever is higher
+ */
+static int get_current_rcv_wnd_seq(struct tcp_sock *tp, u32 rcv_nxt, u32 *seq)
 {
+	u32 rcv_wup, rcv_wnd, window = 0;
+	int err;
+
+	err = bpf_core_read(&rcv_wup, sizeof(rcv_wup), &tp->rcv_wup);
+	if (err) {
+		bpf_printk("failed to read tcp_sock->rcv_wup, err=%d", err);
+		goto exit;
+	}
+
+	err = bpf_core_read(&rcv_wnd, sizeof(rcv_wnd), &tp->rcv_wnd);
+	if (err) {
+		bpf_printk("failed to read tcp_sock->rcv_wnd, err=%d", err);
+		goto exit;
+	}
+
+	window = rcv_wup + rcv_wnd;
+	if (u32_lt(window, rcv_nxt))
+		window = rcv_nxt;
+
+exit:
+	*seq = window;
+	return err;
+}
+
+static int current_max_possible_ooo_seq(struct tcp_sock *tp, u32 rcv_nxt,
+					struct tcp_sock_ooo_range *ooo_range,
+					u32 *seq)
+{
+	u32 cur_rcv_window, max_seq = 0;
 	struct tcp_skb_cb cb;
-	u32 max_seq = 0;
 	int err = 0;
 
 	if (BPF_CORE_READ(tp, out_of_order_queue.rb_node) == NULL) {
@@ -342,44 +378,44 @@ static int current_max_possible_ooo_seq(struct tcp_sock *tp, u32 *seq)
 		 * receive queue. Current rcv_nxt must therefore be ahead
 		 * of all ooo-segments that have arrived until now.
 		 */
-		err = bpf_core_read(&max_seq, sizeof(max_seq), &tp->rcv_nxt);
-		if (err)
-			bpf_printk("failed to read tcp_sock->rcv_nxt, err=%d",
-				   err);
-	} else {
-		/*
-		 * Some ooo-segments currently in ooo-queue
-		 * Max out-of-order seq is given by the seq_end of the tail
-		 * skb in the ooo-queue.
-		 */
-		err = BPF_CORE_READ_INTO(&cb, tp, ooo_last_skb, cb);
-		if (err)
-			bpf_printk(
-				"failed to read tcp_sock->ooo_last_skb->cb, err=%d",
-				err);
-		max_seq = cb.end_seq;
+		max_seq = rcv_nxt;
+		goto exit;
 	}
 
+	/*
+	 * Some ooo-segments currently in ooo-queue
+	 * Max out-of-order seq is given by the seq_end of the tail
+	 * skb in the ooo-queue.
+	 */
+	err = BPF_CORE_READ_INTO(&cb, tp, ooo_last_skb, cb);
+	if (err) {
+		bpf_printk("failed to read tcp_sock->ooo_last_skb->cb, err=%d",
+			   err);
+		goto exit;
+	}
+
+	// Sanity check - ooo_last_skb->cb.end_seq within the receive window?
+	err = get_current_rcv_wnd_seq(tp, rcv_nxt, &cur_rcv_window);
+	if (err)
+		goto exit;
+
+	if (cb.end_seq == 0 || u32_lt(cur_rcv_window, cb.end_seq))
+		max_seq = cur_rcv_window;
+	else
+		max_seq = cb.end_seq;
+
+exit:
 	*seq = max_seq;
 	return err;
 }
 
-static bool tcp_read_in_ooo_range(struct tcp_sock *tp,
+static bool tcp_read_in_ooo_range(struct tcp_sock *tp, u32 copied_seq,
 				  struct tcp_sock_ooo_range *ooo_range)
 {
-	u32 read_seq;
-	int err;
-
 	if (!ooo_range->active)
 		return false;
 
-	err = bpf_core_read(&read_seq, sizeof(read_seq), &tp->copied_seq);
-	if (err) {
-		bpf_printk("failed to read tcp_sock->copied_seq, err=%d", err);
-		return true; // Assume we may be in ooo-range
-	}
-
-	if (u32_lt(ooo_range->ooo_seq_end, read_seq)) {
+	if (u32_lt(ooo_range->ooo_seq_end, copied_seq)) {
 		ooo_range->active = false;
 		return false;
 	} else {
@@ -387,12 +423,54 @@ static bool tcp_read_in_ooo_range(struct tcp_sock *tp,
 	}
 }
 
+static int get_and_validate_rcvnxt(struct tcp_sock *tp,
+				   struct tcp_sock_ooo_range *ooo_range,
+				   u32 *rcvnxt)
+{
+	u32 rcv_nxt = 0;
+	int err;
+
+	err = bpf_core_read(&rcv_nxt, sizeof(rcv_nxt), &tp->rcv_nxt);
+	if (err || (ooo_range->last_rcv_nxt &&
+		    u32_lt(rcv_nxt, ooo_range->last_rcv_nxt))) {
+		bpf_printk("failed to read valid tcp_sock->rcv_nxt, err=%d",
+			   err);
+		err = err ?: -ERANGE;
+	} else {
+		ooo_range->last_rcv_nxt = rcv_nxt;
+	}
+
+	*rcvnxt = rcv_nxt;
+	return err;
+}
+
+static int get_and_validate_copiedseq(struct tcp_sock *tp,
+				      struct tcp_sock_ooo_range *ooo_range,
+				      u32 *copiedseq)
+{
+	u32 copied_seq = 0;
+	int err;
+
+	err = bpf_core_read(&copied_seq, sizeof(copied_seq), &tp->copied_seq);
+	if (err || (ooo_range->last_copied_seq &&
+		    u32_lt(copied_seq, ooo_range->last_copied_seq))) {
+		bpf_printk("failed to read valid tcp_sock->copied_seq, err=%d",
+			   err);
+		err = err ?: -ERANGE;
+	} else {
+		ooo_range->last_copied_seq = copied_seq;
+	}
+
+	*copiedseq = copied_seq;
+	return err;
+}
+
 static bool tcp_read_maybe_holblocked(struct sock *sk)
 {
+	u32 n_ooopkts, rcv_nxt, copied_seq, nxt_seq;
 	struct tcp_sock_ooo_range *ooo_range;
+	int err, err_rcvnxt, err_copiedseq;
 	struct tcp_sock *tp = tcp_sk(sk);
-	u32 n_ooopkts, nxt_seq;
-	int err;
 
 	err = bpf_core_read(&n_ooopkts, sizeof(n_ooopkts), &tp->rcv_ooopack);
 	if (err) {
@@ -412,18 +490,30 @@ static bool tcp_read_maybe_holblocked(struct sock *sk)
 		return true; // Assume we may be in ooo-range
 	}
 
+	/* rcv_nxt and copied_seq may not be needed, but to ensure we always
+	 * update our tracked state for them, read, sanity check and update
+	 * both their values here. Errors are only checked for in the paths
+	 * were the values are actually needed.
+	 */
+	err_rcvnxt = get_and_validate_rcvnxt(tp, ooo_range, &rcv_nxt);
+	err_copiedseq = get_and_validate_copiedseq(tp, ooo_range, &copied_seq);
+
 	// Increase in ooo-packets since last - figure out next safe seq
 	if (n_ooopkts > ooo_range->prev_n_ooopkts) {
 		ooo_range->prev_n_ooopkts = n_ooopkts;
-		err = current_max_possible_ooo_seq(tp, &nxt_seq);
+		err = err_rcvnxt ?:
+				   current_max_possible_ooo_seq(tp, rcv_nxt,
+								ooo_range, &nxt_seq);
 		if (!err) {
 			ooo_range->ooo_seq_end = nxt_seq;
 			ooo_range->active = true;
 		}
+
 		return true;
 	}
 
-	return tcp_read_in_ooo_range(tp, ooo_range);
+	return err_copiedseq ? true :
+			       tcp_read_in_ooo_range(tp, copied_seq, ooo_range);
 }
 
 static void record_socket_latency(struct sock *sk, struct sk_buff *skb,
