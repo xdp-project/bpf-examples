@@ -515,38 +515,38 @@ static int rewrite_icmpv6(struct ipv6hdr *ip6h, struct __sk_buff *skb)
 	case ICMPV6_TIME_EXCEED:
 		icmp.type = ICMP_TIME_EXCEEDED;
 		break;
-        case ICMPV6_PARAMPROB:
-                switch (icmp6->icmp6_code) {
-                case 0:
-                        icmp.type = ICMP_PARAMETERPROB;
-                        icmp.code = 0;
-                        break;
-                case 1:
-                        icmp.type = ICMP_DEST_UNREACH;
-                        icmp.code = ICMP_PROT_UNREACH;
-                        ptr = bpf_ntohl(icmp6->icmp6_pointer);
-                        /* Figure 6 in RFC6145 - using if statements b/c of
-                         * range at the bottom
-                         */
-                        if (ptr == 0 || ptr == 1)
-                                icmp.un.reserved[0] = ptr;
-                        else if (ptr == 4 || ptr == 5)
-                                icmp.un.reserved[0] = 2;
-                        else if (ptr == 6)
-                                icmp.un.reserved[0] = 9;
-                        else if (ptr == 7)
-                                icmp.un.reserved[0] = 8;
-                        else if (ptr >= 8 && ptr <= 23)
-                                icmp.un.reserved[0] = 12;
-                        else if (ptr >= 24 && ptr <= 39)
-                                icmp.un.reserved[0] = 16;
-                        else
-                                return -1;
-                        break;
-                default:
-                        return -1;
-                }
-                break;
+	case ICMPV6_PARAMPROB:
+		switch (icmp6->icmp6_code) {
+		case 0:
+			icmp.type = ICMP_PARAMETERPROB;
+			icmp.code = 0;
+			ptr = bpf_ntohl(icmp6->icmp6_pointer);
+			/* Figure 6 in RFC6145 - using if statements b/c of
+			 * range at the bottom
+			 */
+			if (ptr == 0 || ptr == 1)
+				icmp.un.reserved[0] = ptr;
+			else if (ptr == 4 || ptr == 5)
+				icmp.un.reserved[0] = 2;
+			else if (ptr == 6)
+				icmp.un.reserved[0] = 9;
+			else if (ptr == 7)
+				icmp.un.reserved[0] = 8;
+			else if (ptr >= 8 && ptr <= 23)
+				icmp.un.reserved[0] = 12;
+			else if (ptr >= 24 && ptr <= 39)
+				icmp.un.reserved[0] = 16;
+			else
+				return -1;
+			break;
+		case 1:
+			icmp.type = ICMP_DEST_UNREACH;
+			icmp.code = ICMP_PROT_UNREACH;
+			break;
+		default:
+			return -1;
+		}
+		break;
 	default:
 		return -1;
 	}
