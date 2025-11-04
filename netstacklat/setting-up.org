@@ -1,0 +1,121 @@
+#+OPTIONS: ^:nil
+
+* Setting up netstacklat
+
+Netstacklat supports Linux kernels 5.18 or newer (or older versions with
+suitable backports). The kernel must be built with BTF information enabled.
+
+** Prerequisites
+  To be able to compile netstacklat, first install the required packages:
+
+  On Debian:
+  #+begin_src shell
+  $ sudo apt install gcc clang pkgconf bpftool libelf-dev zlib1g-dev libcap-dev libmnl-dev libc6-dev-i386
+  #+end_src
+
+  On Fedora:
+  #+begin_src shell
+  $ sudo dnf install gcc clang pkgconf bpftool elfutils-libelf-devel zlib-devel libcap-devel libmnl-devel glibc-devel.i686
+  #+end_src
+
+
+** Installing netstacklat
+
+To install netstacklat, first clone the repository and run the configure script:
+
+#+BEGIN_SRC shell
+  $ git clone --recurse-submodules https://github.com/xdp-project/bpf-examples.git
+  $ cd bpf-examples
+
+  # Run configure, it will warn you about any missing dependencies
+  $ ./configure
+#+END_SRC
+
+Once that is done, we can move to the netstacklat directory and compile it.
+#+BEGIN_SRC shell
+  $ cd netstacklat
+  $ make
+#+END_SRC
+
+This generates both the *netstacklat.bpf.o* BPF object file and the
+*netstacklat* executable. The *netstacklat.bpf.o* object contains the eBPF
+programs and can be used with external loaders such as [[https://github.com/cloudflare/ebpf_exporter][ebpf_exporter]] and
+[[https://bpftool.dev/][bpftool]]. The *netstacklat* binary is our own small loader, that loads the eBPF
+programs, fetches the latency data, and displays it directly in the terminal. As
+we make use of [[https://docs.kernel.org/bpf/libbpf/libbpf_overview.html#bpf-object-skeleton-file][bpf-skeletons]], the eBPF bytecode is embedded directly in the
+*netstacklat* binary, so it has no dependency on the *netstacklat.bpf.o* file.
+
+You should now be set to run netstacklat from the terminal.
+#+BEGIN_SRC shell
+  $ ./netstacklat --help
+
+  DOCUMENTATION:
+  Netstacklat - Monitor latency to various points in the ingress network stack
+
+  Usage: netstacklat (options-see-below)
+  Listing options:
+  -h,  --help
+  -r,  --report-interval <ARG>
+  -l,  --list-probes
+  -e,  --enable-probes <ARG>
+  -d,  --disable-probes <ARG>
+  -p,  --pids <ARG>
+  -i,  --interfaces <ARG>
+  -n,  --network-namespace <ARG>
+  -c,  --cgroups <ARG>
+  -q,  --min-queuelength <ARG>
+  -I,  --groupby-interface
+  -C,  --groupby-cgroup
+#+END_SRC
+
+** Setting up netstacklat with ebpf-exporter
+To get the netstacklat monitoring data as Prometheus metrics, we rely on
+[[https://github.com/cloudflare/ebpf_exporter][ebpf_exporter]]. To get that running, you need to first build [[https://github.com/cloudflare/ebpf_exporter][ebpf_exporter]] (as
+explained in their [[https://github.com/cloudflare/ebpf_exporter?tab=readme-ov-file#building-and-running][README]]) in addition to netstacklat (as explained [[*Setting up netstacklat][above]]).
+
+As we've included the ebpf_exporter config file [[https://github.com/xdp-project/bpf-examples/blob/main/netstacklat/netstacklat.yaml][netstacklat.yaml]], in the
+simplest case you can just point ebpf_exporter at netstacklat directory to get
+going.
+#+BEGIN_SRC shell
+  $ sudo ebpf_exporter --config.dir=bpf-examples/netstacklat --config.names=netstacklat
+  2025/09/19 16:02:16 Started with capabilities: "=ep"
+  2025/09/19 16:02:16 Retaining all existing capabilities
+  2025/09/19 16:02:16 Started with 1 programs found in the config in 1397ms
+  2025/09/19 16:02:16 Listening on :9435
+#+END_SRC
+
+However, as the generic ebpf_exporter doesn't take care of all the peculiarities
+that our custom *netstacklat* loader handles, you may need to take a few
+additional steps to get things working as intended.
+
+First, make sure you set the [[https://github.com/xdp-project/bpf-examples/blob/d621b4fb25c4877415a563887606ab0fe47ad59a/netstacklat/netstacklat.bpf.c#L17][TAI_OFFSET]] constant in *netstacklat.bpf.c* to
+correspond to the [[https://en.wikipedia.org/wiki/International_Atomic_Time][TAI]] <-> UTC offset on your system. It should (as of this
+writing) be 37 seconds, which is the value we've set it to, but on some systems
+(e.g. standard Ubuntu distributions) it's incorrectly set to 0. The
+[[https://github.com/xdp-project/bpf-examples/blob/d621b4fb25c4877415a563887606ab0fe47ad59a/netstacklat/netstacklat.c#L1093-L1099][get_tai_offset()]] function in *netstacklat.c* shows an example of how you can
+query your system for it.
+
+You also need to enable software RX timestamping on the system with
+[[https://docs.kernel.org/networking/timestamping.html#so-timestamping-also-so-timestamping-old-and-so-timestamping-new][SOF_TIMESTAMPING_RX_SOFTWARE]]. There's not any way to conveniently do this via
+the command line (e.g. through a sysctl setting), but it's sufficient to just
+hold a socket with this option enabled for it to apply system wide. See the
+[[https://github.com/xdp-project/bpf-examples/blob/d621b4fb25c4877415a563887606ab0fe47ad59a/netstacklat/netstacklat.c#L1065-L1086][enable_sw_rx_tstamps()]] function *netstacklat.c* for an example of how you can do
+that.
+
+Finally, if you want configure netstacklat with some of the options that our own
+*netstacklat* loader offers, you'll need to manually edit the user_config
+constant in *netstacklat.bpf.c*.
+#+BEGIN_SRC c
+  volatile const struct netstacklat_bpf_config user_config = {
+  	.network_ns = 0, // --network-namespace arg
+  	.filter_min_sockqueue_len = 0, // --min-queuelength arg
+  	.filter_pid = false, // true if --pids, run "./fill_filter_maps.sh pid <values>" after loading
+  	.filter_ifindex = false, // true if --interfaces, "./fill_filter_maps.sh iface <values>" after loading
+  	.filter_cgroup = false, // true if --cgroups, configure cgroup_id_map in netstacklat.ymal
+  	.groupby_ifindex = false, // true if --groupby-interface
+  	.groupby_cgroup = false, // true if --groupby-cgroup
+  };
+#+END_SRC
+
+Remember to rebuild (run make) after any changes to the *netstacklat.bpf.c* to
+get the changes to actually apply when you run ebpf_exporter.

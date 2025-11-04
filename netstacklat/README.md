@@ -7,6 +7,8 @@ arrive at various hooks relative to this timestamp, i.e. the time
 between the packet being timestamped by the kernel and reaching a
 specific hook.
 
+See the <setting-up.org> document for installation instructions.
+
 The tool is based on the following bpftrace script from Jesper
 Dangaard Brouer:
 ```console
