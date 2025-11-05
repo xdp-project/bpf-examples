@@ -13,6 +13,10 @@ struct list_head {
 	struct list_head *prev;
 };
 
+struct rb_root {
+	struct rb_node *rb_node;
+};
+
 struct rb_node {
 	long unsigned int __rb_parent_color;
 	struct rb_node *rb_right;
