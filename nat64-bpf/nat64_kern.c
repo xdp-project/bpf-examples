@@ -157,6 +157,171 @@ update_icmp_checksum(struct __sk_buff *skb, struct ipv6hdr *ip6h,
 		bpf_l4_csum_replace(skb, offset, u_before, u_after, 4);
 }
 
+/*
+ * Convert an IPv4 address to the corresponding "IPv4-Embedded IPv6 Address"
+ * according to RFC 6052 2.2.
+ *
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |PL| 0-------------32--40--48--56--64--72--80--88--96--104---------|
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |32|     prefix    |v4(32)         | u | suffix                    |
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |40|     prefix        |v4(24)     | u |(8)| suffix                |
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |48|     prefix            |v4(16) | u | (16)  | suffix            |
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |56|     prefix                |(8)| u |  v4(24)   | suffix        |
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |64|     prefix                    | u |   v4(32)      | suffix    |
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ *  |96|     prefix                                    |    v4(32)     |
+ *  +--+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+ */
+static __always_inline bool v4addr_to_v6(__be32 addr4, struct in6_addr *addr6,
+					 const struct in6_addr *pref64,
+					 int pref64_len)
+{
+	union {
+		__be32 a32;
+		__u8 a8[4];
+	} u;
+
+	u.a32 = addr4;
+
+	addr6->s6_addr32[0] = 0;
+	addr6->s6_addr32[1] = 0;
+	addr6->s6_addr32[2] = 0;
+	addr6->s6_addr32[3] = 0;
+
+	switch (pref64_len) {
+	case 96:
+		addr6->s6_addr32[0] = pref64->s6_addr32[0];
+		addr6->s6_addr32[1] = pref64->s6_addr32[1];
+		addr6->s6_addr32[2] = pref64->s6_addr32[2];
+		addr6->s6_addr32[3] = addr4;
+		break;
+	case 64:
+		addr6->s6_addr32[0] = pref64->s6_addr32[0];
+		addr6->s6_addr32[1] = pref64->s6_addr32[1];
+		addr6->s6_addr[9] = u.a8[0];
+		addr6->s6_addr[10] = u.a8[1];
+		addr6->s6_addr[11] = u.a8[2];
+		addr6->s6_addr[12] = u.a8[3];
+		break;
+	case 56:
+		addr6->s6_addr32[0] = pref64->s6_addr32[0];
+		addr6->s6_addr32[1] = pref64->s6_addr32[1];
+		addr6->s6_addr[7] = u.a8[0];
+		addr6->s6_addr[9] = u.a8[1];
+		addr6->s6_addr[10] = u.a8[2];
+		addr6->s6_addr[11] = u.a8[3];
+		break;
+	case 48:
+		addr6->s6_addr32[0] = pref64->s6_addr32[0];
+		addr6->s6_addr16[2] = pref64->s6_addr16[2];
+		addr6->s6_addr[6] = u.a8[0];
+		addr6->s6_addr[7] = u.a8[1];
+		addr6->s6_addr[9] = u.a8[2];
+		addr6->s6_addr[10] = u.a8[3];
+		break;
+	case 40:
+		addr6->s6_addr32[0] = pref64->s6_addr32[0];
+		addr6->s6_addr[4] = pref64->s6_addr[4];
+		addr6->s6_addr[5] = u.a8[0];
+		addr6->s6_addr[6] = u.a8[1];
+		addr6->s6_addr[7] = u.a8[2];
+		addr6->s6_addr[9] = u.a8[3];
+		break;
+	case 32:
+		addr6->s6_addr32[0] = pref64->s6_addr32[0];
+		addr6->s6_addr32[1] = addr4;
+		break;
+	default:
+		return false;
+	}
+	return true;
+}
+
+/*
+ * Extract the IPv4 address @addr4 and the NAT64 prefix @pref64 from an IPv6 address,
+ * given the known prefix length @pref64_len. See the table above.
+ */
+static __always_inline bool v6addr_to_v4(const struct in6_addr *addr6,
+					 int pref64_len, __be32 *addr4,
+					 struct in6_addr *pref64)
+{
+	union {
+		__be32 a32;
+		__u8 a8[4];
+	} u;
+
+	pref64->s6_addr32[0] = 0;
+	pref64->s6_addr32[1] = 0;
+	pref64->s6_addr32[2] = 0;
+	pref64->s6_addr32[3] = 0;
+
+	switch (pref64_len) {
+	case 96:
+		u.a32 = addr6->s6_addr32[3];
+
+		pref64->s6_addr32[0] = addr6->s6_addr32[0];
+		pref64->s6_addr32[1] = addr6->s6_addr32[1];
+		pref64->s6_addr32[2] = addr6->s6_addr32[2];
+		break;
+	case 64:
+		u.a8[0] = addr6->s6_addr[9];
+		u.a8[1] = addr6->s6_addr[10];
+		u.a8[2] = addr6->s6_addr[11];
+		u.a8[3] = addr6->s6_addr[12];
+
+		pref64->s6_addr32[0] = addr6->s6_addr32[0];
+		pref64->s6_addr32[1] = addr6->s6_addr32[1];
+		break;
+	case 56:
+		u.a8[0] = addr6->s6_addr[7];
+		u.a8[1] = addr6->s6_addr[9];
+		u.a8[2] = addr6->s6_addr[10];
+		u.a8[3] = addr6->s6_addr[11];
+
+		pref64->s6_addr32[0] = addr6->s6_addr32[0];
+		pref64->s6_addr32[1] = addr6->s6_addr32[1];
+		pref64->s6_addr[7] = 0;
+		break;
+	case 48:
+		u.a8[0] = addr6->s6_addr[6];
+		u.a8[1] = addr6->s6_addr[7];
+		u.a8[2] = addr6->s6_addr[9];
+		u.a8[3] = addr6->s6_addr[10];
+
+		pref64->s6_addr32[0] = addr6->s6_addr32[0];
+		pref64->s6_addr32[1] = addr6->s6_addr32[1];
+		pref64->s6_addr16[3] = 0;
+		break;
+	case 40:
+		u.a8[0] = addr6->s6_addr[5];
+		u.a8[1] = addr6->s6_addr[6];
+		u.a8[2] = addr6->s6_addr[7];
+		u.a8[3] = addr6->s6_addr[9];
+
+		pref64->s6_addr32[0] = addr6->s6_addr32[0];
+		pref64->s6_addr32[1] = addr6->s6_addr32[1];
+		pref64->s6_addr16[3] = 0;
+		pref64->s6_addr[5] = 0;
+
+		break;
+	case 32:
+		u.a32 = addr6->s6_addr32[1];
+
+		pref64->s6_addr32[0] = addr6->s6_addr32[0];
+		break;
+	default:
+		return false;
+	}
+
+	*addr4 = u.a32;
+	return true;
+}
+
 static int rewrite_icmp(struct iphdr *iph, struct ipv6hdr *ip6h, struct __sk_buff *skb)
 {
 	void *data_end = SKB_DATA_END(skb);
@@ -290,7 +455,6 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 
 	struct ipv6hdr dst_hdr = {
 		.version = 6,
-		.saddr = config.v6_prefix,
 	};
 
 	ip_offset = (nh->pos - data) & 0x1fff;
@@ -332,8 +496,9 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 
 	DBG("v4: Found mapping for dst %pI4 to %pI6c\n", &iph->daddr, dst_v6);
 
-	// src v4 as last octet of nat64 address
-	dst_hdr.saddr.s6_addr32[3] = iph->saddr;
+	if (!v4addr_to_v6(iph->saddr, &dst_hdr.saddr, &config.v6_prefix, config.v6_plen))
+		goto out;
+
 	dst_hdr.daddr = *dst_v6;
 	dst_hdr.nexthdr = iph->protocol;
 	dst_hdr.hop_limit = iph->ttl;
@@ -579,7 +744,7 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	void *data = SKB_DATA(skb);
 
 	struct v6_trie_key saddr_key = { .t.prefixlen = 128 };
-	struct in6_addr *dst_v6, subnet_v6 = {};
+	struct in6_addr v6_prefix = {};
 	__u32 *allowval, src_v4, dst_v4;
 	int ip_type, ip_offset;
 	struct ipv6hdr *ip6h;
@@ -601,13 +766,12 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	if (ip_type < 0)
 		goto out;
 
-	dst_v6 = &ip6h->daddr;
-	subnet_v6 = *dst_v6;
-	/* v6 pxlen is always 96 */
-	subnet_v6.s6_addr32[3] = 0;
-	if (cmp_v6addr(&subnet_v6, &config.v6_prefix)) {
-		DBG("v6: dst subnet %pI6c not in configured prefix %pI6c\n",
-		    &subnet_v6, &config.v6_prefix);
+	if (!v6addr_to_v4(&ip6h->daddr, config.v6_plen, &dst_v4, &v6_prefix))
+		goto out;
+
+	if (cmp_v6addr(&v6_prefix, &config.v6_prefix)) {
+		DBG("v6: dst address %pI6c not in configured prefix %pI6c/%u\n",
+		    &ip6h->daddr, &config.v6_prefix, config.v6_plen);
 		goto out;
 	}
 
@@ -625,7 +789,6 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	}
 
 	/* drop a few special addresses */
-	dst_v4 = ip6h->daddr.s6_addr32[3];
 	if (!dst_v4 || /* 0.0.0.0 */
 	    (dst_v4 & bpf_htonl(0xFF000000)) ==
 		    bpf_htonl(0x7F000000) || /* 127.x.x.x */
