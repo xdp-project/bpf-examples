@@ -32,7 +32,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__uint(key_size, sizeof(struct in6_addr));
+	__uint(key_size, sizeof(struct v6_trie_key));
 	__uint(value_size, sizeof(__u32));
 	__uint(max_entries, 1);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
