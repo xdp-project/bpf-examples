@@ -50,7 +50,7 @@ struct nat64_user_config {
 	bool unload;
 };
 
-
+static const struct in6_addr zero_v6_addr;
 
 static int parse_v6_prefix(char *str, struct in6_addr *v6addr)
 {
@@ -78,6 +78,7 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 	int pxlen, seconds;
 	int err, opt;
 	char *net;
+	int bytes;
 
 	config->ifindex = 0;
 	config->c.timeout_ns = 7200 * NS_PER_SECOND;
@@ -87,6 +88,7 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 	config->c.v6_prefix.s6_addr[1] = 0x64;
 	config->c.v6_prefix.s6_addr[2] = 0xff;
 	config->c.v6_prefix.s6_addr[3] = 0x9b;
+	config->c.v6_plen = 96;
 
 	while ((opt = getopt_long(argc, argv, "i:6:4:t:a:huv", long_options,
 				  NULL)) != -1) {
@@ -118,15 +120,20 @@ static int parse_arguments(int argc, char *argv[], struct nat64_user_config *con
 			pxlen = parse_v6_prefix(optarg, &v6addr);
 			if (pxlen < 0)
 				return pxlen;
-			if (pxlen != 96) {
-				fprintf(stderr, "v6 prefix must have pxlen 96\n");
+			if (pxlen != 32 && pxlen != 40 && pxlen != 48 &&
+			    pxlen != 56 && pxlen != 64 && pxlen != 96) {
+				fprintf(stderr, "v6 prefix length must be one of [32, 40, 48, 56, 64, 96]\n");
 				return -EINVAL;
 			}
-			if (v6addr.s6_addr32[3]) {
-				fprintf(stderr, "Not a /96 network address: %s\n", optarg);
+
+			bytes = pxlen / 8;
+			if (memcmp(&v6addr.s6_addr[bytes], &zero_v6_addr, 16 - bytes)) {
+				fprintf(stderr, "Not a /%d network address: %s\n", pxlen, optarg);
 				return -EINVAL;
 			}
+
 			config->c.v6_prefix = v6addr;
+			config->c.v6_plen = pxlen;
 			break;
 		case '4':
 			net = strstr(optarg, "/");

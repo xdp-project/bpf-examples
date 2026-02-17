@@ -28,9 +28,8 @@ kernel until unloaded (with =-u=).
 
 The operation of this NAT64 translator makes a few assumptions:
 
-- A single v6 NAT64 prefix is used, and the prefix length is always 96 (i.e.,
-  the v4 addresses live in the last four bytes). By default the well-known
-  prefix =64:ff9b::/96= is used.
+- A single v6 NAT64 prefix is used, by default the well-known prefix
+  =64:ff9b::/96=.
 
 - IPv6 source addresses are mapped into a configured IPv4 prefix one-to-one.
   Regular NAT4 can be applied afterwards to map to a single public IP. A
