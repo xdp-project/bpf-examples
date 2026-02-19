@@ -83,18 +83,19 @@ struct netstacklat_config {
 };
 
 static const struct option long_options[] = {
-	{ "help",              no_argument,       NULL, 'h' },
-	{ "report-interval",   required_argument, NULL, 'r' },
-	{ "list-probes",       no_argument,       NULL, 'l' },
-	{ "enable-probes",     required_argument, NULL, 'e' },
-	{ "disable-probes",    required_argument, NULL, 'd' },
-	{ "pids",              required_argument, NULL, 'p' },
-	{ "interfaces",        required_argument, NULL, 'i' },
-	{ "network-namespace", required_argument, NULL, 'n' },
-	{ "cgroups",           required_argument, NULL, 'c' },
-	{ "min-queuelength",   required_argument, NULL, 'q' },
-	{ "groupby-interface", no_argument,       NULL, 'I' },
-	{ "groupby-cgroup",    no_argument,       NULL, 'C' },
+	{ "help",                  no_argument,       NULL, 'h' },
+	{ "report-interval",       required_argument, NULL, 'r' },
+	{ "list-probes",           no_argument,       NULL, 'l' },
+	{ "enable-probes",         required_argument, NULL, 'e' },
+	{ "disable-probes",        required_argument, NULL, 'd' },
+	{ "pids",                  required_argument, NULL, 'p' },
+	{ "interfaces",            required_argument, NULL, 'i' },
+	{ "network-namespace",     required_argument, NULL, 'n' },
+	{ "cgroups",               required_argument, NULL, 'c' },
+	{ "min-queuelength",       required_argument, NULL, 'q' },
+	{ "groupby-interface",     no_argument,       NULL, 'I' },
+	{ "groupby-cgroup",        no_argument,       NULL, 'C' },
+	{ "include-tcp-hol-delay", no_argument,       NULL, 'y' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -564,6 +565,7 @@ static int parse_arguments(int argc, char *argv[],
 	conf->bpf_conf.filter_cgroup = false;
 	conf->bpf_conf.groupby_ifindex = false;
 	conf->bpf_conf.groupby_cgroup = false;
+	conf->bpf_conf.include_hol_blocked = false;
 
 	for (i = 0; i < NETSTACKLAT_N_HOOKS; i++)
 		// All probes enabled by default
@@ -657,6 +659,9 @@ static int parse_arguments(int argc, char *argv[],
 			break;
 		case 'C': // groupby-cgroup
 			conf->bpf_conf.groupby_cgroup = true;
+			break;
+		case 'y': // include-tcp-hol-delay
+			conf->bpf_conf.include_hol_blocked = true;
 			break;
 		case 'h': // help
 			print_usage(stdout, argv[0]);
