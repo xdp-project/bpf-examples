@@ -330,10 +330,47 @@ static bool filter_min_sockqueue_len(struct sock *sk)
 	return false;
 }
 
+/* Get the current receive window end sequence for tp
+ * In the kernel receive window checks are done against
+ * tp->rcv_nxt + tcp_receive_window(tp). This function should give a comparable
+ * result, i.e. rcv_wup + rcv_wnd or rcv_nxt, whichever is higher
+ */
+static int get_current_rcv_wnd_end(struct tcp_sock *tp, u32 rcv_nxt, u32 *seq)
+{
+	u32 rcv_wup, rcv_wnd, window;
+	int err;
+
+	err = bpf_core_read(&rcv_wup, sizeof(rcv_wup), &tp->rcv_wup);
+	if (err) {
+		bpf_printk("failed to read tcp_sock->rcv_wup, err=%d", err);
+		return err;
+	}
+
+	err = bpf_core_read(&rcv_wnd, sizeof(rcv_wnd), &tp->rcv_wnd);
+	if (err) {
+		bpf_printk("failed to read tcp_sock->rcv_wnd, err=%d", err);
+		return err;
+	}
+
+	window = rcv_wup + rcv_wnd;
+	if (u32_lt(window, rcv_nxt))
+		window = rcv_nxt;
+
+	*seq = window;
+	return 0;
+}
+
 static int current_max_possible_ooo_seq(struct tcp_sock *tp, u32 *seq)
 {
+	u32 rcv_nxt, cur_rcv_window;
 	struct tcp_skb_cb cb;
 	int err = 0;
+
+	err = bpf_core_read(&rcv_nxt, sizeof(rcv_nxt), &tp->rcv_nxt);
+	if (err) {
+		bpf_printk("failed reading tcp_sock->rcv_nxt, err=%d", err);
+		return err;
+	}
 
 	if (BPF_CORE_READ(tp, out_of_order_queue.rb_node) == NULL) {
 		/* No ooo-segments currently in ooo-queue
@@ -341,12 +378,7 @@ static int current_max_possible_ooo_seq(struct tcp_sock *tp, u32 *seq)
 		 * receive queue. Current rcv_nxt must therefore be ahead
 		 * of all ooo-segments that have arrived until now.
 		 */
-		err = bpf_core_read(seq, sizeof(*seq), &tp->rcv_nxt);
-		if (err) {
-			bpf_printk("failed to read tcp_sock->rcv_nxt, err=%d",
-				   err);
-			return err;
-		}
+		*seq = rcv_nxt;
 	} else {
 		/*
 		 * Some ooo-segments currently in ooo-queue
@@ -361,7 +393,18 @@ static int current_max_possible_ooo_seq(struct tcp_sock *tp, u32 *seq)
 			return err;
 		}
 
-		*seq = cb.end_seq;
+		// Sanity check - ooo_last_skb->cb.end_seq within the receive window?
+		err = get_current_rcv_wnd_end(tp, rcv_nxt, &cur_rcv_window);
+		if (err)
+			return err;
+
+		/* While seq 0 can be a valid seq, consider it more likely to
+		 * be the result of reading from an invalid SKB pointer
+		 */
+		if (cb.end_seq == 0 || u32_lt(cur_rcv_window, cb.end_seq))
+			*seq = cur_rcv_window;
+		else
+			*seq = cb.end_seq;
 	}
 
 	return 0;
