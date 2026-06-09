@@ -41,6 +41,14 @@ struct {
 	__uint(max_entries, 1);
 } cpus_count SEC(".maps");
 
+/* The CPU-steering key combines vlans->id[0] and id[1] only
+ * (VLAN_MAX_DEPTH=2 above). This example assumes a two-tag (QinQ)
+ * edge: a frame carrying three or more VLAN tags is processed and
+ * keyed on its first two tags, so it lands in the same CPU bucket as
+ * the legitimate (id[0], id[1]) frame. If untrusted producers can
+ * prepend tags, reject beyond depth 2 before this program or raise
+ * VLAN_MAX_DEPTH and rework the key to cover the additional tags.
+ */
 static __always_inline
 __u32 extract_vlan_key(struct collect_vlans *vlans)
 {

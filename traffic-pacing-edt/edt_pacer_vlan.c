@@ -219,6 +219,16 @@ __u16 get_vlan(struct __sk_buff *skb, struct collect_vlans *vlans)
 	return vlan_key;
 }
 
+/* The pacing key is one VLAN taken from at most depth 1
+ * (VLAN_MAX_DEPTH=2), chosen as id[0] or id[1] depending on whether
+ * the NIC offloaded the outer VLAN. Same two-tag (QinQ) edge
+ * assumption as xdp_cpumap_qinq.c: a frame carrying three or more
+ * tags is still processed, but the tag at depth 2 is not collected,
+ * so the key falls back to a tag at depth 0 or 1 instead of the true
+ * inner tag. Reject beyond depth 2 upstream if untrusted producers
+ * can prepend tags, or raise VLAN_MAX_DEPTH if a deeper inner tag is
+ * needed.
+ */
 static __always_inline
 __u16 extract_vlan_key(struct __sk_buff *skb, struct collect_vlans *vlans)
 {
