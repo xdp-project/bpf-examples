@@ -601,8 +601,12 @@ static int xdp_detach(struct xdp_program *prog, int ifindex,
 }
 
 /*
- * Will attempt to attach program at section sec in obj to ifindex at
- * attach_point.
+ * Will attach program prog_name in obj to ifindex at attach_point.
+ * The ingress and egress programs share a single clsact qdisc (it carries both
+ * hook points), so only the first attach for an interface should create it:
+ * pass create_hook=true for that one and false for the other. This avoids
+ * re-issuing a create for the already-existing qdisc, which the kernel rejects
+ * with -EEXIST and libbpf logs as "Exclusivity flag on, cannot modify".
  * On success, will fill in the passed opts, optionally set new_hook depending
  * if it created a new hook or not, and return the id of the attached program.
  * On failure it will return a negative error code.
@@ -610,19 +614,23 @@ static int xdp_detach(struct xdp_program *prog, int ifindex,
 static int tc_attach(struct bpf_object *obj, int ifindex,
 		     enum bpf_tc_attach_point attach_point,
 		     const char *prog_name, struct bpf_tc_opts *opts,
-		     bool *new_hook)
+		     bool create_hook, bool *new_hook)
 {
 	int err;
 	int prog_fd;
-	bool created_hook = true;
+	bool created_hook = false;
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
 			    .attach_point = attach_point);
 
-	err = bpf_tc_hook_create(&hook);
-	if (err == -EEXIST)
-		created_hook = false;
-	else if (err)
-		return err;
+	if (create_hook) {
+		err = bpf_tc_hook_create(&hook);
+		if (err == -EEXIST)
+			created_hook = false;
+		else if (err)
+			return err;
+		else
+			created_hook = true;
+	}
 
 	prog_fd = bpf_program__fd(
 		bpf_object__find_program_by_name(obj, prog_name));
@@ -2019,7 +2027,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		}
 		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
 				config->ingress_prog, &config->tc_ingress_opts,
-				&config->created_tc_hook);
+				true, &config->created_tc_hook);
 		config->ingress_prog_id = err;
 	}
 	if (err < 0) {
@@ -2029,10 +2037,11 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		goto ingress_err;
 	}
 
-	// Attach egress prog
+	// Attach egress prog; create the clsact only when ingress used XDP
 	config->egress_prog_id = tc_attach(
 		*obj, config->ifindex, BPF_TC_EGRESS, config->egress_prog,
 		&config->tc_egress_opts,
+		strcmp(config->ingress_prog, PROG_INGRESS_XDP) == 0,
 		config->created_tc_hook ? NULL : &config->created_tc_hook);
 	if (config->egress_prog_id < 0) {
 		fprintf(stderr,
