@@ -6,6 +6,10 @@ static const char *__doc__ =
 #include <bpf/libbpf.h>
 #include <linux/if_link.h>
 #include <net/if.h> // For if_nametoindex
+#include <net/if_arp.h> // For ARPHRD_PPP/ARPHRD_NONE (detecting L3 interfaces)
+#include <sys/ioctl.h> // For ioctl()
+#include <linux/sockios.h> // For SIOCGIFHWADDR
+#include <sys/socket.h> // For socket()
 #include <arpa/inet.h> // For inet_ntoa and ntohs
 
 #include <stdio.h>
@@ -273,6 +277,35 @@ static int parse_bounded_long(long long *res, const char *str, long long low,
 	return 0;
 }
 
+/*
+ * Interfaces such as PPP/PPPoE and tun carry no Ethernet header: at the
+ * tc/XDP hook the packet starts at the IP header. Detect them via their ARP
+ * hardware type so the BPF programs skip Ethernet parsing.
+ */
+static bool iface_is_l3(const char *ifname)
+{
+	struct ifreq ifr = { 0 };
+	int fd, ret;
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0)
+		return false;
+
+	memcpy(ifr.ifr_name, ifname, strlen(ifname) + 1);
+	ret = ioctl(fd, SIOCGIFHWADDR, &ifr);
+	close(fd);
+	if (ret < 0)
+		return false;
+
+	switch (ifr.ifr_hwaddr.sa_family) {
+	case ARPHRD_PPP:
+	case ARPHRD_NONE:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 {
 	int err, opt, len;
@@ -289,6 +322,7 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	config->bpf_config.push_individual_events = true;
 	config->bpf_config.agg_rtts = false;
 	config->bpf_config.agg_by_dst = false;
+	config->bpf_config.eth_header = true;
 
 	while ((opt = getopt_long(argc, argv, "hflTCsi:r:R:t:c:F:I:x:a:4:6:w:",
 				  long_options, NULL)) != -1) {
@@ -311,6 +345,9 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 					get_libbpf_strerror(err));
 				return err;
 			}
+
+			if (iface_is_l3(config->ifname))
+				config->bpf_config.eth_header = false;
 			break;
 		case 'r':
 			err = parse_bounded_double(&user_float, optarg, 0,
@@ -2626,9 +2663,10 @@ int main(int argc, char *argv[])
 				"Warning: ppviz format mainly intended for TCP traffic, but may now include ICMP traffic as well\n");
 	}
 
-	fprintf(stderr, "Starting ePPing in %s mode tracking %s on %s\n",
+	fprintf(stderr, "Starting ePPing in %s mode tracking %s on %s (%s header mode)\n",
 		output_format_to_str(config.format),
-		tracked_protocols_to_str(&config), config.ifname);
+		tracked_protocols_to_str(&config), config.ifname,
+		config.bpf_config.eth_header ? "Ethernet" : "IP");
 
 	config.out_ctx = open_output(
 		config.write_to_file ? config.filename : NULL, config.format,

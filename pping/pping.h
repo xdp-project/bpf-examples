@@ -102,6 +102,7 @@ struct bpf_config {
 	bool push_individual_events;
 	bool agg_rtts;
 	bool agg_by_dst; // dst of reply packet
+	bool eth_header; // false for L3 ifaces (PPP/PPPoE, tun)
 };
 
 struct ipprefix_key {

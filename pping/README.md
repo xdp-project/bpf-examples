@@ -12,6 +12,10 @@ could be extended to also work with for example TCP seq/ACK numbers, the QUIC
 spinbit and DNS queries. See the [TODO-list](./TODO.md) for more potential
 features (which may or may not ever get implemented).
 
+pping parses each packet starting from its Ethernet header. Interfaces that
+carry no Ethernet header -- PPP/PPPoE uplinks, tun, and other L3 interfaces --
+are detected automatically and parsed from the IP header instead.
+
 The fundamental logic of pping is to timestamp a pseudo-unique identifier for
 packets, and then look for matches in the reply packets. If a match is found,
 the RTT is simply calculated as the time difference between the current time and
