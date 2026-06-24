@@ -617,6 +617,27 @@ static int parse_icmp_identifier(struct parsing_context *pctx,
 }
 
 /*
+ * For L3 interfaces without an Ethernet header (PPP/PPPoE, tun), the packet
+ * starts at the IP header. Determine IPv4/IPv6 from the version nibble without
+ * advancing nh, so the existing parse_iphdr/parse_ip6hdr run unchanged.
+ */
+static __always_inline int parse_l3_proto(struct hdr_cursor *nh, void *data_end)
+{
+	__u8 *ipver = nh->pos;
+
+	if (ipver + 1 > data_end)
+		return -1;
+	switch (*ipver >> 4) {
+	case 4:
+		return bpf_htons(ETH_P_IP);
+	case 6:
+		return bpf_htons(ETH_P_IPV6);
+	default:
+		return -1;
+	}
+}
+
+/*
  * Attempts to parse the packet defined by pctx for a valid packet identifier
  * and reply identifier, filling in p_info.
  *
@@ -649,7 +670,10 @@ static int parse_packet_identifier(struct parsing_context *pctx,
 	__builtin_memset(p_info, 0, sizeof(*p_info));
 	p_info->time = bpf_ktime_get_ns();
 	p_info->pkt_len = pctx->pkt_len;
-	proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
+	if (config.eth_header)
+		proto = parse_ethhdr(&pctx->nh, pctx->data_end, &eth);
+	else
+		proto = parse_l3_proto(&pctx->nh, pctx->data_end);
 
 	// Parse IPv4/6 header
 	if (proto == bpf_htons(ETH_P_IP)) {
