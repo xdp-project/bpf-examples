@@ -25,6 +25,7 @@ struct json_writer {
 	FILE		*out;	/* output file */
 	unsigned	depth;  /* nesting */
 	bool		pretty; /* optional whitepace */
+	bool		line_delimited; /* json-lines mode */
 	char		sep;	/* either nul or comma */
 };
 
@@ -100,6 +101,7 @@ json_writer_t *jsonw_new(FILE *f)
 		self->out = f;
 		self->depth = 0;
 		self->pretty = false;
+		self->line_delimited = false;
 		self->sep = '\0';
 	}
 	return self;
@@ -120,6 +122,15 @@ void jsonw_destroy(json_writer_t **self_p)
 void jsonw_pretty(json_writer_t *self, bool on)
 {
 	self->pretty = on;
+	if (on)
+		self->line_delimited = false;
+}
+
+void jsonw_line_delimited(json_writer_t *self, bool on)
+{
+	self->line_delimited = on;
+	if (on)
+		self->pretty = false;
 }
 
 /* Basic blocks */
@@ -139,7 +150,14 @@ static void jsonw_end(json_writer_t *self, int c)
 	if (self->sep != '\0')
 		jsonw_eol(self);
 	putc(c, self->out);
-	self->sep = ',';
+	if (self->line_delimited && self->depth == 0) {
+		/* Terminate each top-level object with a trailing newline */
+		putc('\n', self->out);
+		fflush(self->out);
+		self->sep = '\0';
+	} else {
+		self->sep = ',';
+	}
 }
 
 
