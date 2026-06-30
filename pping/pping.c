@@ -73,6 +73,7 @@ static const char *__doc__ =
 enum pping_output_format {
 	PPING_OUTPUT_STANDARD,
 	PPING_OUTPUT_JSON,
+	PPING_OUTPUT_JSONL,
 	PPING_OUTPUT_PPVIZ
 };
 
@@ -167,7 +168,7 @@ static const struct option long_options[] = {
 	{ "rtt-type",             required_argument, NULL, 't' }, // What type of RTT the RTT-rate should be applied to ("min" or "smoothed"), only relevant if rtt-rate is provided
 	{ "force",                no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
 	{ "cleanup-interval",     required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
-	{ "format",               required_argument, NULL, 'F' }, // Which format to output in (standard/json/ppviz)
+	{ "format",               required_argument, NULL, 'F' }, // Which format to output in (standard/json/jsonl/ppviz)
 	{ "ingress-hook",         required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
 	{ "xdp-mode",             required_argument, NULL, 'x' }, // Which xdp-mode to use (unspecified, native or generic)
 	{ "tcp",                  no_argument,       NULL, 'T' }, // Calculate and report RTTs for TCP traffic (with TCP timestamps)
@@ -354,11 +355,13 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 				config->format = PPING_OUTPUT_STANDARD;
 			} else if (strcmp(optarg, "json") == 0) {
 				config->format = PPING_OUTPUT_JSON;
+			} else if (strcmp(optarg, "jsonl") == 0) {
+				config->format = PPING_OUTPUT_JSONL;
 			} else if (strcmp(optarg, "ppviz") == 0) {
 				config->format = PPING_OUTPUT_PPVIZ;
 			} else {
 				fprintf(stderr,
-					"format must be \"standard\", \"json\" or \"ppviz\"\n");
+					"format must be \"standard\", \"json\", \"jsonl\" or \"ppviz\"\n");
 				return -EINVAL;
 			}
 			break;
@@ -490,6 +493,8 @@ const char *output_format_to_str(enum pping_output_format format)
 		return "standard";
 	case PPING_OUTPUT_JSON:
 		return "json";
+	case PPING_OUTPUT_JSONL:
+		return "jsonl";
 	case PPING_OUTPUT_PPVIZ:
 		return "ppviz";
 	default:
@@ -1084,6 +1089,7 @@ static void print_event(struct output_context *out_ctx,
 		print_event_standard(out_ctx->stream, pe);
 		break;
 	case PPING_OUTPUT_JSON:
+	case PPING_OUTPUT_JSONL:
 		if (out_ctx->jctx)
 			print_event_json(out_ctx->jctx, pe);
 		break;
@@ -2106,11 +2112,15 @@ static struct output_context *open_output(const char *filename,
 		out_ctx->stream = stdout;
 	}
 
-	if (out_ctx->format == PPING_OUTPUT_JSON) {
+	if (out_ctx->format == PPING_OUTPUT_JSON ||
+	    out_ctx->format == PPING_OUTPUT_JSONL) {
 		out_ctx->jctx = jsonw_new(out_ctx->stream);
 		if (!out_ctx->jctx)
 			goto err;
-		jsonw_start_array(out_ctx->jctx);
+		if (out_ctx->format == PPING_OUTPUT_JSONL)
+			jsonw_line_delimited(out_ctx->jctx, true);
+		else
+			jsonw_start_array(out_ctx->jctx);
 	}
 
 	if (agg_conf)
@@ -2127,7 +2137,8 @@ static int close_output(struct output_context *out_ctx)
 	int err = 0;
 
 	if (out_ctx->jctx) {
-		jsonw_end_array(out_ctx->jctx);
+		if (out_ctx->format == PPING_OUTPUT_JSON)
+			jsonw_end_array(out_ctx->jctx);
 		jsonw_destroy(&out_ctx->jctx);
 	}
 

@@ -37,7 +37,7 @@ echo identifer, and thus all instaces of ping originating from a particular
 Windows host and the same target host will be considered a single flow.
 
 ## Output formats
-pping currently supports 3 different formats, *standard*, *ppviz* and *json*. In
+pping currently supports 4 different formats, *standard*, *ppviz*, *json* and *jsonl*. In
 general, the output consists of two different types of events, flow-events which
 gives information that a flow has started/ended, and RTT-events which provides
 information on a computed RTT within a flow.
@@ -118,6 +118,24 @@ An example of a (pretty-printed) RTT-even is provided below:
     "rec_bytes": 37,
     "match_on_egress": false
 }
+```
+
+### JSON Lines format
+The JSON Lines (`jsonl`) format contains the same per-event objects as the JSON
+format, but emits them as a [JSON Lines](https://jsonlines.org/) stream: one
+JSON object per line, with no enclosing array. The JSON format wraps all events
+in a single root-level array, which can only be parsed once that array is closed
+and which produces invalid (concatenated) arrays if the output is appended to
+across several runs. The jsonl format instead produces an append-only log that
+can be read line by line and stays valid as it grows, which is convenient for
+streaming the output into a file or processing it with line-oriented tools (each
+line is independently valid JSON).
+
+The objects and their fields are identical to the [JSON format](#json-format);
+only the framing differs. An example flow-event (a single line, wrapped here for
+readability) is:
+```json
+{"timestamp":1623420837244545000,"src_ip":"10.11.1.1","src_port":5201,"dest_ip":"10.11.1.2","dest_port":59572,"protocol":"TCP","flow_event":"opening","reason":"SYN-ACK","triggered_by":"dest"}
 ```
 
 ## Design and technical description
