@@ -2232,7 +2232,13 @@ static struct output_context *open_output(const char *filename,
 	out_ctx->format = format;
 
 	if (filename) {
-		out_ctx->stream = fopen(filename, "ax");
+		/*
+		 * json wraps events in an array and can't be appended to;
+		 * standard, ppviz and jsonl are line-based and can be appended.
+		 */
+		const char *mode = format == PPING_OUTPUT_JSON ? "ax" : "a";
+
+		out_ctx->stream = fopen(filename, mode);
 		if (!out_ctx->stream)
 			goto err;
 	} else {
