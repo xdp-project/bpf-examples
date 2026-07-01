@@ -170,7 +170,7 @@ static const struct option long_options[] = {
 	{ "rate-limit",           required_argument, NULL, 'r' }, // Sampling rate-limit in ms
 	{ "rtt-rate",             required_argument, NULL, 'R' }, // Sampling rate in terms of flow-RTT (ex 1 sample per RTT-interval)
 	{ "rtt-type",             required_argument, NULL, 't' }, // What type of RTT the RTT-rate should be applied to ("min" or "smoothed"), only relevant if rtt-rate is provided
-	{ "force",                no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface, remove qdisc on cleanup
+	{ "force",                no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface
 	{ "cleanup-interval",     required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",               required_argument, NULL, 'F' }, // Which format to output in (standard/json/jsonl/ppviz)
 	{ "ingress-hook",         required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
@@ -2793,9 +2793,13 @@ cleanup_attached_progs:
 			"Failed removing ingress program from interface %s: %s\n",
 			config.ifname, get_libbpf_strerror(detach_err));
 
+	/*
+	 * Remove the shared clsact qdisc if we created it, so it does not
+	 * linger and make the next run's create fail with -EEXIST.
+	 */
 	detach_err =
 		tc_detach(config.ifindex, BPF_TC_EGRESS, &config.tc_egress_opts,
-			  config.force && config.created_tc_hook);
+			  config.created_tc_hook);
 	if (detach_err)
 		fprintf(stderr,
 			"Failed removing egress program from interface %s: %s\n",
