@@ -160,7 +160,6 @@ struct pping_config {
 	enum pping_output_format format;
 	enum xdp_attach_mode xdp_mode;
 	bool write_to_file;
-	bool force;
 	bool created_tc_hook;
 };
 
@@ -170,7 +169,7 @@ static const struct option long_options[] = {
 	{ "rate-limit",           required_argument, NULL, 'r' }, // Sampling rate-limit in ms
 	{ "rtt-rate",             required_argument, NULL, 'R' }, // Sampling rate in terms of flow-RTT (ex 1 sample per RTT-interval)
 	{ "rtt-type",             required_argument, NULL, 't' }, // What type of RTT the RTT-rate should be applied to ("min" or "smoothed"), only relevant if rtt-rate is provided
-	{ "force",                no_argument,       NULL, 'f' }, // Overwrite any existing XDP program on interface
+	{ "force",                no_argument,       NULL, 'f' }, // Deprecated, has no effect
 	{ "cleanup-interval",     required_argument, NULL, 'c' }, // Map cleaning interval in s, 0 to disable
 	{ "format",               required_argument, NULL, 'F' }, // Which format to output in (standard/json/jsonl/ppviz)
 	{ "ingress-hook",         required_argument, NULL, 'I' }, // Use tc or XDP as ingress hook
@@ -313,7 +312,6 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 	long long user_int;
 
 	config->ifindex = 0;
-	config->force = false;
 
 	config->bpf_config.localfilt = true;
 	config->bpf_config.track_tcp = false;
@@ -417,7 +415,8 @@ static int parse_arguments(int argc, char *argv[], struct pping_config *config)
 			config->bpf_config.localfilt = false;
 			break;
 		case 'f':
-			config->force = true;
+			fprintf(stderr,
+				"Warning: --force is deprecated and has no effect\n");
 			break;
 		case 'T':
 			config->bpf_config.track_tcp = true;
