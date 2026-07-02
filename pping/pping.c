@@ -153,8 +153,6 @@ struct pping_config {
 	char *event_map;
 	int ifindex;
 	struct xdp_program *xdp_prog;
-	int ingress_prog_id;
-	int egress_prog_id;
 	char ifname[IF_NAMESIZE];
 	char filename[PATH_MAX];
 	enum pping_output_format format;
@@ -2027,7 +2025,6 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
 				config->ingress_prog, &config->tc_ingress_opts,
 				true, &config->created_tc_hook);
-		config->ingress_prog_id = err;
 	}
 	if (err < 0) {
 		fprintf(stderr,
@@ -2037,17 +2034,15 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	}
 
 	// Attach egress prog; create the clsact only when ingress used XDP
-	config->egress_prog_id = tc_attach(
+	err = tc_attach(
 		*obj, config->ifindex, BPF_TC_EGRESS, config->egress_prog,
 		&config->tc_egress_opts,
 		strcmp(config->ingress_prog, PROG_INGRESS_XDP) == 0,
 		config->created_tc_hook ? NULL : &config->created_tc_hook);
-	if (config->egress_prog_id < 0) {
+	if (err < 0) {
 		fprintf(stderr,
 			"Failed attaching egress BPF program on interface %s: %s\n",
-			config->ifname,
-			get_libbpf_strerror(config->egress_prog_id));
-		err = config->egress_prog_id;
+			config->ifname, get_libbpf_strerror(err));
 		goto egress_err;
 	}
 
