@@ -35,9 +35,9 @@
     - Original pping checks if flow is bi-directional before adding
       timestamps, but this could miss shorter flows
 - [ ] Dynamically grow the maps if they are starting to get full
-- [ ] Use libxdp to load XDP program
 
 ## Done
+- [x] Use libxdp to load XDP program
 - [x] Clean up commits and add signed-off-by tags
 - [x] Add SPDX-license-identifier tags
 - [x] Format C-code in kernel style
@@ -57,7 +57,7 @@
     works for both pping implementations.
 - [x] Add timestamps to output (as original pping)
 - [x] Add support for other hooks
-  - TC-BFP on ingress instead of XDP
+  - TC-BPF on ingress instead of XDP
 - [x] Improve map cleaning:
   - [x] Use BPF iter to clean up maps with BPF programs instead of
         looping through entries in userspace.
@@ -75,8 +75,8 @@
 ## Limited information in different output formats
 The ppviz format is a bit limited in what information it can
 include. One of these limitations is that it does not include any
-protocol information as it was designed with only TCP in mind. If
-using PPing with other protocols than TCP may therefore not be
+protocol information as it was designed with only TCP in mind. When
+using PPing with other protocols than TCP it may therefore not be
 possible to distinguish flows with different protocols. PPing will
 therefore emit a warning if attempting to use the ppviz format with
 protocols other than TCP, but will still allow it.
@@ -91,8 +91,8 @@ deemed important.
 
 ## Cannot detect end of ICMP "flow"
 ICMP is not a flow-based protocol, and therefore there is no signaling
-that the ICMP "flow" is about to close. Subsequently, there is not way
-for PPing to automatically detect that and ICMP flow has stopped and
+that the ICMP "flow" is about to close. Subsequently, there is no way
+for PPing to automatically detect that an ICMP flow has stopped and
 delete its flow-state entry (and send a timely flow closing event).
 
 A consequence of this is that the ICMP flow entries will stick around
@@ -103,11 +103,11 @@ the flow map and potentially block other flows for a considerable
 time.
 
 ## RTT-based sampling
-The RTT-based sampling features means that timestamp entries may only
-be created at an interval proportional to the flows RTT. This allows
+The RTT-based sampling feature means that timestamp entries may only
+be created at an interval proportional to the flow's RTT. This allows
 flows with shorter RTTs to get more frequent RTT samples than flows
-with long RTTs. However, as the flows RTT can only be updated based on
-the calculated RTT samples, this creates a situation where the RTTs
+with long RTTs. However, as the flow's RTT can only be updated based on
+the calculated RTT samples, this creates a situation where the RTT's
 update rate is dependent on itself. Flows with short RTTs will update
 the RTT more often, which in turn affects how often they can update
 the RTT.
@@ -116,7 +116,7 @@ This mainly becomes problematic if basing the sampling rate on the
 sRTT which may grow. In this case the sRTT will generally be prone to
 growing faster than it shrinks, as if it starts with a low RTT it will
 quickly update it to higher RTTs, but with high RTTs it will take
-longer for it do decrease to a lower RTT again.
+longer for it to decrease to a lower RTT again.
 
 ## Losing debug/warning information
 The "map full" and "map cleaning" events are pushed through the same
@@ -160,13 +160,13 @@ entry is deleted and there are other entries remaining in the same
 bucket, those remaining entries will not be traversed. As the
 periodical cleanup may delete entries as it is traversing the map,
 this may result in some of the entries which share the bucket
-with deleted entries not always be traversed.
+with deleted entries not always being traversed.
 
 In general this should not cause a large problem as those entries will
 simply be traversed the next time the map is iterated over
 instead. However, it may cause certain entries to remain in the hash
 map a bit longer than expected (and if the map is full subsequently
-block new entries from being created for that duration)
+block new entries from being created for that duration).
 
 
 ## Concurrency issues
@@ -197,7 +197,7 @@ for each flow, by storing it in the `flow_state` map. This is done to
 detect the first packet with a new identifier. If multiple packets are
 processed concurrently, several of them could potentially detect
 themselves as being first with the same identifier (which only matters
-if they also pass rate-limit check as well), alternatively if the
+if they also pass the rate-limit check), alternatively if the
 concurrent packets have different identifiers there may be a lost
 update (but for TCP timestamps, concurrent packets would typically be
 expected to have the same timestamp).
@@ -238,7 +238,7 @@ Both the tc/egress and XDP/ingress programs will try to update some
 flow statistics each time they successfully parse a packet with an
 identifier. Specifically, they'll update the number of packets and
 bytes sent/received. This is not done in an atomic fashion, so there
-could potentially be some lost updates resulting an underestimate.
+could potentially be some lost updates resulting in an underestimate.
 
 Furthermore, whenever the XDP/ingress program calculates an RTT, it
 will check if this is the lowest RTT seen so far for the flow. If
