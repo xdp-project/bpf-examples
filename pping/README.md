@@ -1,7 +1,7 @@
 # PPing using XDP and TC-BPF
 A re-implementation of [Kathie Nichols' passive ping
-(pping)](https://github.com/pollere/pping) utility using XDP (on ingress) and
-TC-BPF (on egress) for the packet capture logic.
+(pping)](https://github.com/pollere/pping) utility using XDP or TC-BPF (on
+ingress) and TC-BPF (on egress) for the packet capture logic.
 
 ## Simple description
 Passive Ping (PPing) is a simple tool for passively measuring per-flow RTTs. It
@@ -22,11 +22,11 @@ the RTT is simply calculated as the time difference between the current time and
 the stored timestamp.
 
 This tool, just as Kathie's original pping implementation, uses TCP timestamps
-as identifiers for TCP traffic. The TSval (which is a timestamp in and off
+as identifiers for TCP traffic. The TSval (which is a timestamp in and of
 itself) is used as an identifier and timestamped. Reply packets in the reverse
 flow are then parsed for the TSecr, which are the echoed TSval values from the
 receiver. The TCP timestamps are not necessarily unique for every packet (they
-have a limited update frequency, appears to be 1000 Hz for modern Linux
+have a limited update frequency, which appears to be 1000 Hz for modern Linux
 systems), so only the first instance of an identifier is timestamped, and
 matched against the first incoming packet with a matching reply identifier. The
 mechanism to ensure only the first packet is timestamped and matched differs
@@ -34,20 +34,20 @@ from the one in Kathie's pping, and is further described in
 [SAMPLING_DESIGN](./SAMPLING_DESIGN.md).
 
 For ICMP echo, it uses the echo identifier as port numbers, and echo sequence
-number as identifer to match against. Linux systems will typically use different
-echo identifers for different instances of ping, and thus each ping instance
-will be recongnized as a separate flow. Windows systems typically use a static
-echo identifer, and thus all instaces of ping originating from a particular
+number as identifier to match against. Linux systems will typically use different
+echo identifiers for different instances of ping, and thus each ping instance
+will be recognized as a separate flow. Windows systems typically use a static
+echo identifier, and thus all instances of ping originating from a particular
 Windows host and the same target host will be considered a single flow.
 
 ## Output formats
 pping currently supports 4 different formats, *standard*, *ppviz*, *json* and *jsonl*. In
 general, the output consists of two different types of events, flow-events which
-gives information that a flow has started/ended, and RTT-events which provides
+give information that a flow has started/ended, and RTT-events which provide
 information on a computed RTT within a flow.
 
 ### Standard format
-The standard format is quite similar to the Kathie's pping default output, and
+The standard format is quite similar to Kathie's pping default output, and
 is generally intended to be an easily understood human-readable format writing a
 single line per event.
 
@@ -69,7 +69,7 @@ is further described [here](http://www.pollere.net/ppviz.html).
 
 Note that the optional *FBytes*, *DBytes* and *PBytes* from the format
 specification have not been included here, and do not appear to be used by
-ppviz. Furthermore, flow events are not included in the output, as the those are
+ppviz. Furthermore, flow events are not included in the output, as those are
 not used by ppviz.
 
 An example of the format is provided below:
@@ -85,9 +85,9 @@ The JSON format is primarily intended to be machine-readable, and thus uses no
 spacing or newlines between entries to reduce the overhead. External tools such
 as [jq](https://stedolan.github.io/jq/) can be used to pretty-print the format.
 
-The format consists of an array at the root-level, and each flow or RTT even is
+The format consists of an array at the root-level, and each flow or RTT event is
 added as an object to the root-array. The events contain some additional fields
-in the JSON format which is not displayed by the other formats. All times
+in the JSON format which are not displayed by the other formats. All times
 (*timestamp*, *rtt* and *min_rtt*) are provided as integers in nanoseconds.
 
 An example of a (pretty-printed) flow-event is provided below:
@@ -105,7 +105,7 @@ An example of a (pretty-printed) flow-event is provided below:
 }
 ```
 
-An example of a (pretty-printed) RTT-even is provided below:
+An example of a (pretty-printed) RTT-event is provided below:
 ```json
 {
     "timestamp": 1623420838254558500,
@@ -143,7 +143,7 @@ readability) is:
 ```
 
 ## Design and technical description
-!["Design of eBPF pping](./eBPF_pping_design.png)
+![Design of eBPF pping](./eBPF_pping_design.png)
 
 ### Files:
 - **pping.c:** Userspace program that loads and attaches the BPF programs, pulls
@@ -160,7 +160,7 @@ readability) is:
   timestamped one in the reverse flow. If a match is found, an RTT is calculated
   and an RTT-event is pushed to userspace through the perf-buffer `events`. For
   each packet with a valid identifier, the program also keeps track of and
-  updates the state flow and reverse flow, stored in the `flow_state` map.
+  updates the state of the flow and reverse flow, stored in the `flow_state` map.
 - **pping.h:** Common header file included by `pping.c` and
   `pping_kern.c`. Contains some common structs used by both (are part of the
   maps).
@@ -175,7 +175,7 @@ readability) is:
   is found, and removed if a match is found. Leftover entries are eventually
   removed by userspace (`pping.c`).
 - **events:** A perf-buffer used by the BPF programs to push flow or RTT events
-  to `pping.c`, which continuously polls the map the prints them out.
+  to `pping.c`, which continuously polls the map and prints them out.
 
 
 ## Similar projects
@@ -186,7 +186,7 @@ RTT calculation using TCP timestamps (as in this project) works is provided in
 
 - [pping](https://github.com/pollere/pping): This project is largely a
   re-implementation of Kathie's pping, but by using BPF and XDP as well as
-  implementing some filtering logic the hope is to be able to create a always-on
+  implementing some filtering logic the hope is to be able to create an always-on
   tool that can scale well even to large amounts of massive flows.
 - [ppviz](https://github.com/pollere/ppviz): Web-based visualization tool for
   the "machine-friendly" (-m) output from Kathie's pping tool. Running this
