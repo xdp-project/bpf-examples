@@ -153,6 +153,8 @@ struct pping_config {
 	char *event_map;
 	int ifindex;
 	struct xdp_program *xdp_prog;
+	int tcx_ingress_link_fd;
+	int tcx_egress_link_fd;
 	char ifname[IF_NAMESIZE];
 	char filename[PATH_MAX];
 	enum pping_output_format format;
@@ -598,7 +600,7 @@ static int xdp_detach(struct xdp_program *prog, int ifindex,
 }
 
 /*
- * Will attach program prog_name in obj to ifindex at attach_point.
+ * Will attach the program with fd prog_fd to ifindex at attach_point.
  * The ingress and egress programs share a single clsact qdisc (it carries both
  * hook points), so only the first attach for an interface should create it:
  * pass create_hook=true for that one and false for the other. This avoids
@@ -608,13 +610,11 @@ static int xdp_detach(struct xdp_program *prog, int ifindex,
  * if it created a new hook or not, and return the id of the attached program.
  * On failure it will return a negative error code.
  */
-static int tc_attach(struct bpf_object *obj, int ifindex,
-		     enum bpf_tc_attach_point attach_point,
-		     const char *prog_name, struct bpf_tc_opts *opts,
+static int tc_attach(int ifindex, enum bpf_tc_attach_point attach_point,
+		     int prog_fd, struct bpf_tc_opts *opts,
 		     bool create_hook, bool *new_hook)
 {
 	int err;
-	int prog_fd;
 	bool created_hook = false;
 	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
 			    .attach_point = attach_point);
@@ -627,13 +627,6 @@ static int tc_attach(struct bpf_object *obj, int ifindex,
 			return err;
 		else
 			created_hook = true;
-	}
-
-	prog_fd = bpf_program__fd(
-		bpf_object__find_program_by_name(obj, prog_name));
-	if (prog_fd < 0) {
-		err = prog_fd;
-		goto err_after_hook;
 	}
 
 	opts->prog_fd = prog_fd;
@@ -656,6 +649,64 @@ err_after_hook:
 		hook.attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
 		bpf_tc_hook_destroy(&hook);
 	}
+	return err;
+}
+
+static int tcx_or_tc_attach(struct bpf_object *obj, struct pping_config *config,
+			    enum bpf_tc_attach_point attach_point)
+{
+	bool create_hook, new_hook = false;
+	enum bpf_attach_type link_type;
+	struct bpf_tc_opts *tc_opts;
+	const char *prog_name;
+	int *tcx_link_fd;
+	int prog_fd, err;
+
+	if (attach_point == BPF_TC_INGRESS) {
+		prog_name = config->ingress_prog;
+		tcx_link_fd = &config->tcx_ingress_link_fd;
+		tc_opts = &config->tc_ingress_opts;
+		link_type = BPF_TCX_INGRESS;
+		create_hook = true;
+	} else {
+		prog_name = config->egress_prog;
+		tcx_link_fd = &config->tcx_egress_link_fd;
+		tc_opts = &config->tc_egress_opts;
+		link_type = BPF_TCX_EGRESS;
+		/*
+		 * The ingress attachment creates the shared clsact qdisc,
+		 * so egress only creates it when ingress uses XDP.
+		 */
+		create_hook = strcmp(config->ingress_prog,
+				     PROG_INGRESS_XDP) == 0;
+	}
+
+	prog_fd = bpf_program__fd(
+		bpf_object__find_program_by_name(obj, prog_name));
+	if (prog_fd < 0)
+		return prog_fd;
+
+	err = bpf_link_create(prog_fd, config->ifindex, link_type, NULL);
+	if (err >= 0) {
+		*tcx_link_fd = err;
+		return err;
+	}
+	/*
+	 * Kernels without TCX support (pre-6.6) reject the link creation
+	 * with -EINVAL, fall back on the legacy clsact hook.
+	 */
+	if (err != -EINVAL)
+		return err;
+
+	err = tc_attach(
+		config->ifindex,
+		attach_point,
+		prog_fd,
+		tc_opts,
+		create_hook,
+		&new_hook);
+	if (new_hook)
+		config->created_tc_hook = true;
 	return err;
 }
 
@@ -694,6 +745,58 @@ static int tc_detach(int ifindex, enum bpf_tc_attach_point attach_point,
 
 	err = destroy_hook ? hook_err : err;
 	return err;
+}
+
+static int detach_bpfprogs(struct pping_config *config)
+{
+	bool egress_attached = config->tcx_egress_link_fd >= 0 ||
+			       config->tc_egress_opts.prog_id;
+	int ingress_err = 0, egress_err = 0;
+
+	if (config->xdp_prog) {
+		ingress_err = xdp_detach(config->xdp_prog, config->ifindex,
+					 config->xdp_mode);
+		config->xdp_prog = NULL;
+	} else if (config->tcx_ingress_link_fd >= 0) {
+		/* Closing a TCX link fd detaches its program */
+		ingress_err = close(config->tcx_ingress_link_fd) ? -errno : 0;
+		config->tcx_ingress_link_fd = -1;
+	} else if (config->tc_ingress_opts.prog_id) {
+		/*
+		 * Remove the shared clsact qdisc if we created it and no
+		 * egress detach follows, so it does not linger and make the
+		 * next run's create fail with -EEXIST.
+		 */
+		ingress_err = tc_detach(
+			config->ifindex,
+			BPF_TC_INGRESS,
+			&config->tc_ingress_opts,
+			config->created_tc_hook && !egress_attached);
+		config->tc_ingress_opts.prog_id = 0;
+	}
+	if (ingress_err)
+		fprintf(stderr,
+			"Failed removing ingress program from interface %s: %s\n",
+			config->ifname, get_libbpf_strerror(ingress_err));
+
+	if (config->tcx_egress_link_fd >= 0) {
+		egress_err = close(config->tcx_egress_link_fd) ? -errno : 0;
+		config->tcx_egress_link_fd = -1;
+	} else if (config->tc_egress_opts.prog_id) {
+		/* Same here: remove the clsact if we created it */
+		egress_err = tc_detach(
+			config->ifindex,
+			BPF_TC_EGRESS,
+			&config->tc_egress_opts,
+			config->created_tc_hook);
+		config->tc_egress_opts.prog_id = 0;
+	}
+	if (egress_err)
+		fprintf(stderr,
+			"Failed removing egress program from interface %s: %s\n",
+			config->ifname, get_libbpf_strerror(egress_err));
+
+	return ingress_err ?: egress_err;
 }
 
 /*
@@ -1978,8 +2081,10 @@ static int set_programs_to_load(struct bpf_object *obj,
 static int load_attach_bpfprogs(struct bpf_object **obj,
 				struct pping_config *config)
 {
-	int err, detach_err;
+	int err;
 	config->created_tc_hook = false;
+	config->tcx_ingress_link_fd = -1;
+	config->tcx_egress_link_fd = -1;
 
 	// Open and load ELF file
 	*obj = bpf_object__open(config->object_path);
@@ -2022,9 +2127,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 				config->object_path, get_libbpf_strerror(err));
 			return err;
 		}
-		err = tc_attach(*obj, config->ifindex, BPF_TC_INGRESS,
-				config->ingress_prog, &config->tc_ingress_opts,
-				true, &config->created_tc_hook);
+		err = tcx_or_tc_attach(*obj, config, BPF_TC_INGRESS);
 	}
 	if (err < 0) {
 		fprintf(stderr,
@@ -2033,12 +2136,8 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 		goto ingress_err;
 	}
 
-	// Attach egress prog; create the clsact only when ingress used XDP
-	err = tc_attach(
-		*obj, config->ifindex, BPF_TC_EGRESS, config->egress_prog,
-		&config->tc_egress_opts,
-		strcmp(config->ingress_prog, PROG_INGRESS_XDP) == 0,
-		config->created_tc_hook ? NULL : &config->created_tc_hook);
+	// Attach egress prog
+	err = tcx_or_tc_attach(*obj, config, BPF_TC_EGRESS);
 	if (err < 0) {
 		fprintf(stderr,
 			"Failed attaching egress BPF program on interface %s: %s\n",
@@ -2049,19 +2148,7 @@ static int load_attach_bpfprogs(struct bpf_object **obj,
 	return 0;
 
 egress_err:
-	if (config->xdp_prog) {
-		detach_err = xdp_detach(config->xdp_prog, config->ifindex,
-					config->xdp_mode);
-		config->xdp_prog = NULL;
-	} else {
-		detach_err = tc_detach(config->ifindex, BPF_TC_INGRESS,
-				       &config->tc_ingress_opts,
-				       config->created_tc_hook);
-	}
-	if (detach_err)
-		fprintf(stderr,
-			"Failed detaching ingress program from %s: %s\n",
-			config->ifname, get_libbpf_strerror(detach_err));
+	detach_bpfprogs(config);
 ingress_err:
 	bpf_object__close(*obj);
 	return err;
@@ -2776,28 +2863,7 @@ cleanup_mapcleaning:
 	close(config.clean_args.pipe_wfd);
 
 cleanup_attached_progs:
-	if (config.xdp_prog)
-		detach_err = xdp_detach(config.xdp_prog, config.ifindex,
-					config.xdp_mode);
-	else
-		detach_err = tc_detach(config.ifindex, BPF_TC_INGRESS,
-				       &config.tc_ingress_opts, false);
-	if (detach_err)
-		fprintf(stderr,
-			"Failed removing ingress program from interface %s: %s\n",
-			config.ifname, get_libbpf_strerror(detach_err));
-
-	/*
-	 * Remove the shared clsact qdisc if we created it, so it does not
-	 * linger and make the next run's create fail with -EEXIST.
-	 */
-	detach_err =
-		tc_detach(config.ifindex, BPF_TC_EGRESS, &config.tc_egress_opts,
-			  config.created_tc_hook);
-	if (detach_err)
-		fprintf(stderr,
-			"Failed removing egress program from interface %s: %s\n",
-			config.ifname, get_libbpf_strerror(detach_err));
+	detach_err = detach_bpfprogs(&config);
 
 	bpf_object__close(obj);
 
