@@ -142,15 +142,69 @@ readability) is:
 {"timestamp":1623420837244545000,"src_ip":"10.11.1.1","src_port":5201,"dest_ip":"10.11.1.2","dest_port":59572,"protocol":"TCP","flow_event":"opening","reason":"SYN-ACK","triggered_by":"dest"}
 ```
 
+## Aggregated output
+With `-a`/`--aggregate <seconds>` pping instead reports RTT histograms and
+traffic counters aggregated per subnet at the given interval, and the
+individual flow and RTT events are disabled. The subnet sizes default to /24
+for IPv4 and /48 for IPv6 and can be changed with `--aggregate-subnets-v4` and
+`--aggregate-subnets-v6`. RTTs are aggregated on the source IP of the reply
+packet, or on its destination IP with `--aggregate-reverse`. Subnet entries
+that have seen no traffic for 30 seconds are removed (`--aggregate-timeout`).
+Aggregated output works with the standard, json and jsonl formats (ppviz does
+not support it).
+
+The output starts with a metadata record describing the aggregation settings,
+followed at each interval by one record per subnet and a record with global
+protocol counters. The RTTs are collected in histograms with 250 bins of 4 ms
+each (RTTs beyond the range of the histogram are counted in the last bin). The
+standard format summarizes the histograms as count/min/mean/median/p95/max,
+and the json and jsonl formats also include the histogram itself. The entry
+reported as 0.0.0.0/0 or ::/0 is the backup entry, which collects traffic that
+does not get a subnet entry of its own (for example when the aggregation map
+is full).
+
+An example of the standard format is provided below:
+```shell
+Aggregating RTTs in histograms with 250 4 ms wide bins every 5 seconds
+16:04:55.561548117: 2001:db8:b861::/48 -> rxpkts=1240, rxbytes=216260, txpkts=1289, txbytes=1000314, rtt-count=1, min=2.48935 ms, mean=2 ms, median=2 ms, p95=2 ms, max=2.48935 ms
+16:04:55.561548117: 2001:db8:e60::/48 -> rxpkts=2, rxbytes=680, txpkts=4, txbytes=2968, rtt-count=1, min=256.777 ms, mean=258 ms, median=258 ms, p95=258 ms, max=256.777 ms
+16:04:55.561548117: 2001:db8:c14::/48 -> rxpkts=8, rxbytes=866, txpkts=8, txbytes=576
+16:04:55.561548117: ::/0 -> rxpkts=1654, rxbytes=1111637, txpkts=1597, txbytes=319003
+16:04:55.573621826: TCP=(pkts=521, bytes=82026), UDP=(pkts=3972, bytes=1882961), ICMP=(pkts=21, bytes=2862), ICMPv6=(pkts=264, bytes=51986), ECN=(Not-ECT=4759, ECT0=19)
+```
+
+An example of the jsonl format (the metadata record, one subnet record and the
+global counters record; one object per line):
+```json
+{"timestamp":1783070692082600725,"bins":250,"bin_width_ns":4000000,"aggregation_interval_ns":5000000000,"timeout_interval_ns":30000000000,"ipv4_prefix_len":24,"ipv6_prefix_len":48}
+{"timestamp":1783070697829042423,"ip_prefix":"2001:db8:b861::/48","rx_stats":{"TCP_TS":{"packets":38,"bytes":13386},"TCP_noTS":{"packets":146,"bytes":30186},"other":{"packets":1686,"bytes":281948}},"tx_stats":{"TCP_TS":{"packets":34,"bytes":16200},"TCP_noTS":{"packets":129,"bytes":41983},"other":{"packets":1791,"bytes":1593387}},"count_rtt":10,"min_rtt":48967,"mean_rtt":1.88e+07,"median_rtt":1e+07,"p95_rtt":4.2e+07,"max_rtt":42344639,"histogram":[5,0,0,0,1,0,0,0,1,0,3]}
+{"timestamp":1783070697835435811,"protocol_counters":{"TCP":{"packets":1164,"bytes":1714376},"UDP":{"packets":6935,"bytes":3247411},"ICMP":{"packets":81,"bytes":6536},"ICMPv6":{"packets":277,"bytes":54435}},"ecn_counters":{"no_ECT":8449,"ECT1":6,"ECT0":2},"errors":{}}
+```
+
+## Running as a systemd service
+The [systemd-files](./systemd-files) directory contains unit files for running
+pping as a templated systemd service on a given interface, ex `systemctl start
+pping@eth0`. The service writes json output to `/var/log/pping/<interface>/`,
+and a timer runs
+[scripts/rotate-pping-output.sh](./scripts/rotate-pping-output.sh) every
+minute, which moves the output file to a dated folder, signals pping with
+SIGHUP to reopen its output file and compresses the moved file. The units
+expect this repository to be installed under /opt/bpf-examples.
+
+The [scripts](./scripts) directory also contains cleanup-tc-progs.sh, which
+removes leftover pping tc filters from an interface, ex from a previous run
+that was killed before it could detach its programs.
+
 ## Design and technical description
 ![Design of eBPF pping](./eBPF_pping_design.png)
 
 ### Files:
-- **pping.c:** Userspace program that loads and attaches the BPF programs, pulls
-  the perf-buffer `events` to print out RTT messages and periodically cleans
-  up the hash-maps from old entries. Also passes user options to the BPF
-  programs by setting a "global variable" (stored in the programs .rodata
-  section).
+- **pping.c:** Userspace program that loads and attaches the BPF programs (the
+  tc programs through TCX links on kernel 6.6+, otherwise through the legacy
+  clsact hook), pulls the perf-buffer `events` to print out
+  RTT messages and periodically cleans up the hash-maps from old entries. Also
+  passes user options to the BPF programs by setting a "global variable"
+  (stored in the programs .rodata section).
 - **pping_kern.c:** Contains the BPF programs that are loaded on egress (tc) and
   ingress (XDP or tc), as well as several common functions, a global constant
   `config` (set from userspace) and map definitions. Essentially the same pping
@@ -176,6 +230,11 @@ readability) is:
   removed by userspace (`pping.c`).
 - **events:** A perf-buffer used by the BPF programs to push flow or RTT events
   to `pping.c`, which continuously polls the map and prints them out.
+- **map_v4_agg1/map_v4_agg2 and map_v6_agg1/map_v6_agg2:** Per-subnet
+  aggregation maps used with `--aggregate`, one pair per IP version. The BPF
+  programs update one instance while `pping.c` reports and clears the other,
+  swapping between them at each aggregation interval
+  (`map_active_agg_instance` tells the BPF programs which instance to use).
 
 
 ## Similar projects
