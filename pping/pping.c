@@ -7,6 +7,7 @@ static const char *__doc__ =
 #include <linux/if_link.h>
 #include <net/if.h> // For if_nametoindex
 #include <net/if_arp.h> // For ARPHRD_PPP/ARPHRD_NONE (detecting L3 interfaces)
+#include <linux/rtnetlink.h> // For detecting when the interface is removed
 #include <sys/ioctl.h> // For ioctl()
 #include <linux/sockios.h> // For SIOCGIFHWADDR
 #include <sys/socket.h> // For socket()
@@ -59,9 +60,11 @@ static const char *__doc__ =
 #define PPING_EPEVENT_TYPE_SIGNAL (1ULL << 62)
 #define PPING_EPEVENT_TYPE_PIPE (1ULL << 61)
 #define PPING_EPEVENT_TYPE_AGGTIMER (1ULL << 60)
+#define PPING_EPEVENT_TYPE_NETLINK (1ULL << 59)
 #define PPING_EPEVENT_MASK                                                     \
 	(~(PPING_EPEVENT_TYPE_PERFBUF | PPING_EPEVENT_TYPE_SIGNAL |            \
-	   PPING_EPEVENT_TYPE_PIPE | PPING_EPEVENT_TYPE_AGGTIMER))
+	   PPING_EPEVENT_TYPE_PIPE | PPING_EPEVENT_TYPE_AGGTIMER |             \
+	   PPING_EPEVENT_TYPE_NETLINK))
 
 #define AGG_BATCH_SIZE 64 // Batch size for fetching aggregation maps (bpf_map_lookup_batch)
 
@@ -752,6 +755,26 @@ static int detach_bpfprogs(struct pping_config *config)
 	bool egress_attached = config->tcx_egress_link_fd >= 0 ||
 			       config->tc_egress_opts.prog_id;
 	int ingress_err = 0, egress_err = 0;
+
+	/*
+	 * If the interface is gone, so are its attachments - just release
+	 * the resources tracking them.
+	 */
+	if (if_nametoindex(config->ifname) != (unsigned int)config->ifindex) {
+		if (config->xdp_prog) {
+			xdp_program__close(config->xdp_prog);
+			config->xdp_prog = NULL;
+		}
+		if (config->tcx_ingress_link_fd >= 0) {
+			close(config->tcx_ingress_link_fd);
+			config->tcx_ingress_link_fd = -1;
+		}
+		if (config->tcx_egress_link_fd >= 0) {
+			close(config->tcx_egress_link_fd);
+			config->tcx_egress_link_fd = -1;
+		}
+		return 0;
+	}
 
 	if (config->xdp_prog) {
 		ingress_err = xdp_detach(config->xdp_prog, config->ifindex,
@@ -2362,6 +2385,66 @@ static int handle_signalfd(int sigfd, struct output_context **out_ctx,
 	return 0;
 }
 
+/*
+ * Opens a netlink socket subscribed to link changes, used to detect when the
+ * monitored interface is removed. The kernel destroys the attached BPF
+ * programs together with the interface, so pping would otherwise keep running
+ * without receiving any events.
+ */
+static int init_netlink_socket(void)
+{
+	struct sockaddr_nl addr = { .nl_family = AF_NETLINK,
+				    .nl_groups = RTMGRP_LINK };
+	int fd, err;
+
+	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (fd < 0)
+		return -errno;
+
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr))) {
+		err = -errno;
+		close(fd);
+		return err;
+	}
+
+	return fd;
+}
+
+/* Returns -ENODEV if the monitored interface was removed, 0 if it is still
+ * around or a negative error code on failure. */
+static int handle_netlink_event(int nlfd, struct pping_config *config)
+{
+	bool removed = false;
+	struct nlmsghdr *nlh;
+	union {
+		struct nlmsghdr nlh;
+		char buf[4096];
+	} resp;
+	int len;
+
+	len = recv(nlfd, &resp, sizeof(resp), 0);
+	if (len < 0 && errno == ENOBUFS)
+		/* Lost some link events, so check the interface directly */
+		removed = if_nametoindex(config->ifname) !=
+			  (unsigned int)config->ifindex;
+	else if (len < 0)
+		return errno == EINTR ? 0 : -errno;
+
+	for (nlh = &resp.nlh; NLMSG_OK(nlh, len); nlh = NLMSG_NEXT(nlh, len)) {
+		if (nlh->nlmsg_type == RTM_DELLINK &&
+		    ((struct ifinfomsg *)NLMSG_DATA(nlh))->ifi_index ==
+			    config->ifindex)
+			removed = true;
+	}
+
+	if (!removed)
+		return 0;
+
+	fprintf(stderr, "Interface %s was removed, shutting down\n",
+		config->ifname);
+	return -ENODEV;
+}
+
 static int init_perfbuffer(struct bpf_object *obj, struct pping_config *config,
 			   struct perf_buffer **_pb)
 {
@@ -2595,7 +2678,7 @@ static int epoll_add_perf_buffer(int epfd, struct perf_buffer *pb)
 }
 
 static int epoll_add_events(int epfd, struct perf_buffer *pb, int sigfd,
-			    int pipe_rfd, int aggfd)
+			    int nlfd, int pipe_rfd, int aggfd)
 {
 	int err;
 
@@ -2603,6 +2686,15 @@ static int epoll_add_events(int epfd, struct perf_buffer *pb, int sigfd,
 				   sigfd);
 	if (err) {
 		fprintf(stderr, "Failed adding signalfd to epoll instace: %s\n",
+			get_libbpf_strerror(err));
+		return err;
+	}
+
+	err = epoll_add_event_type(epfd, nlfd, PPING_EPEVENT_TYPE_NETLINK,
+				   nlfd);
+	if (err) {
+		fprintf(stderr,
+			"Failed adding netlink socket to epoll instance: %s\n",
 			get_libbpf_strerror(err));
 		return err;
 	}
@@ -2675,6 +2767,11 @@ static int epoll_poll_events(int epfd, struct pping_config *config,
 			err = handle_pipefd(events[i].data.u64 &
 					    PPING_EPEVENT_MASK);
 			break;
+		case PPING_EPEVENT_TYPE_NETLINK:
+			err = handle_netlink_event(
+				events[i].data.u64 & PPING_EPEVENT_MASK,
+				config);
+			break;
 		default:
 			fprintf(stderr, "Warning: unexpected epoll data: %lu\n",
 				events[i].data.u64);
@@ -2693,7 +2790,7 @@ int main(int argc, char *argv[])
 	void *thread_err;
 	struct bpf_object *obj = NULL;
 	struct perf_buffer *pb = NULL;
-	int epfd, sigfd, aggfd;
+	int epfd, sigfd, nlfd, aggfd;
 
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_ingress_opts);
 	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_egress_opts);
@@ -2783,12 +2880,20 @@ int main(int argc, char *argv[])
 		goto cleanup_output;
 	}
 
+	// Detect when the monitored interface is removed
+	nlfd = init_netlink_socket();
+	if (nlfd < 0) {
+		fprintf(stderr, "Failed creating netlink socket: %s\n",
+			get_libbpf_strerror(nlfd));
+		goto cleanup_sigfd;
+	}
+
 	err = load_attach_bpfprogs(&obj, &config);
 	if (err) {
 		fprintf(stderr,
 			"Failed loading and attaching BPF programs in %s\n",
 			config.object_path);
-		goto cleanup_sigfd;
+		goto cleanup_nlfd;
 	}
 
 	err = setup_periodical_map_cleaning(obj, &config);
@@ -2824,7 +2929,8 @@ int main(int argc, char *argv[])
 		goto cleanup_aggfd;
 	}
 
-	err = epoll_add_events(epfd, pb, sigfd, config.clean_args.pipe_rfd, aggfd);
+	err = epoll_add_events(epfd, pb, sigfd, nlfd, config.clean_args.pipe_rfd,
+			       aggfd);
 	if (err) {
 		fprintf(stderr, "Failed adding events to epoll instace: %s\n",
 			get_libbpf_strerror(err));
@@ -2872,6 +2978,9 @@ cleanup_attached_progs:
 	detach_err = detach_bpfprogs(&config);
 
 	bpf_object__close(obj);
+
+cleanup_nlfd:
+	close(nlfd);
 
 cleanup_sigfd:
 	close(sigfd);
