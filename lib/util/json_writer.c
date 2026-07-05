@@ -113,7 +113,9 @@ void jsonw_destroy(json_writer_t **self_p)
 	json_writer_t *self = *self_p;
 
 	assert(self->depth == 0);
-	fputs("\n", self->out);
+	/* In line-delimited mode each object already ends with a newline */
+	if (!self->line_delimited)
+		fputs("\n", self->out);
 	fflush(self->out);
 	free(self);
 	*self_p = NULL;
