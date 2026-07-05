@@ -1,6 +1,6 @@
 [submodule "lib/libbpf"]
 	path = lib/libbpf
-	url = https://github.com/xdp-project/libbpf.git
+	url = https://github.com/libbpf/libbpf.git
 	ignore = dirty
 [submodule "lib/xdp-tools"]
 	path = lib/xdp-tools
