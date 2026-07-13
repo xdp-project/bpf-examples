@@ -1,0 +1,22 @@
+{
+	"name": "Go-ebpf-env",
+	"build": {"dockerfile": "Dockerfile"},
+
+	// Configure tool-specific properties.
+	"customizations": {
+		// Configure properties specific to VS Code.
+		"vscode": {
+			"settings": {},
+			"extensions": [
+				"streetsidesoftware.code-spell-checker",
+				"ms-vscode.cpptools-extension-pack",
+				"ms-vscode.cpptools",
+				"nicknickolaev.ebpf-assembly",
+				"golang.Go"
+			]
+		}
+	},
+
+	"runArgs": ["--network=host"],
+	"privileged": true
+}
