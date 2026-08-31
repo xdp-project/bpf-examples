@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 24.04 only ships bpftool inside linux-tools-<version>
+          - image: ubuntu:24.04
+            bpftool_packages: linux-tools-common linux-tools-generic
+          - image: ubuntu:26.04
+            bpftool_packages: bpftool
+    steps:
+      - name: Install build dependencies
+        # libc6-dev-i386 + gcc-multilib: clang -target bpf must find <asm/errno.h>
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            ca-certificates git gcc make libc6-dev m4 pkgconf clang llvm \
+            iproute2 \
+            ${{ matrix.bpftool_packages }} \
+            libelf-dev zlib1g-dev libpcap-dev libcap-dev libmnl-dev \
+            libc6-dev-i386 gcc-multilib
+      - name: Expose the real bpftool binary
+        # The /usr/sbin/bpftool wrapper from linux-tools-common keys off the running kernel and fails on CI runners
+        if: matrix.image == 'ubuntu:24.04'
+        run: ln -sf "$(find /usr/lib -type f -name bpftool | sort -V | tail -1)" /usr/local/bin/bpftool
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Build all examples
+        run: make
