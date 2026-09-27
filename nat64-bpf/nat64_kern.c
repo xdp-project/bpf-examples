@@ -336,7 +336,7 @@ static int rewrite_icmp(struct iphdr *iph, struct ipv6hdr *ip6h, struct __sk_buf
 	new_icmp6 = (void *)icmp;
 	icmp6 = *new_icmp6;
 
-	/* These translations are defined in RFC6145 section 4.2 */
+	/* These translations are defined in RFC 7915 section 4.2 */
 	switch (icmp->type) {
 	case ICMP_ECHO:
 		icmp6.icmp6_type = ICMPV6_ECHO_REQUEST;
@@ -370,8 +370,8 @@ static int rewrite_icmp(struct iphdr *iph, struct ipv6hdr *ip6h, struct __sk_buf
 			icmp6.icmp6_type = ICMPV6_PKT_TOOBIG;
 			icmp6.icmp6_code = 0;
 			mtu = bpf_ntohs(icmp->un.frag.mtu) + 20;
-			/* RFC6145 section 6, "second approach" - should not be
-			 * necessary, but might as well do this
+			/* RFC 7915 section 4.2: the MTU must not be set to a
+			 * value smaller than the minimum IPv6 MTU
 			 */
 			if (mtu < 1280)
 				mtu = 1280;
@@ -387,13 +387,17 @@ static int rewrite_icmp(struct iphdr *iph, struct ipv6hdr *ip6h, struct __sk_buf
 			return -1;
 		}
 		break;
+	case ICMP_TIME_EXCEEDED:
+		/* The codes are the same in ICMPv4 and ICMPv6 */
+		icmp6.icmp6_type = ICMPV6_TIME_EXCEED;
+		break;
 	case ICMP_PARAMETERPROB:
 		if (icmp->code == 1)
 			return -1;
 		icmp6.icmp6_type = ICMPV6_PARAMPROB;
 		icmp6.icmp6_code = ICMPV6_HDR_FIELD;
 		/* The pointer field not defined in the Linux header. This
-		 * translation is from Figure 3 of RFC6145.
+		 * translation is from Figure 3 of RFC 7915.
 		 */
 		switch (icmp->un.reserved[0]) {
 		case 0: /* version/IHL */
@@ -503,7 +507,7 @@ static int nat64_handle_v4(struct __sk_buff *skb, struct hdr_cursor *nh)
 	dst_hdr.nexthdr = iph->protocol;
 	dst_hdr.hop_limit = iph->ttl;
 	/* weird definition in ipv6hdr */
-	dst_hdr.priority = (iph->tos & 0x70) >> 4;
+	dst_hdr.priority = iph->tos >> 4;
 	dst_hdr.flow_lbl[0] = iph->tos << 4;
 	dst_hdr.payload_len = bpf_htons(bpf_ntohs(iph->tot_len) - iphdr_len);
 
@@ -656,7 +660,7 @@ static int rewrite_icmpv6(struct ipv6hdr *ip6h, struct __sk_buff *skb)
 	new_icmp = (void *)icmp6;
 	icmp = *new_icmp;
 
-	/* These translations are defined in RFC6145 section 5.2 */
+	/* These translations are defined in RFC 7915 section 5.2 */
 	switch (icmp6->icmp6_type) {
 	case ICMPV6_ECHO_REQUEST:
 		icmp.type = ICMP_ECHO;
@@ -700,7 +704,7 @@ static int rewrite_icmpv6(struct ipv6hdr *ip6h, struct __sk_buff *skb)
 			icmp.type = ICMP_PARAMETERPROB;
 			icmp.code = 0;
 			ptr = bpf_ntohl(icmp6->icmp6_pointer);
-			/* Figure 6 in RFC6145 - using if statements b/c of
+			/* Figure 6 in RFC 7915 - using if statements b/c of
 			 * range at the bottom
 			 */
 			if (ptr == 0 || ptr == 1)
@@ -834,6 +838,14 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	dst_hdr.tos = ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4);
 	dst_hdr.tot_len =
 		bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(dst_hdr));
+
+	/* RFC 7915 section 5.1: clear DF on packets of up to 1260 bytes */
+	if (bpf_ntohs(dst_hdr.tot_len) <= 1260) {
+        dst_hdr.frag_off = 0;
+        /* RFC 7915 says the fragmentation identifier should always be
+         * generated, but doing so for DF=1 packets is unecessary */
+        dst_hdr.id = (__u16)bpf_get_prandom_u32();
+    }
 
 	switch (dst_hdr.protocol) {
 	case IPPROTO_ICMPV6:
