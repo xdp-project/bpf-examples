@@ -839,6 +839,14 @@ static int nat64_handle_v6(struct __sk_buff *skb, struct hdr_cursor *nh)
 	dst_hdr.tot_len =
 		bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(dst_hdr));
 
+	/* RFC 7915 section 5.1: clear DF on packets of up to 1260 bytes */
+	if (bpf_ntohs(dst_hdr.tot_len) <= 1260) {
+        dst_hdr.frag_off = 0;
+        /* RFC 7915 says the fragmentation identifier should always be
+         * generated, but doing so for DF=1 packets is unecessary */
+        dst_hdr.id = (__u16)bpf_get_prandom_u32();
+    }
+
 	switch (dst_hdr.protocol) {
 	case IPPROTO_ICMPV6:
 		if (rewrite_icmpv6(ip6h, skb))
