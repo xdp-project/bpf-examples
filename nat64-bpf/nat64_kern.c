@@ -387,6 +387,10 @@ static int rewrite_icmp(struct iphdr *iph, struct ipv6hdr *ip6h, struct __sk_buf
 			return -1;
 		}
 		break;
+	case ICMP_TIME_EXCEEDED:
+		/* The codes are the same in ICMPv4 and ICMPv6 */
+		icmp6.icmp6_type = ICMPV6_TIME_EXCEED;
+		break;
 	case ICMP_PARAMETERPROB:
 		if (icmp->code == 1)
 			return -1;
